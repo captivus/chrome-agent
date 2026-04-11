@@ -107,10 +107,18 @@ echo "  GitHub release created"
 echo ""
 echo "=== Watching publish workflow ==="
 
-# Give GitHub a moment to trigger the workflow
-sleep 2
+# Poll for the workflow run (GitHub can take a few seconds to trigger it)
+RUN_ID=""
+for attempt in 1 2 3 4 5 6; do
+    sleep 5
+    RUN_ID=$(gh run list --workflow=publish.yml --limit=1 --json databaseId,createdAt --jq '.[0].databaseId')
+    if [ -n "$RUN_ID" ]; then
+        echo "  Found workflow run: $RUN_ID"
+        break
+    fi
+    echo "  Waiting for workflow to start (attempt $attempt/6)..."
+done
 
-RUN_ID=$(gh run list --workflow=publish.yml --limit=1 --json databaseId --jq '.[0].databaseId')
 if [ -n "$RUN_ID" ]; then
     gh run watch "$RUN_ID"
     echo ""
@@ -118,6 +126,6 @@ if [ -n "$RUN_ID" ]; then
     echo "  PyPI: https://pypi.org/project/chrome-agent/$VERSION/"
     echo "  GitHub: https://github.com/captivus/chrome-agent/releases/tag/$TAG"
 else
-    echo "  Could not find workflow run. Check manually:"
+    echo "  Could not find workflow run after 30s. Check manually:"
     echo "  https://github.com/captivus/chrome-agent/actions"
 fi
