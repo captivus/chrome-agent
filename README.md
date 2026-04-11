@@ -1,47 +1,58 @@
 # chrome-agent
 
-A CLI tool for AI agents to observe and interact with Chrome browsers via the Chrome DevTools Protocol (CDP).
+A CLI tool that gives AI coding agents the ability to observe and interact with Chrome browsers.
 
-Designed as a faster, lower-overhead alternative to browser MCP tools. Each command connects to a running Chrome instance, performs one action, and disconnects. No persistent server, no protocol negotiation, no bloated response formatting.
+Built as a replacement for browser MCP tools. Faster, lower token overhead, and supports something MCP tools can't do: multiple agents sharing the same browser instance.
+
+## Why this exists
+
+AI coding agents need to see and interact with browsers -- to test their code, debug automation, inspect page state. The standard approach (browser MCP tools) uses a persistent server with protocol negotiation and verbose response formatting. `chrome-agent` takes a different approach: each command is a standalone CLI call that connects to Chrome via the DevTools Protocol, does one thing, and disconnects. No server, no session state, no bloat.
+
+This also enables a workflow that MCP tools can't support: one process drives the browser (your automation code) while a separate agent observes the same browser to diagnose issues and improve the code.
 
 ## Installation
 
 ```bash
-# Install from PyPI
 uv tool install chrome-agent
+playwright install chromium
+```
 
-# Or add as a project dependency
+Or add to a project:
+
+```bash
 uv add chrome-agent
-
-# Install Playwright's Chromium browser (required once)
 uv run playwright install chromium
 ```
 
-## Quick Start
+## Two ways to use it
 
-### Launch and use a browser (drive mode)
+### Drive mode -- you control the browser
+
+Launch a browser and interact with it directly. This is the MCP replacement use case.
 
 ```bash
-# Launch a browser with CDP enabled
 chrome-agent launch &
-
-# Navigate and inspect
 chrome-agent navigate "https://example.com"
-chrome-agent text
-chrome-agent element "h1"
-chrome-agent screenshot /tmp/page.png
+chrome-agent text                        # Read page content
+chrome-agent element "h1"                # Inspect an element
+chrome-agent fill "#search" "query"      # Fill a form field
+chrome-agent click "#submit"             # Click a button
+chrome-agent screenshot /tmp/page.png    # Capture the screen
 ```
 
-### Observe an existing browser (attach mode)
+### Attach mode -- observe a running browser
 
-If your automation code launches Chromium with `--remote-debugging-port=9222`, you can connect to observe it:
+Your automation code launches a browser with `--remote-debugging-port=9222`. You connect to observe what the code is doing, diagnose failures, and figure out what to change.
 
 ```bash
-chrome-agent status       # Is the browser running?
-chrome-agent url          # What page is it on?
-chrome-agent screenshot   # What does it look like?
-chrome-agent element "#submit-btn"  # Why can't the code click this?
+chrome-agent status                      # Is the browser running?
+chrome-agent url                         # Where is it?
+chrome-agent element "#submit-btn"       # Why can't the code click this?
+chrome-agent eval "document.querySelectorAll('.error').length"
+chrome-agent screenshot                  # What does it look like?
 ```
+
+The feedback loop: **write code -> run it -> observe the browser -> diagnose -> modify code -> repeat.**
 
 ## Commands
 
@@ -49,29 +60,73 @@ chrome-agent element "#submit-btn"  # Why can't the code click this?
 chrome-agent [--port PORT] <command> [args...]
 ```
 
-**Observe:** `url`, `screenshot`, `snapshot`, `text`, `html`, `element`, `find`, `value`, `eval`, `cookies`, `tabs`, `wait`
+### Check browser status
 
-**Navigate:** `navigate`, `back`, `forward`, `reload`
+```
+status                Check if a browser is running on the CDP port
+launch                Launch a browser with CDP enabled
+                      [--fingerprint PATH] [--headless] [--no-pin-desktop]
+help                  Print command reference
+```
 
-**Interact:** `click`, `clickxy`, `fill`, `type`, `press`, `select`, `check`, `uncheck`, `hover`, `scroll`
+### Observe (read-only, always safe)
 
-**Meta:** `status`, `launch`, `close`, `viewport`, `help`
+```
+url                   Print current URL and page title
+screenshot [path]     Save a screenshot (default: /tmp/cdp-screenshot.png)
+snapshot              Print the ARIA accessibility tree
+text                  Print visible text content
+html [selector]       Print page HTML or a specific element's HTML
+element <selector>    Detailed element inspection (visibility, dimensions,
+                      attributes, position, disabled state)
+find <selector>       Count and list all matching elements
+value <selector>      Get an input element's current value
+eval <code>           Execute JavaScript and print the result
+cookies               List all cookies
+tabs                  List all open tabs/pages
+wait <target>         Wait for a selector, milliseconds, or load state
+```
 
-Run `chrome-agent help` for full command reference.
+### Navigate
 
-## For AI Agents
+```
+navigate <url>        Go to a URL
+back                  Browser back
+forward               Browser forward
+reload                Reload the page
+```
 
-See [INSTRUCTIONS.md](INSTRUCTIONS.md) for comprehensive agent instructions covering:
+### Interact
+
+```
+click <selector>      Click an element (JS fallback for hidden elements)
+fill <selector> <val> Fill a form field (clears first)
+type <selector> <txt> Type text character by character
+press <key>           Press a keyboard key (Enter, Escape, Tab, etc.)
+select <sel> <value>  Select a dropdown option
+check <selector>      Check a checkbox
+uncheck <selector>    Uncheck a checkbox
+hover <selector>      Hover over an element
+scroll <target>       Scroll to element, or scroll up/down
+clickxy <x> <y>       Click at page coordinates
+close                 Close the current page
+viewport <w> <h>      Resize the viewport
+```
+
+## For AI agents
+
+The primary user of this tool is an AI coding agent, not a human. See [INSTRUCTIONS.md](INSTRUCTIONS.md) for comprehensive agent instructions covering:
 
 - Drive mode vs attach mode mental model
-- The development feedback loop (write code -> observe browser -> fix code)
+- Safety rules for shared browser access
+- The development feedback loop
 - When to observe vs intervene
 - Command recipes for common tasks
 - Failure modes and recovery
 
 Include the contents of `INSTRUCTIONS.md` in your project's `CLAUDE.md` or agent instructions file.
 
-## Optional: Browser Fingerprinting
+## Browser fingerprinting (optional)
 
 For sites that detect automated browsers, launch with a fingerprint profile:
 
@@ -79,11 +134,11 @@ For sites that detect automated browsers, launch with a fingerprint profile:
 chrome-agent launch --fingerprint path/to/fingerprint.json
 ```
 
-The fingerprint JSON should contain:
+The fingerprint JSON overrides the browser's user agent, viewport, locale, timezone, and platform to match a real desktop browser:
 
 ```json
 {
-    "userAgent": "Mozilla/5.0 ...",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) ...",
     "platform": "Linux x86_64",
     "vendor": "Google Inc.",
     "language": "en-US",
@@ -92,7 +147,7 @@ The fingerprint JSON should contain:
 }
 ```
 
-Without `--fingerprint`, the browser launches with default settings and no anti-detection spoofing.
+Without `--fingerprint`, the browser launches with default Chromium settings.
 
 ## Requirements
 
