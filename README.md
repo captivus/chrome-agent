@@ -1,5 +1,9 @@
 # chrome-agent
 
+[![PyPI version](https://img.shields.io/pypi/v/chrome-agent)](https://pypi.org/project/chrome-agent/)
+[![Python versions](https://img.shields.io/pypi/pyversions/chrome-agent)](https://pypi.org/project/chrome-agent/)
+[![License](https://img.shields.io/pypi/l/chrome-agent)](https://github.com/captivus/chrome-agent/blob/main/LICENSE)
+
 A CLI tool that gives AI coding agents the ability to observe and interact with Chrome browsers.
 
 Built as a replacement for browser MCP tools. Faster, lower token overhead, and supports something MCP tools can't do: multiple agents sharing the same browser instance.
