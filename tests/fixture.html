@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>chrome-agent test fixture</title>
+    <style>
+        .hidden { display: none; }
+        .invisible { visibility: hidden; }
+        .scrollable { height: 200px; overflow-y: scroll; }
+        .tall-content { height: 2000px; }
+        #positioned-box { width: 100px; height: 50px; background: blue; }
+    </style>
+</head>
+<body>
+    <h1 id="heading">Test Page</h1>
+    <p id="paragraph">This is a test paragraph with known content.</p>
+
+    <a id="link" href="https://example.com">Example Link</a>
+
+    <form id="form">
+        <input id="text-input" type="text" value="initial" />
+        <input id="password-input" type="password" />
+        <textarea id="textarea">existing text</textarea>
+
+        <select id="dropdown">
+            <option value="a">Option A</option>
+            <option value="b">Option B</option>
+            <option value="c" selected>Option C</option>
+        </select>
+
+        <input id="checkbox-checked" type="checkbox" checked />
+        <input id="checkbox-unchecked" type="checkbox" />
+
+        <button id="click-button" type="button" onclick="document.getElementById('click-result').textContent = 'clicked'">
+            Click Me
+        </button>
+        <span id="click-result"></span>
+
+        <button id="disabled-button" type="button" disabled>Disabled</button>
+    </form>
+
+    <div id="hidden-div" class="hidden">Hidden content</div>
+    <div id="invisible-div" class="invisible">Invisible content</div>
+    <div id="positioned-box">Blue box</div>
+
+    <div id="scrollable" class="scrollable">
+        <div class="tall-content">
+            <p id="scroll-top">Top of scroll</p>
+            <p id="scroll-bottom" style="position: absolute; bottom: 0;">Bottom of scroll</p>
+        </div>
+    </div>
+
+    <script>
+        document.cookie = "test_cookie=hello123; path=/";
+    </script>
+</body>
+</html>
