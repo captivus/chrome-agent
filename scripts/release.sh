@@ -83,9 +83,13 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 echo "  Working tree is clean"
 
-# Tag doesn't already exist
+# Tag doesn't already exist (check both local and remote)
 if git tag --list "$TAG" | grep --quiet "$TAG"; then
-    echo "ERROR: Tag $TAG already exists"
+    echo "ERROR: Tag $TAG already exists locally"
+    exit 1
+fi
+if git ls-remote --tags origin 2>/dev/null | grep --quiet "refs/tags/$TAG"; then
+    echo "ERROR: Tag $TAG already exists on remote"
     exit 1
 fi
 echo "  Tag $TAG is available"
