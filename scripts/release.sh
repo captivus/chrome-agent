@@ -95,7 +95,10 @@ echo "  Building..."
 uv build --quiet 2>&1
 echo "  Build succeeded"
 
-# --- Dry run summary ---
+# --- Release notes preview ---
+
+# Find the previous tag to generate notes from
+PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 
 echo ""
 echo "=== Release plan: $PACKAGE_NAME $TAG ==="
@@ -109,6 +112,33 @@ echo "  6. Trigger publish workflow -> PyPI"
 echo ""
 echo "  PyPI: https://pypi.org/project/$PACKAGE_NAME/$VERSION/"
 echo "  GitHub: https://github.com/$REPO/releases/tag/$TAG"
+
+echo ""
+echo "=== Commits since ${PREV_TAG:-inception} ==="
+echo ""
+if [ -n "$PREV_TAG" ]; then
+    git log "${PREV_TAG}..HEAD" --oneline
+else
+    git log --oneline
+fi
+
+echo ""
+echo "=== Release notes preview ==="
+echo ""
+if [ -n "$PREV_TAG" ]; then
+    gh api "repos/$REPO/releases/generate-notes" \
+        --method POST \
+        --field tag_name="$TAG" \
+        --field previous_tag_name="$PREV_TAG" \
+        --field target_commitish="$(git rev-parse HEAD)" \
+        --jq '.body' 2>/dev/null || echo "(could not generate preview)"
+else
+    gh api "repos/$REPO/releases/generate-notes" \
+        --method POST \
+        --field tag_name="$TAG" \
+        --field target_commitish="$(git rev-parse HEAD)" \
+        --jq '.body' 2>/dev/null || echo "(could not generate preview -- first release)"
+fi
 
 if [ "$DRY_RUN" = true ]; then
     echo ""
