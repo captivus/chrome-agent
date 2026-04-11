@@ -1,6 +1,6 @@
 [project]
 name = "chrome-agent"
-version = "0.2.0"
+version = "0.2.1"
 description = "CLI tool for AI agents to observe and interact with Chrome via CDP"
 readme = "README.md"
 license = "MIT"
