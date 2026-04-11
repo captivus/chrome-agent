@@ -164,7 +164,7 @@ echo "  Updated pyproject.toml: $CURRENT_VERSION -> $VERSION"
 git add pyproject.toml
 # Include uv.lock if it changed from the version bump
 uv lock --quiet 2>/dev/null || true
-[ -f uv.lock ] && git add uv.lock
+git add uv.lock 2>/dev/null || true
 
 git commit --quiet -m "Release $TAG"
 echo "  Committed: Release $TAG"
