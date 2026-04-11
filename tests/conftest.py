@@ -31,7 +31,7 @@ def browser_session(event_loop):
         launch_browser(port=CDP_PORT, pin_to_desktop=True)
     )
     yield session
-    event_loop.run_until_complete(session.browser.close())
+    event_loop.run_until_complete(session.context.close())
     event_loop.run_until_complete(session.playwright.stop())
 
 

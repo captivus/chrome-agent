@@ -3,6 +3,11 @@
 Launches a Playwright Chromium browser with CDP enabled. Optionally
 applies a fingerprint profile to make the browser appear as a real
 desktop browser.
+
+Uses launch_persistent_context() so the page lives in the browser's
+default context -- visible to any CDP client reconnecting via
+connect_over_cdp(). Playwright's browser.new_context() creates an
+isolated context that is invisible to CDP reconnections.
 """
 
 import asyncio
@@ -10,9 +15,10 @@ import json
 import logging
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 
-from playwright.async_api import Browser, Page, Playwright, async_playwright
+from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +37,26 @@ class BrowserFingerprint:
 
 @dataclass
 class BrowserSession:
-    """Handle to a launched browser session."""
+    """Handle to a launched browser session.
+
+    The context is a persistent browser context -- calling close()
+    on it shuts down the browser process.
+    """
 
     playwright: Playwright
-    browser: Browser
+    context: BrowserContext
     page: Page
+
+    @property
+    def browser(self) -> BrowserContext:
+        """Backwards-compatible alias.
+
+        Persistent contexts don't have a separate Browser object.
+        The context itself has a close() method that shuts down
+        the browser, so existing code like session.browser.close()
+        continues to work.
+        """
+        return self.context
 
 
 async def load_fingerprint(*, path: str) -> BrowserFingerprint:
@@ -74,6 +95,9 @@ async def launch_browser(
 ) -> BrowserSession:
     """Launch a Chromium browser with CDP enabled.
 
+    Uses a persistent context so the page is in the browser's default
+    context and visible to CDP reconnections (chrome-agent attach mode).
+
     Args:
         port: CDP remote debugging port.
         fingerprint: Optional fingerprint for anti-detection. If None,
@@ -92,12 +116,7 @@ async def launch_browser(
         f"--class={wm_class}",
     ]
 
-    browser = await playwright.chromium.launch(
-        headless=headless,
-        args=launch_args,
-    )
-
-    # Build context options
+    # Build context options from fingerprint
     context_kwargs = {}
     if fingerprint:
         context_kwargs.update(
@@ -107,7 +126,16 @@ async def launch_browser(
             timezone_id=fingerprint.timezone,
         )
 
-    context = await browser.new_context(**context_kwargs)
+    # Use a temp directory for the user data dir. Persistent context
+    # requires one, but we don't need state to persist across runs.
+    user_data_dir = tempfile.mkdtemp(prefix="chrome-agent-")
+
+    context = await playwright.chromium.launch_persistent_context(
+        user_data_dir=user_data_dir,
+        headless=headless,
+        args=launch_args,
+        **context_kwargs,
+    )
 
     # Apply anti-detection init script if fingerprinted
     if fingerprint:
@@ -130,11 +158,12 @@ async def launch_browser(
             }};
         """)
 
-    page = await context.new_page()
+    # Persistent context starts with one page
+    page = context.pages[0] if context.pages else await context.new_page()
 
     session = BrowserSession(
         playwright=playwright,
-        browser=browser,
+        context=context,
         page=page,
     )
 

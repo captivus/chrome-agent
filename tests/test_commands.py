@@ -508,3 +508,29 @@ class TestConnection:
         from chrome_agent.errors import BrowserConnectionError
         with pytest.raises(BrowserConnectionError):
             run(event_loop, connect(port=9444))
+
+    def test_connect_finds_launched_page(self, event_loop, browser_session, fixture_url):
+        """Reconnecting via connect() must find the page that launch_browser() created.
+
+        This is the core contract of the drive/attach model: launch a browser,
+        navigate to a URL, then reconnect from a separate CDP connection and
+        find the same page -- not about:blank.
+        """
+        from chrome_agent.connection import connect, disconnect
+
+        # Navigate the launched page to a known URL
+        run(event_loop, browser_session.page.goto(fixture_url))
+        run(event_loop, browser_session.page.wait_for_load_state("load"))
+
+        # Reconnect via CDP (simulates a separate chrome-agent invocation)
+        pw, browser, page = run(event_loop, connect(port=9333))
+        try:
+            assert page.url != "about:blank", (
+                "connect() returned about:blank -- the launched page is in "
+                "a non-default context invisible to CDP reconnection"
+            )
+            # The page should be navigable and functional
+            title = run(event_loop, page.title())
+            assert title, "Reconnected page should have a title"
+        finally:
+            run(event_loop, disconnect(pw=pw))
