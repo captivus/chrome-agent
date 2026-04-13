@@ -9,6 +9,19 @@ class ChromeAgentError(Exception):
     """Base exception for all chrome-agent errors."""
 
 
+class CDPError(ChromeAgentError):
+    """A CDP protocol error returned by Chrome.
+
+    Raised when Chrome responds to a command with an error (e.g.,
+    invalid parameters, node not found, etc.).
+    """
+
+    def __init__(self, code: int, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(f"CDP error {code}: {message}")
+
+
 class BrowserConnectionError(ChromeAgentError):
     """Cannot connect to a browser via CDP.
 

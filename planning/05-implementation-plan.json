@@ -1,0 +1,117 @@
+{
+  "metadata": {
+    "source_dependency_graph": "planning/04-dependency-graph.json",
+    "source_feature_inventory": "planning/02-feature-inventory.md",
+    "feature_count": 8,
+    "phase_count": 3,
+    "created": "2026-04-13"
+  },
+  "critical_path": ["CDP-01", "CDP-02", "CLI-01"],
+  "phases": {
+    "1": {
+      "features": ["CDP-01", "CDP-03", "BRW-02"],
+      "order": ["CDP-01", "BRW-02", "CDP-03"],
+      "gate_satisfied": false,
+      "gate_date": null
+    },
+    "2": {
+      "features": ["CDP-02", "GEN-01", "BRW-01", "BRW-03"],
+      "order": ["CDP-02", "BRW-01", "GEN-01", "BRW-03"],
+      "gate_satisfied": false,
+      "gate_date": null
+    },
+    "3": {
+      "features": ["CLI-01"],
+      "order": ["CLI-01"],
+      "gate_satisfied": false,
+      "gate_date": null
+    }
+  },
+  "features": {
+    "CDP-01": {
+      "name": "CDP WebSocket Client",
+      "category": "Protocol Client",
+      "phase": 1,
+      "status": "in progress",
+      "completion_date": null,
+      "notes": ""
+    },
+    "CDP-02": {
+      "name": "Session Mode",
+      "category": "Protocol Client",
+      "phase": 2,
+      "status": "not started",
+      "completion_date": null,
+      "notes": ""
+    },
+    "CDP-03": {
+      "name": "Protocol Discovery",
+      "category": "Protocol Client",
+      "phase": 1,
+      "status": "not started",
+      "completion_date": null,
+      "notes": ""
+    },
+    "GEN-01": {
+      "name": "Typed Protocol Bindings",
+      "category": "Code Generation",
+      "phase": 2,
+      "status": "not started",
+      "completion_date": null,
+      "notes": ""
+    },
+    "BRW-01": {
+      "name": "Browser Launch",
+      "category": "Browser Management",
+      "phase": 2,
+      "status": "not started",
+      "completion_date": null,
+      "notes": ""
+    },
+    "BRW-02": {
+      "name": "Browser Status",
+      "category": "Browser Management",
+      "phase": 1,
+      "status": "not started",
+      "completion_date": null,
+      "notes": ""
+    },
+    "BRW-03": {
+      "name": "Fingerprint Profiles",
+      "category": "Browser Management",
+      "phase": 2,
+      "status": "not started",
+      "completion_date": null,
+      "notes": ""
+    },
+    "CLI-01": {
+      "name": "One-Shot Commands",
+      "category": "Command-Line Interface",
+      "phase": 3,
+      "status": "not started",
+      "completion_date": null,
+      "notes": ""
+    }
+  },
+  "execution_strategy": {
+    "phase_gate_policy": "Strict gates. All features complete, all tests passing, no regressions in prior phases, integration verified. No partial phase completion.",
+    "feature_selection_policy": "Follow recommended order. Skip blocked features and return later. Prioritize critical-path features at risk. Deviate when learning suggests reordering.",
+    "risks": {
+      "BRW-01": {
+        "level": "high",
+        "why": "Platform-specific binary discovery, subprocess lifecycle, window management",
+        "mitigation": "Implement early in Phase 2. Test on target platform first."
+      },
+      "CDP-02": {
+        "level": "medium",
+        "why": "stdin/stdout protocol with concurrent event delivery, SIGTERM handling, async coordination",
+        "mitigation": "On critical path, built first in Phase 2. REPL prototype provides reference implementation."
+      },
+      "GEN-01": {
+        "level": "medium",
+        "why": "Code generator must handle all CDP type variations across 50 domains",
+        "mitigation": "Test generated output against real browser. Start with key domains, expand."
+      }
+    }
+  }
+}
