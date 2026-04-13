@@ -48,7 +48,7 @@
       "name": "Protocol Discovery",
       "category": "Protocol Client",
       "phase": 1,
-      "status": "not started",
+      "status": "in progress",
       "completion_date": null,
       "notes": ""
     },
@@ -72,9 +72,9 @@
       "name": "Browser Status",
       "category": "Browser Management",
       "phase": 1,
-      "status": "in progress",
-      "completion_date": null,
-      "notes": ""
+      "status": "complete",
+      "completion_date": "2026-04-13",
+      "notes": "Pre-existing code, added validation tests, 4/4 pass"
     },
     "BRW-03": {
       "name": "Fingerprint Profiles",
