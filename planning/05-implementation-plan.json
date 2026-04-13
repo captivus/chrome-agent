@@ -32,9 +32,9 @@
       "name": "CDP WebSocket Client",
       "category": "Protocol Client",
       "phase": 1,
-      "status": "in progress",
-      "completion_date": null,
-      "notes": ""
+      "status": "complete",
+      "completion_date": "2026-04-13",
+      "notes": "First-iteration convergence, 14/14 tests pass"
     },
     "CDP-02": {
       "name": "Session Mode",
@@ -72,7 +72,7 @@
       "name": "Browser Status",
       "category": "Browser Management",
       "phase": 1,
-      "status": "not started",
+      "status": "in progress",
       "completion_date": null,
       "notes": ""
     },
