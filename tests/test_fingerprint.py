@@ -47,7 +47,7 @@ def fingerprinted_browser(profile_path):
     loop = asyncio.new_event_loop()
     result = loop.run_until_complete(
         launch_browser(
-            port=FP_PORT,
+            port_override=FP_PORT,
             fingerprint=profile_path,
             headless=True,
             pin_to_desktop=False,
@@ -56,10 +56,7 @@ def fingerprinted_browser(profile_path):
 
     yield result
 
-    # Terminate the fingerprint guard daemon
-    if result.fingerprint_guard is not None:
-        result.fingerprint_guard.terminate()
-        result.fingerprint_guard.wait(timeout=5)
+    # Note: fingerprint_guard is now internal to launch_browser, not on InstanceInfo
     try:
         os.kill(result.pid, signal.SIGTERM)
     except ProcessLookupError:

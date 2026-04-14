@@ -12,23 +12,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
 
 from .connection import check_cdp_port
+from .registry import InstanceInfo, allocate_port, register, cleanup
+from .registry import _load_registry, _resolve_path
+from .utils import process_is_running
 
 logger = logging.getLogger(__name__)
 
 _SESSION_ROOT = "/tmp/chrome-agent"
-
-
-@dataclass
-class LaunchResult:
-    """Result of launching a browser."""
-    pid: int
-    port: int
-    browser_version: str
-    user_data_dir: str
-    fingerprint_guard: object | None = None  # CDPClient kept alive for fingerprint
 
 
 class BrowserNotFoundError(Exception):
@@ -78,40 +70,44 @@ def _platform_candidates() -> list[str]:
 
 
 async def launch_browser(
-    port: int = 9222,
+    port_override: int | None = None,
     fingerprint: str | None = None,
     headless: bool = False,
     pin_to_desktop: bool = True,
-) -> LaunchResult:
-    """Launch Chrome with CDP enabled.
+    working_dir: str | None = None,
+    registry_path: str | None = None,
+) -> InstanceInfo:
+    """Launch Chrome with CDP enabled and register as a named instance.
 
-    Finds the Chrome binary, starts it with --remote-debugging-port,
-    waits for the port to be ready, and optionally applies a fingerprint
-    profile.
+    Finds the Chrome binary, auto-allocates a port (or uses port_override),
+    starts Chrome with --remote-debugging-port, waits for the port to be
+    ready, registers the instance in the registry, and optionally applies
+    a fingerprint profile.
 
     Session data is stored under /tmp/chrome-agent/session-<id>/.
     The browser continues running after this function returns.
 
+    Returns InstanceInfo with name, port, pid, browser_version, user_data_dir.
+
     Raises BrowserNotFoundError if Chrome is not installed.
-    Raises RuntimeError if the port is already in use.
+    Raises RuntimeError if no ports are available.
     Raises TimeoutError if the browser doesn't start within 30 seconds.
     """
-    # Phase 0: Check if port is already occupied
-    existing = check_cdp_port(port=port)
-    if existing.listening:
-        version = existing.browser_version or "unknown"
-        raise RuntimeError(
-            f"Port {port} is already in use ({version}). "
-            f"Kill the existing browser with: kill $(lsof -ti:{port}) "
-            f"or use a different port with --port."
-        )
 
     # Phase 1: Find Chrome binary
     binary = find_chrome_binary()
     if binary is None:
         raise BrowserNotFoundError(searched_paths=_platform_candidates())
 
-    # Phase 2: Prepare launch arguments
+    # Phase 2: Allocate port
+    if port_override is not None:
+        port = port_override
+    else:
+        reg_path = _resolve_path(registry_path)
+        registry_data = _load_registry(reg_path)
+        port = allocate_port(registry=registry_data)
+
+    # Phase 3: Prepare launch arguments
     os.makedirs(_SESSION_ROOT, exist_ok=True)
     session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
 
@@ -136,7 +132,7 @@ async def launch_browser(
         args.append(f"--lang={fp_profile.locale}")
         env["TZ"] = fp_profile.timezone
 
-    # Phase 3: Launch subprocess
+    # Phase 4: Launch subprocess
     process = subprocess.Popen(
         args,
         stdout=subprocess.DEVNULL,
@@ -145,7 +141,7 @@ async def launch_browser(
     )
     logger.info("Launched Chrome PID %d on port %d", process.pid, port)
 
-    # Phase 4: Wait for CDP port to be ready
+    # Phase 5: Wait for CDP port to be ready
     deadline = asyncio.get_event_loop().time() + 30.0
     status = None
     while asyncio.get_event_loop().time() < deadline:
@@ -165,7 +161,7 @@ async def launch_browser(
         process.kill()
         raise TimeoutError("Browser did not start within 30 seconds")
 
-    # Phase 5: Spawn fingerprint guard daemon if fingerprint is provided.
+    # Phase 6: Spawn fingerprint guard daemon if fingerprint is provided.
     # The guard is a background process that holds a CDP connection alive
     # with the init script registered. It must run as a separate process
     # so it survives the caller exiting (fire-and-forget launch model).
@@ -175,44 +171,61 @@ async def launch_browser(
         fingerprint_guard = spawn_fingerprint_guard(port=port, profile=fp_profile)
         await asyncio.sleep(2)  # allow guard to connect and register init script
 
-    # Phase 6: Pin to desktop (Linux/X11, best-effort)
+    # Phase 7: Pin to desktop (Linux/X11, best-effort)
     if pin_to_desktop and not headless:
         await _move_to_launching_desktop(pid=process.pid)
 
-    return LaunchResult(
+    # Phase 8: Register in the instance registry
+    if working_dir is None:
+        working_dir = os.getcwd()
+
+    instance_info = register(
+        working_dir=working_dir,
         pid=process.pid,
-        port=port,
         browser_version=status.browser_version or "unknown",
         user_data_dir=session_dir,
-        fingerprint_guard=fingerprint_guard,
+        port_override=port,
+        registry_path=registry_path,
     )
 
+    return instance_info
 
-def cleanup_sessions() -> None:
-    """Remove stale session directories under /tmp/chrome-agent/.
 
-    Removes directories that don't have a running Chrome process
-    (checks Chrome's SingletonLock file and whether the PID is alive).
+def cleanup_sessions(registry_path: str | None = None) -> list[str]:
+    """Remove stale instances and their session directories.
+
+    Delegates to the Instance Registry's cleanup() which removes stale
+    registry entries and their session directories. Also removes any
+    orphaned session directories under /tmp/chrome-agent/ that don't
+    have a running Chrome process (for backward compatibility with
+    pre-registry session directories).
+
+    Returns the list of removed instance names from the registry.
     """
-    if not os.path.isdir(_SESSION_ROOT):
-        return
+    # Registry cleanup (iteration 2)
+    removed = cleanup(registry_path=registry_path)
 
-    for entry in os.listdir(_SESSION_ROOT):
-        session_dir = os.path.join(_SESSION_ROOT, entry)
-        if not os.path.isdir(session_dir):
-            continue
+    # Legacy cleanup: remove session dirs not tracked by the registry
+    if os.path.isdir(_SESSION_ROOT):
+        for entry in os.listdir(_SESSION_ROOT):
+            session_dir = os.path.join(_SESSION_ROOT, entry)
+            if not os.path.isdir(session_dir):
+                continue
+            # Skip the registry file itself
+            if entry == "registry.json" or entry.endswith(".tmp"):
+                continue
 
-        lock_file = os.path.join(session_dir, "SingletonLock")
-        if not os.path.exists(lock_file) and not os.path.islink(lock_file):
-            # No lock file -- safe to remove
-            logger.info("Removing stale session directory: %s", session_dir)
-            shutil.rmtree(session_dir, ignore_errors=True)
-        else:
-            # Lock file exists -- check if the process is alive
-            pid = _read_lock_pid(lock_file=lock_file)
-            if pid is not None and not _process_is_running(pid=pid):
-                logger.info("Removing stale session directory (dead PID %d): %s", pid, session_dir)
+            lock_file = os.path.join(session_dir, "SingletonLock")
+            if not os.path.exists(lock_file) and not os.path.islink(lock_file):
+                logger.info("Removing orphaned session directory: %s", session_dir)
                 shutil.rmtree(session_dir, ignore_errors=True)
+            else:
+                pid = _read_lock_pid(lock_file=lock_file)
+                if pid is not None and not process_is_running(pid=pid):
+                    logger.info("Removing orphaned session directory (dead PID %d): %s", pid, session_dir)
+                    shutil.rmtree(session_dir, ignore_errors=True)
+
+    return removed
 
 
 def _read_lock_pid(lock_file: str) -> int | None:
@@ -234,12 +247,12 @@ def _read_lock_pid(lock_file: str) -> int | None:
 
 
 def _process_is_running(pid: int) -> bool:
-    """Check if a process with the given PID is still running."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        return False
+    """Check if a process with the given PID is still running.
+
+    Legacy wrapper -- delegates to the shared utility in utils.py.
+    Kept for backward compatibility with any code importing from launcher.
+    """
+    return process_is_running(pid=pid)
 
 
 async def _move_to_launching_desktop(pid: int) -> None:

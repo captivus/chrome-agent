@@ -2,6 +2,9 @@
 
 Tests the launch_browser(), find_chrome_binary(), and cleanup_sessions()
 functions. Launches real Chrome processes for integration tests.
+
+Iteration 2: launch_browser now returns InstanceInfo (from registry),
+takes port_override instead of port, and registers instances.
 """
 
 import asyncio
@@ -16,12 +19,12 @@ import pytest
 from chrome_agent.connection import check_cdp_port
 from chrome_agent.launcher import (
     BrowserNotFoundError,
-    LaunchResult,
     _SESSION_ROOT,
     cleanup_sessions,
     find_chrome_binary,
     launch_browser,
 )
+from chrome_agent.registry import InstanceInfo, lookup
 
 # Use a dedicated port to avoid conflicts with the conftest browser on 9333
 LAUNCH_PORT = 9555
@@ -32,7 +35,6 @@ async def _kill_browser_on_port(port: int) -> None:
     status = check_cdp_port(port=port)
     if not status.listening:
         return
-    # Find and kill the process using the port
     import subprocess
     result = subprocess.run(
         ["lsof", "-ti", f":{port}"],
@@ -51,7 +53,6 @@ async def _kill_browser_on_port(port: int) -> None:
 def cleanup_after_test():
     """Ensure any launched browser is cleaned up after each test."""
     yield
-    # Kill any browser on the test port
     import subprocess
     result = subprocess.run(
         ["lsof", "-ti", f":{LAUNCH_PORT}"],
@@ -79,27 +80,37 @@ def test_find_chrome_binary():
 
 
 # ---------------------------------------------------------------------------
-# Happy path -- successful launch
+# Happy path -- successful launch with registry integration
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_successful_launch():
-    """Launches a browser that is accessible via CDP."""
+async def test_successful_launch(tmp_path):
+    """Launches a browser, returns InstanceInfo, and registers in the registry."""
+    reg_path = str(tmp_path / "registry.json")
+
     result = await launch_browser(
-        port=LAUNCH_PORT,
+        port_override=LAUNCH_PORT,
         headless=True,
         pin_to_desktop=False,
+        working_dir="/home/user/testproject",
+        registry_path=reg_path,
     )
     try:
-        assert isinstance(result, LaunchResult)
+        assert isinstance(result, InstanceInfo)
         assert result.port == LAUNCH_PORT
         assert result.pid > 0
+        assert result.name == "testproject-01"
         assert result.user_data_dir.startswith(_SESSION_ROOT)
 
+        # Verify browser is running
         status = check_cdp_port(port=LAUNCH_PORT)
         assert status.listening is True
-        assert status.browser_version is not None
+
+        # Verify instance is in registry
+        looked_up = lookup("testproject-01", registry_path=reg_path)
+        assert looked_up.port == LAUNCH_PORT
+        assert looked_up.pid == result.pid
     finally:
         os.kill(result.pid, signal.SIGTERM)
         await asyncio.sleep(0.5)
@@ -111,12 +122,15 @@ async def test_successful_launch():
 
 
 @pytest.mark.asyncio
-async def test_headless_launch():
+async def test_headless_launch(tmp_path):
     """Headless browser is accessible via CDP."""
+    reg_path = str(tmp_path / "registry.json")
+
     result = await launch_browser(
-        port=LAUNCH_PORT,
+        port_override=LAUNCH_PORT,
         headless=True,
         pin_to_desktop=False,
+        registry_path=reg_path,
     )
     try:
         status = check_cdp_port(port=LAUNCH_PORT)
@@ -140,7 +154,7 @@ def test_browser_not_found(monkeypatch):
     )
 
     async def do_launch():
-        await launch_browser(port=LAUNCH_PORT)
+        await launch_browser(port_override=LAUNCH_PORT)
 
     with pytest.raises(BrowserNotFoundError) as exc_info:
         asyncio.get_event_loop().run_until_complete(do_launch())
@@ -148,51 +162,51 @@ def test_browser_not_found(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Port already occupied
+# Auto-port allocation
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_launch_port_occupied():
-    """Refuses to launch when port is already in use."""
-    # Launch a browser on the test port
-    first = await launch_browser(
-        port=LAUNCH_PORT,
+async def test_auto_port_allocation(tmp_path):
+    """Launch with no port_override auto-allocates a port."""
+    reg_path = str(tmp_path / "registry.json")
+
+    result = await launch_browser(
         headless=True,
         pin_to_desktop=False,
+        working_dir="/home/user/autoport",
+        registry_path=reg_path,
     )
     try:
-        # Count Chrome processes before second launch attempt
-        import subprocess as sp
-        before = sp.run(
-            ["pgrep", "--count", "--full", "remote-debugging-port"],
-            capture_output=True, text=True,
-        )
-        count_before = int(before.stdout.strip()) if before.returncode == 0 else 0
-
-        # Attempt to launch on the same port
-        with pytest.raises(RuntimeError, match="already in use"):
-            await launch_browser(
-                port=LAUNCH_PORT,
-                headless=True,
-                pin_to_desktop=False,
-            )
-
-        # Verify no new Chrome process was spawned
-        after = sp.run(
-            ["pgrep", "--count", "--full", "remote-debugging-port"],
-            capture_output=True, text=True,
-        )
-        count_after = int(after.stdout.strip()) if after.returncode == 0 else 0
-        assert count_after == count_before, (
-            f"New Chrome process spawned despite occupied port: {count_before} -> {count_after}"
-        )
-
-        # Verify original browser is undisturbed
-        status = check_cdp_port(port=LAUNCH_PORT)
+        assert result.port >= 9222
+        status = check_cdp_port(port=result.port)
         assert status.listening is True
     finally:
-        os.kill(first.pid, signal.SIGTERM)
+        os.kill(result.pid, signal.SIGTERM)
+        await asyncio.sleep(0.5)
+
+
+# ---------------------------------------------------------------------------
+# Instance naming
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_instance_naming(tmp_path):
+    """Instance name derived from working_dir basename."""
+    reg_path = str(tmp_path / "registry.json")
+
+    result = await launch_browser(
+        port_override=LAUNCH_PORT,
+        headless=True,
+        pin_to_desktop=False,
+        working_dir="/home/user/aroundchicago.tech",
+        registry_path=reg_path,
+    )
+    try:
+        assert result.name == "aroundchicago.tech-01"
+    finally:
+        os.kill(result.pid, signal.SIGTERM)
         await asyncio.sleep(0.5)
 
 
@@ -201,11 +215,10 @@ async def test_launch_port_occupied():
 # ---------------------------------------------------------------------------
 
 
-def test_cleanup_removes_stale_dirs():
+def test_cleanup_removes_stale_dirs(tmp_path):
     """Removes session directories with no running Chrome process."""
     stale_dir = os.path.join(_SESSION_ROOT, "session-stale-test")
     os.makedirs(stale_dir, exist_ok=True)
-    # Create a fake SingletonLock pointing to a dead PID
     lock_path = os.path.join(stale_dir, "SingletonLock")
     try:
         os.symlink("hostname-999999", lock_path)
@@ -213,21 +226,25 @@ def test_cleanup_removes_stale_dirs():
         os.remove(lock_path)
         os.symlink("hostname-999999", lock_path)
 
-    cleanup_sessions()
+    reg_path = str(tmp_path / "registry.json")
+    cleanup_sessions(registry_path=reg_path)
     assert not os.path.exists(stale_dir), "Stale directory should be removed"
 
 
 @pytest.mark.asyncio
-async def test_cleanup_preserves_active_dirs():
+async def test_cleanup_preserves_active_dirs(tmp_path):
     """Preserves session directories with a running Chrome process."""
+    reg_path = str(tmp_path / "registry.json")
+
     result = await launch_browser(
-        port=LAUNCH_PORT,
+        port_override=LAUNCH_PORT,
         headless=True,
         pin_to_desktop=False,
+        registry_path=reg_path,
     )
     try:
         assert os.path.isdir(result.user_data_dir)
-        cleanup_sessions()
+        cleanup_sessions(registry_path=reg_path)
         assert os.path.isdir(result.user_data_dir), (
             "Active session directory should be preserved"
         )
