@@ -10,6 +10,10 @@ BRW-01: Browser Launch
 
 As an AI agent, I want to launch a Chrome browser with CDP enabled so that I can connect to it and control it through the protocol, without needing to manually find and start Chrome with the right flags.
 
+### Iteration 2 Updates
+
+As an AI agent, I want the browser launch to automatically allocate a free port and register the instance by name, so that I can launch multiple browsers without manually tracking ports and identify each instance by a human-readable name derived from my working directory.
+
 ## 3. Implementation Contract
 
 ### Level 1 -- Plain English
@@ -18,28 +22,33 @@ This feature finds the Chrome or Chromium binary on the system, launches it as a
 
 The binary discovery searches platform-specific standard paths. On Linux, it looks for google-chrome, chromium-browser, and chromium in standard locations. On macOS, it looks in the Applications directory. On Windows, it looks in Program Files. If no binary is found, it fails with a helpful error listing the paths it searched.
 
-The browser is launched with a temporary user data directory (so it doesn't conflict with the user's normal Chrome profile), with the automation-detection flag disabled, and with remote debugging on the requested port.
+The browser is launched with a temporary user data directory (so it doesn't conflict with the user's normal Chrome profile), with remote debugging on the requested port, and with flags to suppress first-run prompts and default browser checks.
 
 After starting the subprocess, the feature polls the CDP port (using BRW-02's check_cdp_port) until the browser is ready to accept connections, then returns the browser version.
 
 If a fingerprint profile is provided, it is applied after launch via BRW-03.
 
-On Linux with X11, the browser window can optionally be moved to the virtual desktop where the launching terminal is, so the browser appears on the same workspace as the agent. This requires xdotool and is silently skipped if unavailable.
+On Linux with X11, the browser window can optionally be moved to the virtual desktop where the launching terminal is, so the browser appears on the same workspace as the agent. This uses PID-based window search via xdotool and is silently skipped if unavailable.
+
+#### Iteration 2 Updates
+
+After the browser process starts and the CDP port is confirmed ready, launch registers the instance with the Instance Registry (BRW-04). The registry auto-allocates a port by scanning from 9222 upward unless `--port` is provided as an explicit override. The instance receives a name derived from the current working directory basename (e.g., `aroundchicago.tech-01`), with the registry managing naming, auto-increment, and storage.
+
+When stdout is not a TTY, launch returns structured JSON output: `{"name": "aroundchicago.tech-01", "port": 9222, "pid": 58469, "browser_version": "Chrome/147"}`. When stdout is a TTY, it prints formatted text as before.
 
 ### Level 2 -- Logic Flow (INPUT / LOGIC / OUTPUT)
 
 **INPUT:**
 
-- `port`: integer, default 9222 -- CDP remote debugging port
+- `port_override`: integer or None -- explicit CDP port override. When None, the registry auto-allocates a port starting from 9222.
 - `fingerprint`: string or None -- path to a fingerprint profile JSON file
 - `headless`: bool, default False -- run in headless mode
-- `wm_class`: string, default "chrome-agent" -- X11 window class name (for desktop pinning)
 - `pin_to_desktop`: bool, default True -- move browser to launching terminal's desktop (Linux/X11 only)
 
 **LOGIC:**
 
 ```
-launch_browser(port, fingerprint, headless, wm_class, pin_to_desktop):
+launch_browser(port_override, fingerprint, headless, pin_to_desktop):
     // Phase 1: Find Chrome binary
     binary = find_chrome_binary()
     if binary is None:
@@ -49,12 +58,22 @@ launch_browser(port, fingerprint, headless, wm_class, pin_to_desktop):
     root_dir = "/tmp/chrome-agent"
     ensure_directory_exists(root_dir)
     session_dir = create_subdirectory(root_dir, prefix="session-")
+
+    // Port allocation flow: we need the port before launching Chrome (for
+    // --remote-debugging-port), so we allocate it here via the registry.
+    // After launch succeeds, we pass the already-allocated port as
+    // port_override to registry.register(), which uses it directly without
+    // re-scanning. This means allocate_port() is called once, before launch,
+    // and register() receives the result.
+    registry_data = registry.load_registry()
+    port = port_override if port_override is not None else registry.allocate_port(registry=registry_data)
+
     args = [
         binary,
         "--remote-debugging-port={port}",
-        "--disable-blink-features=AutomationControlled",
         "--user-data-dir={session_dir}",
-        "--class={wm_class}",
+        "--no-first-run",
+        "--no-default-browser-check",
     ]
     if headless:
         args.append("--headless=new")
@@ -73,21 +92,27 @@ launch_browser(port, fingerprint, headless, wm_class, pin_to_desktop):
     else:
         raise TimeoutError("Browser did not start within 30 seconds")
 
-    // Phase 5: Apply fingerprint if provided
+    // Phase 5: Register with Instance Registry
+    // Pass the already-allocated port as port_override so register() uses it
+    // directly without re-scanning for available ports.
+    instance = registry.register(
+        working_dir=get_current_working_directory(),
+        pid=process.pid,
+        browser_version=status.browser_version,
+        port_override=port,
+        user_data_dir=session_dir,
+    )
+
+    // Phase 6: Apply fingerprint if provided
     if fingerprint is not None:
         profile = load_fingerprint(path=fingerprint)
         apply_fingerprint(port=port, profile=profile)
 
-    // Phase 6: Pin to desktop (Linux/X11, best-effort)
+    // Phase 7: Pin to desktop (Linux/X11, best-effort)
     if pin_to_desktop:
-        move_to_launching_desktop(wm_class=wm_class)
+        move_to_launching_desktop(pid=process.pid)
 
-    return LaunchResult(
-        pid=process.pid,
-        port=port,
-        browser_version=status.browser_version,
-        user_data_dir=session_dir,
-    )
+    return instance  // InstanceInfo from BRW-04
 
 
 cleanup_sessions():
@@ -138,12 +163,14 @@ platform_specific_candidates():
             "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
         ]
 
-move_to_launching_desktop(wm_class):
+move_to_launching_desktop(pid):
     // Requires xdotool. Silently skipped if unavailable.
+    // Uses PID-based window search instead of WM_CLASS, because
+    // Chrome ignores the --class flag.
     try:
         desktop = get_current_desktop()  // xdotool get_desktop or get_desktop_for_window $WINDOWID
         sleep(0.5 seconds)  // wait for browser window to appear
-        window_ids = xdotool_search_by_class(wm_class)
+        window_ids = xdotool_search_by_pid(pid)
         for wid in window_ids:
             xdotool_set_desktop_for_window(wid, desktop)
     except xdotool_not_found:
@@ -152,21 +179,21 @@ move_to_launching_desktop(wm_class):
 
 **OUTPUT:**
 
-- On success: returns LaunchResult with pid, port, browser_version, and user_data_dir. Browser process is running.
+- On success: returns InstanceInfo (from BRW-04) with name, port, pid, browser_version, user_data_dir, and alive status. Browser process is running. Note: `InstanceInfo` (defined in BRW-04) now includes `user_data_dir` so callers can locate the session directory. The `fingerprint_guard` subprocess handle (from BRW-03) is internal to `launch_browser`'s scope -- it is managed within the launch function and not exposed on the return type, since callers do not need to interact with it.
+- **TTY detection and output formatting clarification:** `launch_browser()` returns `InstanceInfo` -- it does not format output or check whether stdout is a TTY. TTY detection and output formatting (JSON vs formatted text) is the CLI layer's responsibility. The CLI command handler in `cli.py` checks `sys.stdout.isatty()` and formats the returned `InstanceInfo` accordingly. This separation keeps `launch_browser()` focused on launching and registering.
 - On failure: raises BrowserNotFoundError (no Chrome binary) or TimeoutError (browser didn't start).
 - The browser process is NOT managed by chrome-agent. It continues running independently.
 - Session data lives under `/tmp/chrome-agent/session-<id>/`. The system cleans `/tmp` on reboot. Between reboots, `cleanup_sessions()` removes stale directories.
+- When stdout is not a TTY, output is structured JSON. When stdout is a TTY, output is formatted text.
+
+#### Iteration 2 Updates
+
+Phase 0 (port conflict pre-check) is removed. With auto-port allocation, the port is known to be free when allocated. When `--port` override is used, Chrome's own binding failure + the 30-second timeout handles conflicts, same as the iteration 1 scoping decision.
 
 ### Level 3 -- Formal Interfaces
 
 ```python
-@dataclass
-class LaunchResult:
-    """Result of launching a browser."""
-    pid: int
-    port: int
-    browser_version: str
-    user_data_dir: str
+from chrome_agent.registry import InstanceInfo
 
 
 class BrowserNotFoundError(Exception):
@@ -180,17 +207,19 @@ class BrowserNotFoundError(Exception):
 
 
 async def launch_browser(
-    port: int = 9222,
+    port_override: int | None = None,
     fingerprint: str | None = None,
     headless: bool = False,
-    wm_class: str = "chrome-agent",
     pin_to_desktop: bool = True,
-) -> LaunchResult:
-    """Launch Chrome with CDP enabled.
+) -> InstanceInfo:
+    """Launch Chrome with CDP enabled and register it in the Instance Registry.
 
     Finds the Chrome binary, starts it with --remote-debugging-port,
-    waits for the port to be ready, and optionally applies a fingerprint
-    profile.
+    waits for the port to be ready, registers the instance with BRW-04,
+    and optionally applies a fingerprint profile.
+
+    Port is auto-allocated by the registry unless port_override is provided.
+    Instance name is derived from the current working directory.
 
     Session data is stored under /tmp/chrome-agent/session-<id>/.
     The browser continues running after this function returns.
@@ -237,11 +266,25 @@ Headless mode:
 Fingerprint integration:
 - Given a valid fingerprint profile path, the browser has the fingerprint applied after launch (verified by checking navigator properties via CDP).
 
+#### Iteration 2 Updates
+
+Auto-port allocation:
+- Given no port_override is provided, the registry allocates an available port starting from 9222 and the browser launches on that port.
+
+Instance registration:
+- Given a successful launch, the instance is registered in `/tmp/chrome-agent/registry.json` with a name derived from the current working directory basename and an auto-incremented suffix.
+
+Structured JSON output:
+- Given stdout is not a TTY, launch outputs structured JSON containing name, port, pid, and browser_version.
+
+Port override:
+- Given port_override=9333, the browser launches on port 9333 and the registry records that port (no auto-allocation).
+
 ### Level 2 -- Test Logic (GIVEN / WHEN / THEN)
 
 Scenario: Successful launch
 GIVEN: Chrome is installed on the system, port 9333 is free
-WHEN: launch_browser(port=9333) is called
+WHEN: launch_browser(port_override=9333) is called
 THEN: check_cdp_port(port=9333).listening is True, browser_version contains "Chrome" or "Chromium"
 
 Scenario: Browser not found
@@ -251,13 +294,35 @@ THEN: BrowserNotFoundError is raised with a non-empty searched_paths list
 
 Scenario: Headless launch
 GIVEN: Chrome is installed, port 9333 is free
-WHEN: launch_browser(port=9333, headless=True) is called
+WHEN: launch_browser(port_override=9333, headless=True) is called
 THEN: check_cdp_port(port=9333).listening is True (browser is running headlessly)
 
 Scenario: Launch with fingerprint
 GIVEN: Chrome is installed, port 9333 is free, a valid fingerprint profile exists
-WHEN: launch_browser(port=9333, fingerprint="path/to/profile.json") is called
+WHEN: launch_browser(port_override=9333, fingerprint="path/to/profile.json") is called
 THEN: connecting via CDP and evaluating navigator.userAgent returns the fingerprint's user agent value
+
+#### Iteration 2 Updates
+
+Scenario: Auto-port allocation
+GIVEN: Chrome is installed, no port_override provided, port 9222 is free
+WHEN: launch_browser() is called
+THEN: the returned InstanceInfo has port=9222, and registry.json contains the instance entry
+
+Scenario: Auto-port allocation with occupied port
+GIVEN: Chrome is installed, no port_override provided, port 9222 is occupied
+WHEN: launch_browser() is called
+THEN: the returned InstanceInfo has a port > 9222, and the browser is listening on that port
+
+Scenario: Instance registration with name
+GIVEN: Chrome is installed, current working directory is /home/user/projects/aroundchicago.tech
+WHEN: launch_browser() is called
+THEN: the returned InstanceInfo.name matches "aroundchicago.tech-01", and registry.json contains this entry
+
+Scenario: Structured JSON output (non-TTY)
+GIVEN: Chrome is installed, stdout is not a TTY
+WHEN: launch_browser() is called from the CLI
+THEN: stdout contains valid JSON with keys "name", "port", "pid", "browser_version"
 
 ### Level 3 -- Formal Test Definitions
 
@@ -266,7 +331,7 @@ test_successful_launch:
     setup:
         port 9333 is free (no browser running)
     action:
-        await launch_browser(port=9333)
+        await launch_browser(port_override=9333)
     assertions:
         check_cdp_port(port=9333).listening is True
         check_cdp_port(port=9333).browser_version is not None
@@ -291,7 +356,7 @@ test_headless_launch:
     setup:
         port 9333 is free
     action:
-        await launch_browser(port=9333, headless=True)
+        await launch_browser(port_override=9333, headless=True)
     assertions:
         check_cdp_port(port=9333).listening is True
     teardown:
@@ -302,7 +367,7 @@ test_launch_with_fingerprint:
         port 9333 is free
         fingerprint profile at /tmp/test-fingerprint.json with userAgent "TestAgent/1.0"
     action:
-        result = await launch_browser(port=9333, fingerprint="/tmp/test-fingerprint.json")
+        result = await launch_browser(port_override=9333, fingerprint="/tmp/test-fingerprint.json")
     assertions:
         // Connect via CDP and check
         async with CDPClient(ws_url=get_ws_url(port=9333)) as cdp:
@@ -330,6 +395,52 @@ test_cleanup_preserves_active_dirs:
         the session directory still exists (active process is preserved)
     teardown:
         kill the browser process
+
+test_auto_port_allocation:
+    setup:
+        registry.json is empty or does not exist
+        port 9222 is free
+    action:
+        instance = await launch_browser()
+    assertions:
+        instance.port == 9222
+        instance.name ends with "-01"
+        registry.json contains entry for instance.name
+    teardown:
+        kill browser process
+
+test_auto_port_skips_occupied:
+    setup:
+        start a listener on port 9222 (simulate occupied port)
+    action:
+        instance = await launch_browser()
+    assertions:
+        instance.port > 9222
+        check_cdp_port(port=instance.port).listening is True
+    teardown:
+        kill browser process
+        stop listener on 9222
+
+test_instance_registration:
+    setup:
+        current working directory basename is "myproject"
+    action:
+        instance = await launch_browser()
+    assertions:
+        instance.name == "myproject-01"
+        registry.json contains "myproject-01" with matching port and pid
+    teardown:
+        kill browser process
+
+test_structured_json_output:
+    setup:
+        stdout is not a TTY (e.g., piped)
+    action:
+        output = run_cli("chrome-agent launch")
+    assertions:
+        json.loads(output) succeeds
+        parsed output has keys: "name", "port", "pid", "browser_version"
+        parsed["pid"] corresponds to a running process
 ```
 
 ## 5. Feedback Channels
@@ -337,6 +448,10 @@ test_cleanup_preserves_active_dirs:
 ### Visual
 
 After launching, take a screenshot via CDP to verify the browser started and is rendering. For headless mode, verify the screenshot is non-empty (browser is producing frames even without a window).
+
+#### Iteration 2 Updates
+
+After launching, inspect `/tmp/chrome-agent/registry.json` to verify the instance was registered with the expected name, port, and PID. Verify the JSON structure matches the InstanceInfo schema.
 
 ### Auditory
 
@@ -346,11 +461,16 @@ Monitor subprocess stderr output from Chrome during launch. Chrome logs startup 
 
 Run `chrome-agent launch` from the terminal, then run `chrome-agent status` to verify the browser is running. Open a session and send a command. This is the end-to-end workflow from the MPS.
 
+#### Iteration 2 Updates
+
+Run `chrome-agent launch` from a terminal (TTY) and verify formatted text output. Run `chrome-agent launch | cat` (non-TTY) and verify structured JSON output. Run two launches from the same directory and verify the names are auto-incremented (e.g., `myproject-01`, `myproject-02`).
+
 ## 6. Dependencies
 
 | Dependency | What this feature needs from it | Rationale |
 |------------|--------------------------------|-----------|
 | BRW-02 | check_cdp_port() to poll for port readiness after launch | Need to know when the browser is ready to accept connections |
+| BRW-04 | registry.register() for port allocation, naming, and instance registration | Iteration 2: launch delegates port allocation and instance naming to the registry |
 
 ## 7. Scoping Decisions
 
@@ -361,6 +481,9 @@ Run `chrome-agent launch` from the terminal, then run `chrome-agent status` to v
 | 30 second startup timeout | Reasonable default | Most Chrome launches complete in under 5 seconds. 30 seconds accommodates slow systems without hanging indefinitely. | If real-world usage shows this is too short (e.g., first launch downloading components) or too long. |
 | Function is async despite mostly sync body | apply_fingerprint requires CDP (async), polling should use asyncio.sleep to not block the event loop | The async boundary is at launch_browser so callers don't need to manage the sync/async split themselves. | N/A |
 | SingletonLock parsing is best-effort | Chrome writes SingletonLock as a symlink with format "hostname-PID" but this is undocumented Chrome internals | If the lock file format can't be parsed, treat the directory as active (don't delete it). Verify the actual format empirically during implementation. | If Chrome changes the lock file format. |
+| Removed `wm_class` parameter (iteration 2) | Chrome ignores `--class` flag | Chrome does not honor the `--class` flag, so setting WM_CLASS via launch args has no effect. Desktop pinning now uses PID-based window search via xdotool, which reliably identifies the browser window. | N/A |
+| Removed `--disable-blink-features=AutomationControlled` (iteration 2) | Unnecessary on Chrome 147+ | Chrome 147+ no longer sets the `navigator.webdriver` property by default, making this flag unnecessary. Removing it reduces launch arg clutter. | If a future Chrome version reintroduces automation detection flags. |
+| Added `--no-first-run` and `--no-default-browser-check` (iteration 2) | Clean launch experience | These flags suppress first-run dialogs and default browser prompts that would otherwise interfere with automated browser control. | N/A |
 
 ## 8. Learnings
 
@@ -372,7 +495,7 @@ Run `chrome-agent launch` from the terminal, then run `chrome-agent status` to v
 
 ## 9. Implementation Status
 
-**Status:** Complete
+**Status:** Complete (iteration 1)
 
 ## 10. Test Results
 

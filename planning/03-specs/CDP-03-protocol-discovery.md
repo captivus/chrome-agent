@@ -20,14 +20,54 @@ This is a synchronous, stdlib-only operation -- HTTP GET, JSON parsing, text for
 
 The output is designed for both human and agent consumption -- structured enough for an agent to parse, readable enough for a human scanning for the right command.
 
+#### Iteration 2 Updates
+
+In iteration 2, the port is no longer specified directly by the user. Instead, the user provides an instance name (e.g., `chrome-agent help myapp Page`), and Protocol Discovery resolves the instance name to a port via the Instance Registry (BRW-04). Resolution follows a precedence chain: instance name (explicit lookup) > auto-select single live instance > explicit `port` argument > static usage fallback. When no instance is specified and exactly one instance is alive, that instance is used automatically. When no instance is specified and zero or multiple instances are alive (a non-empty registry with all dead instances counts as zero alive), the feature checks whether an explicit `port` was provided -- if so, that port is used as a fallback (e.g., `discover_protocol(port=9333)` connects to port 9333 even if auto-selection finds nothing). When `port` is None (the default) and auto-selection fails, the feature falls back to static usage text -- the same behavior as when no browser is running.
+
 ### Level 2 -- Logic Flow (INPUT / LOGIC / OUTPUT)
 
 **INPUT:**
 
-- `port`: integer, default 9222 -- the CDP port to query
+- `port`: integer or None, default None -- the CDP port to query
 - `query`: string or None -- None for all domains, "Domain" for a domain's contents, "Domain.method" for a specific command/event
 
-**LOGIC:**
+#### Iteration 2 Updates
+
+**INPUT (updated):**
+
+- `instance_name`: string or None -- the name of a registered browser instance to query
+- `port`: integer or None, default None -- the CDP port to query (retained for backward compatibility; ignored when `instance_name` is provided). When None and auto-selection fails, falls back to static usage text. When explicitly provided and auto-selection fails, uses the provided port.
+- `query`: string or None -- unchanged from iteration 1
+
+**LOGIC (instance resolution, prepended to existing logic):**
+
+```
+// _resolve_port is a private helper in protocol.py
+
+_resolve_port(instance_name, port):
+    if instance_name is not None:
+        info = registry.lookup(instance_name)  // raises InstanceNotFoundError
+        return info.port
+
+    // No instance specified -- try auto-selection
+    instances = registry.enumerate_instances()
+    live = [i for i in instances if i.alive]
+    if len(live) == 1:
+        return live[0].port
+
+    // Zero or multiple instances alive -- check for explicit port fallback
+    if port is not None:
+        return port
+
+    // port is None and auto-selection failed -- fall back to static usage text
+    return None
+```
+
+When `_resolve_port` returns None, the caller prints static usage text and exits rather than attempting the HTTP fetch. When it returns a port, the existing `discover(port, query)` logic proceeds unchanged.
+
+**Location note:** `_resolve_port` is a private helper function in `protocol.py`.
+
+**LOGIC (original, unchanged):**
 
 ```
 discover(port, query):
@@ -123,7 +163,7 @@ discover(port, query):
 
 ```python
 def discover_protocol(
-    port: int = 9222,
+    port: int | None = None,
     query: str | None = None,
 ) -> None:
     """Query the browser's protocol schema and print formatted output.
@@ -150,6 +190,42 @@ def fetch_protocol_schema(port: int = 9222) -> dict:
     """
     ...
 ```
+
+#### Iteration 2 Updates
+
+```python
+def discover_protocol(
+    port: int | None = None,
+    query: str | None = None,
+    instance_name: str | None = None,
+) -> None:
+    """Query the browser's protocol schema and print formatted output.
+
+    Port resolution follows a precedence chain:
+        1. instance_name -- explicit lookup via the Instance Registry (BRW-04).
+           When instance_name is provided, it takes precedence over port.
+        2. Auto-select -- when no instance_name is provided and exactly one
+           live instance exists, that instance is used automatically.
+        3. Explicit port -- when auto-selection fails (zero or multiple alive)
+           and the caller provided a non-None port, that port is used as a
+           fallback (e.g., discover_protocol(port=9333) connects to 9333).
+        4. Static usage text -- when port is None (the default) and none of
+           the above resolve a port, prints usage text and returns.
+
+    query=None: list all domains
+    query="Page": list commands and events in the Page domain
+    query="Page.navigate": show full details for Page.navigate
+
+    Synchronous. Uses stdlib urllib.
+
+    Raises ConnectionError if no browser is running on the resolved port.
+    Raises InstanceNotFoundError if instance_name is not in the registry.
+    Raises ValueError if the domain or method is not found.
+    """
+    ...
+```
+
+The `port` parameter is retained for backward compatibility and direct programmatic use. When `instance_name` is provided, it takes precedence and `port` is ignored. The `fetch_protocol_schema()` signature is unchanged -- it always takes a port, and instance resolution happens in the caller.
 
 ## 4. Validation Contract
 
@@ -300,6 +376,132 @@ test_unknown_method:
         "Unknown method" in str(error)
 ```
 
+#### Iteration 2 Updates
+
+**Plain English Scenarios:**
+
+Instance name routing:
+- Given a registered instance "myapp" running on port 9333, querying with `instance_name="myapp"` and `query="Page"` returns the Page domain detail -- identical to querying with `port=9333`.
+
+Auto-selection of single instance:
+- Given exactly one live registered instance, querying with no instance name and no port automatically uses that instance and returns results normally.
+
+Fallback -- no instance specified, multiple live:
+- Given two or more live registered instances, querying with no instance name prints static usage text.
+
+Fallback -- no instance specified, none live:
+- Given no live registered instances, querying with no instance name prints static usage text.
+
+Unknown instance:
+- Given no instance named "ghost" in the registry, querying with `instance_name="ghost"` raises InstanceNotFoundError.
+
+**Test Logic (GIVEN / WHEN / THEN):**
+
+Scenario: Instance name routing
+GIVEN: a registered instance "myapp" with port 9333, browser running on port 9333
+WHEN: discover_protocol(instance_name="myapp", query="Page") is called
+THEN: stdout contains "Page.navigate" and "Page.captureScreenshot" (same as port-based query)
+
+Scenario: Auto-select single instance
+GIVEN: exactly one live registered instance "solo" with port 9333, browser running on port 9333
+WHEN: discover_protocol() is called with no instance_name and no port override
+THEN: stdout contains domain names (Page, DOM, etc.) -- the single instance was used automatically
+
+Scenario: Multiple live instances, no instance specified
+GIVEN: two live registered instances "app1" and "app2"
+WHEN: discover_protocol() is called with no instance_name
+THEN: static usage text is printed, no protocol fetch is attempted
+
+Scenario: No live instances, no instance specified
+GIVEN: no live registered instances
+WHEN: discover_protocol() is called with no instance_name
+THEN: static usage text is printed, no protocol fetch is attempted
+
+Scenario: Unknown instance name
+GIVEN: no instance named "ghost" in the registry
+WHEN: discover_protocol(instance_name="ghost") is called
+THEN: InstanceNotFoundError is raised
+
+**Formal Test Definitions:**
+
+```
+test_instance_name_routing:
+    setup:
+        registry contains instance "myapp" with port 9333
+        browser running on port 9333
+    action:
+        capture stdout from discover_protocol(instance_name="myapp", query="Page")
+    assertions:
+        "Page.navigate" in stdout
+        "Page.captureScreenshot" in stdout
+
+test_auto_select_single_instance:
+    setup:
+        registry contains exactly one live instance "solo" with port 9333
+        browser running on port 9333
+    action:
+        capture stdout from discover_protocol()
+    assertions:
+        "Page" in stdout
+        "DOM" in stdout
+
+test_multiple_instances_no_selection:
+    setup:
+        registry contains live instances "app1" (port 9333) and "app2" (port 9444)
+    action:
+        capture stdout from discover_protocol()
+    assertions:
+        stdout contains static usage text
+        no HTTP request was made to /json/protocol
+
+test_no_instances_no_selection:
+    setup:
+        registry contains no live instances
+    action:
+        capture stdout from discover_protocol()
+    assertions:
+        stdout contains static usage text
+        no HTTP request was made to /json/protocol
+
+test_unknown_instance:
+    setup:
+        registry contains no instance named "ghost"
+    action:
+        try:
+            discover_protocol(instance_name="ghost")
+            raised = False
+        except InstanceNotFoundError:
+            raised = True
+    assertions:
+        raised is True
+
+test_explicit_port_fallback:
+    setup:
+        registry contains no live instances (empty or all dead)
+    action:
+        // Explicit port provided -- should connect to that port even though
+        // auto-selection finds nothing
+        capture stdout from discover_protocol(port=9333, query="Page")
+    assertions:
+        // The call attempts to connect to port 9333 (may raise ConnectionError
+        // if no browser is running there, but it does NOT fall back to static
+        // usage text -- the explicit port is used)
+        either "Page.navigate" in stdout (if browser is running on 9333)
+        or ConnectionError is raised (if no browser on 9333)
+        // Crucially: static usage text is NOT printed
+
+test_instance_name_takes_precedence_over_port:
+    setup:
+        registry contains instance "myapp" with port 9333
+        browser running on port 9333
+    action:
+        // Both instance_name and port are provided -- instance_name wins
+        capture stdout from discover_protocol(instance_name="myapp", port=9500, query="Page")
+    assertions:
+        "Page.navigate" in stdout
+        // The call connected to port 9333 (from the registry), not port 9500
+```
+
 ## 5. Feedback Channels
 
 ### Visual
@@ -319,6 +521,12 @@ Use the discovery output to compose a CDP command you haven't used before. If th
 | Dependency | What this feature needs from it | Rationale |
 |------------|--------------------------------|-----------|
 | None | N/A | Uses stdlib HTTP to query the browser directly. Does not depend on CDP-01 or any other chrome-agent feature. |
+
+#### Iteration 2 Updates
+
+| Dependency | What this feature needs from it | Rationale |
+|------------|--------------------------------|-----------|
+| BRW-04 (Instance Registry) | `lookup(instance_name)` to resolve an instance name to port; `enumerate_instances()` to list live instances for auto-selection when no instance is specified. | The CLI syntax changes from `--port` to instance names. The registry is the single source of truth for mapping instance names to connection details. |
 
 ## 7. Scoping Decisions
 
