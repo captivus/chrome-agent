@@ -7,3 +7,6 @@ build/
 .venv/
 *.egg
 .pytest_cache/
+
+
+.claude/skills/*
