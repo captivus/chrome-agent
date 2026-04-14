@@ -90,7 +90,6 @@ async def launch_browser(
     port: int = 9222,
     fingerprint: BrowserFingerprint | None = None,
     headless: bool = False,
-    wm_class: str = "chrome-agent",
     pin_to_desktop: bool = True,
 ) -> BrowserSession:
     """Launch a Chromium browser with CDP enabled.
@@ -103,7 +102,6 @@ async def launch_browser(
         fingerprint: Optional fingerprint for anti-detection. If None,
             launches a clean browser with no spoofing.
         headless: Run in headless mode.
-        wm_class: X11 window class name (for desktop pinning).
         pin_to_desktop: Move browser window to the launching terminal's
             virtual desktop. Default True. Linux/X11 only, requires
             xdotool -- silently skipped on other platforms.
@@ -111,9 +109,9 @@ async def launch_browser(
     playwright = await async_playwright().start()
 
     launch_args = [
-        "--disable-blink-features=AutomationControlled",
         f"--remote-debugging-port={port}",
-        f"--class={wm_class}",
+        "--no-first-run",
+        "--no-default-browser-check",
     ]
 
     # Build context options from fingerprint
@@ -168,19 +166,21 @@ async def launch_browser(
     )
 
     if pin_to_desktop:
-        await _move_to_launching_desktop(wm_class=wm_class)
+        await _move_to_launching_desktop(port=port)
 
     return session
 
 
-async def _move_to_launching_desktop(*, wm_class: str) -> None:
+async def _move_to_launching_desktop(*, port: int) -> None:
     """Move the browser window to the terminal's virtual desktop.
 
-    Linux/X11 only. Requires xdotool. Silently does nothing if
-    xdotool is unavailable or on non-X11 systems.
+    Linux/X11 only. Requires xdotool and lsof. Silently does nothing
+    if unavailable or on non-X11 systems.
+
+    Uses the terminal's WINDOWID to determine the target desktop,
+    and finds the Chrome PID via lsof on the CDP port.
     """
     try:
-        # Determine which desktop our terminal is on
         window_id = os.environ.get("WINDOWID", "")
         if window_id:
             result = subprocess.run(
@@ -198,21 +198,41 @@ async def _move_to_launching_desktop(*, wm_class: str) -> None:
         if not desktop:
             return
 
-        # Wait for the browser window to appear
-        await asyncio.sleep(0.5)
-
-        # Find our browser windows by the custom WM_CLASS
+        # Find Chrome PID from the CDP port
         result = subprocess.run(
-            ["xdotool", "search", "--class", wm_class],
+            ["lsof", f"-ti:{port}", "-sTCP:LISTEN"],
             capture_output=True, text=True,
         )
-        for wid in result.stdout.strip().split("\n"):
-            if wid.strip():
-                subprocess.run(
-                    ["xdotool", "set_desktop_for_window", wid.strip(), desktop],
-                )
+        pid = result.stdout.strip().split("\n")[0].strip()
+        if not pid:
+            return
 
-        logger.info("Moved browser window(s) to desktop %s", desktop)
+        # Poll for the browser window, move it immediately
+        for _ in range(80):
+            result = subprocess.run(
+                ["xdotool", "search", "--pid", pid],
+                capture_output=True, text=True,
+            )
+            for wid in result.stdout.strip().split("\n"):
+                wid = wid.strip()
+                if not wid:
+                    continue
+                wid_desktop = subprocess.run(
+                    ["xdotool", "get_desktop_for_window", wid],
+                    capture_output=True, text=True,
+                ).stdout.strip()
+                if wid_desktop != "-1" and wid_desktop != "":
+                    if wid_desktop != desktop:
+                        subprocess.run(
+                            ["xdotool", "set_desktop_for_window", wid, desktop],
+                        )
+                        logger.info("Moved browser window to desktop %s", desktop)
+                    else:
+                        logger.info("Browser window already on desktop %s", desktop)
+                    return
+            await asyncio.sleep(0.03)
+
+        logger.debug("Browser window did not appear within polling timeout")
     except FileNotFoundError:
         logger.debug("xdotool not available -- skipping desktop move")
     except Exception as e:

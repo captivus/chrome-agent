@@ -81,7 +81,6 @@ async def launch_browser(
     port: int = 9222,
     fingerprint: str | None = None,
     headless: bool = False,
-    wm_class: str = "chrome-agent",
     pin_to_desktop: bool = True,
 ) -> LaunchResult:
     """Launch Chrome with CDP enabled.
@@ -119,9 +118,9 @@ async def launch_browser(
     args = [
         binary,
         f"--remote-debugging-port={port}",
-        "--disable-blink-features=AutomationControlled",
         f"--user-data-dir={session_dir}",
-        f"--class={wm_class}",
+        "--no-first-run",
+        "--no-default-browser-check",
     ]
     if headless:
         args.append("--headless=new")
@@ -178,7 +177,7 @@ async def launch_browser(
 
     # Phase 6: Pin to desktop (Linux/X11, best-effort)
     if pin_to_desktop and not headless:
-        await _move_to_launching_desktop(wm_class=wm_class)
+        await _move_to_launching_desktop(pid=process.pid)
 
     return LaunchResult(
         pid=process.pid,
@@ -243,13 +242,22 @@ def _process_is_running(pid: int) -> bool:
         return False
 
 
-async def _move_to_launching_desktop(wm_class: str) -> None:
+async def _move_to_launching_desktop(pid: int) -> None:
     """Move the browser window to the terminal's virtual desktop.
 
     Linux/X11 only. Requires xdotool. Silently does nothing if
     xdotool is unavailable or on non-X11 systems.
+
+    Uses the terminal's WINDOWID to determine the target desktop
+    (stable even if the user switches desktops during launch), and
+    searches for browser windows by PID (Chrome ignores the --class
+    flag, so WM_CLASS-based search doesn't work).
+
+    Polls for the window at 30ms intervals to minimize the time the
+    browser is visible on the wrong desktop.
     """
     try:
+        # Determine target desktop from the terminal's window
         window_id = os.environ.get("WINDOWID", "")
         if window_id:
             result = subprocess.run(
@@ -267,19 +275,33 @@ async def _move_to_launching_desktop(wm_class: str) -> None:
         if not desktop:
             return
 
-        await asyncio.sleep(0.5)
+        # Poll for the browser window to appear, move it immediately.
+        # Internal Chrome windows report desktop -1; skip those.
+        for _ in range(80):
+            result = subprocess.run(
+                ["xdotool", "search", "--pid", str(pid)],
+                capture_output=True, text=True,
+            )
+            for wid in result.stdout.strip().split("\n"):
+                wid = wid.strip()
+                if not wid:
+                    continue
+                wid_desktop = subprocess.run(
+                    ["xdotool", "get_desktop_for_window", wid],
+                    capture_output=True, text=True,
+                ).stdout.strip()
+                if wid_desktop != "-1" and wid_desktop != "":
+                    if wid_desktop != desktop:
+                        subprocess.run(
+                            ["xdotool", "set_desktop_for_window", wid, desktop],
+                        )
+                        logger.info("Moved browser window to desktop %s", desktop)
+                    else:
+                        logger.info("Browser window already on desktop %s", desktop)
+                    return
+            await asyncio.sleep(0.03)
 
-        result = subprocess.run(
-            ["xdotool", "search", "--class", wm_class],
-            capture_output=True, text=True,
-        )
-        for wid in result.stdout.strip().split("\n"):
-            if wid.strip():
-                subprocess.run(
-                    ["xdotool", "set_desktop_for_window", wid.strip(), desktop],
-                )
-
-        logger.info("Moved browser window(s) to desktop %s", desktop)
+        logger.debug("Browser window did not appear within polling timeout")
     except FileNotFoundError:
         logger.debug("xdotool not available -- skipping desktop move")
     except Exception as exc:
