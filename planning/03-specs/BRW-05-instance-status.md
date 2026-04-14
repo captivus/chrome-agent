@@ -570,20 +570,39 @@ Exercise the full workflow as an agent would: launch two browser instances using
 
 ## 9. Implementation Status
 
-**Status:** Not started
+**Status:** Complete
 
 ## 10. Test Results
 
 ### Refinement Log
 
-[Filled during the Implementation Loop]
+**Iteration 1:** All 10 tests passed on the first run. No refinement needed. Full suite: 141 passed, 0 failed.
 
 ### Final Test Results
 
 | Test | Result | Notes |
 |------|--------|-------|
-| | | |
+| test_query_targets_success | Pass | Filters to page targets, correct short_id and indexing |
+| test_query_targets_failure | Pass | Returns empty list on HTTP failure |
+| test_get_instance_status_all | Pass | Lists all instances with correct alive flags |
+| test_get_instance_status_filter_by_name | Pass | Filters to single instance |
+| test_get_instance_status_not_found | Pass | InstanceNotFoundError with available list |
+| test_get_instance_status_empty_registry | Pass | Returns empty list |
+| test_dead_instance_no_targets | Pass | No /json query for dead instances |
+| test_format_text | Pass | Correct text format with DEAD marker |
+| test_format_json | Pass | Valid JSON with all fields |
+| test_target_id_truncation | Pass | 8 chars, uppercased |
 
 ## 11. Review Notes
 
-[Filled during the Implementation Loop]
+### Agent Review Notes
+
+**Straightforward implementation.** The module (`src/chrome_agent/instance_status.py`) maps directly from the spec. The registry integration is clean -- `enumerate_instances()` and `lookup()` from BRW-04 provide exactly what's needed. The `query_targets()` function uses the same `/json` HTTP endpoint as the existing `connection.py` code.
+
+**Added `registry_path` passthrough.** The spec didn't explicitly show `registry_path` on `get_instance_status()` but it's needed for test isolation (same pattern as BRW-04). Added it as an optional parameter passed through to registry functions.
+
+**Mocking strategy.** HTTP responses are mocked via `unittest.mock.patch` on `urllib.request.urlopen`. Registry operations use the real registry module with `tmp_path` isolation (same as BRW-04 tests). Dead instances verified via PID 99999999 (nonexistent).
+
+### User Review Notes
+
+[To be filled by user]
