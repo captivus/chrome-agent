@@ -17,8 +17,8 @@
     "2": {
       "features": ["CDP-02", "GEN-01", "BRW-01", "BRW-03"],
       "order": ["CDP-02", "BRW-01", "GEN-01", "BRW-03"],
-      "gate_satisfied": false,
-      "gate_date": null
+      "gate_satisfied": true,
+      "gate_date": "2026-04-13"
     },
     "3": {
       "features": ["CLI-01"],
@@ -80,15 +80,15 @@
       "name": "Fingerprint Profiles",
       "category": "Browser Management",
       "phase": 2,
-      "status": "in progress",
-      "completion_date": null,
-      "notes": ""
+      "status": "complete",
+      "completion_date": "2026-04-13",
+      "notes": "3 iterations, 11/11 tests pass"
     },
     "CLI-01": {
       "name": "One-Shot Commands",
       "category": "Command-Line Interface",
       "phase": 3,
-      "status": "not started",
+      "status": "in progress",
       "completion_date": null,
       "notes": ""
     }
