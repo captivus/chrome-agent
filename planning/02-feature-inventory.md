@@ -1,6 +1,6 @@
 # Feature Inventory
 
-> *This document is a complete, categorized list of every discrete feature needed for this iteration, extracted systematically from the Master Project Specification. It bridges the gap between the vision (what the system does as a whole) and the specifications (what each piece does individually). Each feature is an independently meaningful, independently implementable capability -- something a user would recognize as a thing the system does.*
+> *This document is a complete, categorized list of every discrete feature needed for this iteration, extracted systematically from the Master Project Specification. It bridges the gap between the vision (what the system does as a whole) and the specifications (what each piece does individually). Each feature is an independently meaningful, independently implementable capability -- something a user would recognize as a thing the system does. Behaviors of a feature (how it reports progress, handles errors, recovers from interruption, writes output) are captured in the feature's description, not as separate features. The Master Feature Table provides the at-a-glance summary; the Feature Details section captures the full behavioral picture of each feature as surfaced during extraction. The methodology is applied iteratively -- this inventory covers one pass through the Planning Phase, scoping the make-it-work version. Every feature listed here must trace back to the Master Project Specification; if it can't, it either doesn't belong or the specification needs updating. Features at this stage are not yet atomic -- some will need splitting during Step 3 (Iterative Specification Development) when their full complexity becomes apparent. This is a complete list, not a final one.*
 
 ## 1. Project Reference
 
@@ -8,13 +8,15 @@
 
 ## 2. Summary
 
-**Total features:** 8
+**Iteration 1 (v0.3.0):** 8 features across 4 categories (2 small, 2 medium, 4 large). Delivered the CDP-native foundation: WebSocket client, session mode, browser launch, protocol discovery, typed bindings, fingerprint profiles, browser status, and one-shot CLI commands. All implemented and released.
 
-**Categories:** 4
+**Iteration 2 (this iteration):** 3 new features across 2 existing categories (1 small, 1 medium, 1 large). Reshapes the CLI surface around named instances and a two-channel interaction pattern (attach for events, one-shot for commands) with event subscription isolation between participants.
 
-**Complexity breakdown:** 2 small, 2 medium, 4 large
+**Cross-cutting change:** All existing commands that accept `--port` (launch, status, help, one-shot) adapt to address browsers by instance name. This is a behavioral update to each command driven by the Instance Registry feature, not a separate feature per command.
 
-**Cross-cutting constraint:** This iteration replaces the existing Playwright-based implementation with a direct CDP implementation. The Playwright dependency is removed entirely. This is a consequence of implementing all features on raw CDP, not a feature in itself.
+**Superseded features:** CDP-02 (Session Mode) is superseded by Attach Mode. BRW-02 (Browser Status) is superseded by Instance Status.
+
+**Combined totals:** 11 features, 4 categories, 3 small, 3 medium, 5 large
 
 ## 3. Categories
 
@@ -28,7 +30,7 @@
 
 **Abbreviation:** BRW
 
-**Description:** Launching, discovering, and managing Chrome browser processes. Features in this category handle finding the Chrome binary, starting it with the right flags, checking status, and managing fingerprint profiles.
+**Description:** Launching, discovering, and managing Chrome browser processes and instances. Features in this category handle finding the Chrome binary, starting it with the right flags, checking status, managing fingerprint profiles, and managing the instance lifecycle (naming, registration, discovery).
 
 ### Code Generation
 
@@ -44,18 +46,30 @@
 
 ## 4. Master Feature Table
 
+### Iteration 1 (v0.3.0) -- implemented
+
 | Feature ID | Name | Description | Complexity |
 |------------|------|-------------|------------|
 | CDP-01 | CDP WebSocket Client | Connect to Chrome via WebSocket, send commands, receive responses, subscribe to events, handle errors and disconnection | Large |
-| CDP-02 | Session Mode | Persistent stdin/stdout protocol over a single WebSocket connection, supporting commands, responses, and event streaming via Monitor | Large |
+| CDP-02 | Session Mode | Persistent stdin/stdout protocol over a single WebSocket connection, supporting commands, responses, and event streaming via Monitor. **Superseded by CDP-04 (Attach Mode) in iteration 2.** | Large |
 | CDP-03 | Protocol Discovery | Query the browser's protocol schema endpoint and present domain, command, and event information in a readable format | Small |
 | GEN-01 | Typed Protocol Bindings | Auto-generate typed Python classes and methods from the CDP protocol schema, providing one class per domain, one method per command, and typed dataclasses for all CDP types | Large |
 | BRW-01 | Browser Launch | Start a Chrome browser with --remote-debugging-port via subprocess, including binary discovery, process lifecycle management, and clean shutdown | Large |
-| BRW-02 | Browser Status | Check whether a browser is listening on a CDP port and report version, page URL, and title | Small |
+| BRW-02 | Browser Status | Check whether a browser is listening on a CDP port and report version, page URL, and title. **Superseded by BRW-05 (Instance Status) in iteration 2.** | Small |
 | BRW-03 | Fingerprint Profiles | Apply anti-detection configuration to launched browsers -- user agent, viewport, locale, timezone, platform spoofing via CDP and launch flags | Medium |
 | CLI-01 | One-Shot Commands | Parse Domain.method and JSON params from CLI arguments, connect, send, print response, disconnect. Also route operational commands (launch, status, session, help) | Medium |
 
+### Iteration 2 (this iteration) -- new features
+
+| Feature ID | Name | Description | Complexity |
+|------------|------|-------------|------------|
+| BRW-04 | Instance Registry | Manage named browser instances: auto-allocate ports, derive names from directory basenames, store name-to-port-to-PID mappings, support lookup by name, detect and clean up stale entries | Medium |
+| CDP-04 | Attach Mode | Persistent connection to a named browser instance for event observation with isolated subscriptions. Replaces Session Mode. Streams subscribed events to stdout as JSON lines. | Large |
+| BRW-05 | Instance Status | List all registered browser instances with their page targets. Enrich registry data with live browser state: liveness, target IDs, URLs, and titles. Replaces Browser Status. | Small |
+
 ## 5. Feature Details
+
+### Iteration 1 (v0.3.0) -- implemented
 
 ### CDP-01: CDP WebSocket Client
 
@@ -80,6 +94,8 @@
 **Traceability:** Essential Functionality Workflow 1 (Launch and Control), Technical Context (external systems, user interaction model -- Python library)
 
 ### CDP-02: Session Mode
+
+> **Superseded by CDP-04 (Attach Mode) in iteration 2.** Session Mode mixed events and command responses on a single stdout stream and used page-level connections with shared event subscriptions. Attach Mode replaces it with isolated event subscriptions and a design focused on event observation running concurrently with independent one-shot command execution.
 
 **What it does:** Maintains a persistent WebSocket connection to Chrome and exposes a stdin/stdout protocol for sending CDP commands and receiving responses and events. This is the primary interface for agents doing multi-step browser work. Designed for reactive event streaming via Claude Code's Monitor tool -- the agent is woken up when browser events fire rather than polling.
 
@@ -152,12 +168,15 @@
 - Supports headless mode
 - Optionally manages window placement (platform-specific, best-effort)
 - Fails with a helpful error if Chrome is not found, listing searched paths
+- **Iteration 2 update:** Integrates with BRW-04 (Instance Registry) for auto-port allocation, instance naming, registration, and structured JSON output. The core launch mechanics (binary discovery, subprocess management, port readiness) are unchanged.
 
 **Complexity:** Large -- browser binary discovery across platforms, subprocess management, port readiness polling, integration with fingerprint profiles, and window management. Highest-risk feature due to platform-specific behavior.
 
 **Traceability:** Essential Functionality Workflow 1 (Launch and Control), Key Workflows Workflow 1 step 1
 
 ### BRW-02: Browser Status
+
+> **Superseded by BRW-05 (Instance Status) in iteration 2.** Browser Status checked a single port. Instance Status lists all registered instances with enriched page target information.
 
 **What it does:** Checks whether a browser is listening on a CDP port and reports basic information.
 
@@ -208,7 +227,76 @@
 - Operational commands (launch, status, session, help, cleanup) route to their respective features
 - Malformed input produces clear error messages
 - One-shot mode has higher per-command overhead than session mode, making it suitable for single operations rather than multi-step workflows
+- **Iteration 2 update:** One-shot commands accept an instance name as the first argument (e.g., `chrome-agent mysite-01 Runtime.evaluate '...'`) and resolve it via BRW-04 (Instance Registry). Target specifier support added (target ID prefix, numeric index, or URL substring) for multi-tab instances. `session` route replaced by `attach` route. Creates isolated sessions for commands.
 
 **Complexity:** Medium -- argument parsing and routing is straightforward, but the one-shot CDP path requires connection management and error handling.
 
 **Traceability:** Technical Context (user interaction model), Essential Functionality all workflows
+
+### Iteration 2 (this iteration) -- new features
+
+### BRW-04: Instance Registry
+
+**What it does:** Manages named browser instances -- the infrastructure that maps human-readable names to browser processes. Provides port auto-allocation, name derivation, registration, lookup, and stale entry cleanup. This is the foundation that all instance-name-based commands depend on.
+
+**Inputs:** For registration: working directory path (for name derivation), optional port override. For lookup: instance name. For cleanup: no input (scans registry for dead entries).
+
+**Outputs:** For registration: instance name, allocated port, PID. For lookup: port, PID, and metadata for the named instance. For cleanup: removal of stale entries. Structured JSON output for programmatic consumers, formatted text for humans.
+
+**Behavioral details:**
+- Auto-allocates ports by scanning from a base port (default 9222) upward, checking each for availability
+- Derives instance names from the current working directory basename, lowercased, with special characters stripped. Auto-increments a numeric suffix (`-01`, `-02`) when an instance with the same base name already exists
+- Stores registry data under `/tmp/chrome-agent/` -- name-to-port-to-PID mappings with launch timestamps
+- Lookup by name returns port and PID; errors with a clear message if the instance name is not found
+- Stale entry detection checks PID liveness -- if the Chrome process has died, the entry is stale
+- Cleanup removes stale entries and their associated session directories
+- Used by launch (registration), attach (lookup), one-shot (lookup), status (enumeration), help (lookup), and cleanup (pruning)
+
+**Complexity:** Medium -- the individual operations (port scanning, name derivation, JSON file I/O, PID checks) are straightforward, but the registry is the foundation that every other command depends on, and concurrent access considerations (multiple chrome-agent invocations reading/writing the registry) add complexity.
+
+**Traceability:** Essential Functionality Workflow 1 (Launch and Manage Browser Instances), Key Workflows Workflow 1 (steps 1-6), Scope Boundaries Now ("Named browser instances with auto-allocated ports and a discoverable registry"), Technical Context (instance registry as local mechanism)
+
+### CDP-04: Attach Mode
+
+**What it does:** Creates a persistent connection to a named browser instance for event observation with isolated event subscriptions. This is the observation channel in chrome-agent's two-channel interaction pattern. The agent attaches, subscribes to events, and receives them as a JSON line stream on stdout -- running concurrently with independent one-shot command execution. Replaces CDP-02 (Session Mode).
+
+**Inputs:** Instance name (resolved via BRW-04 registry). Optional target specifier (target ID prefix, numeric index, or URL substring) for multi-tab instances. Event subscriptions specified as CLI arguments at launch (e.g., `+Page.loadEventFired +Network.requestWillBeSent`) and/or via stdin during the session.
+
+**Outputs:** Subscribed CDP events on stdout as JSON lines (one message per line, unbuffered). Readiness signal on stdout when the connection is established and subscriptions are active.
+
+**Behavioral details:**
+- Connects to the browser and creates a session with isolated event subscriptions -- other participants' subscriptions are invisible to this session, and this session's subscriptions are invisible to others
+- Per-event selectivity: subscribing to a specific event (e.g., `+Network.requestWillBeSent`) auto-enables the parent CDP domain but only forwards the subscribed event, not all events in that domain
+- Event subscriptions can be specified as CLI arguments at launch and modified via stdin during the session (`+Event` to subscribe, `-Event` to unsubscribe)
+- Designed to run as a background process: under Claude Code's Monitor tool (push notifications), redirected to a file (`> /tmp/events.jsonl`), or with `&` in a shell
+- Events caused by other participants' actions (e.g., a one-shot navigation) appear on the attach stream for subscribed event types
+- Target identification: when the instance has multiple page targets, the user specifies which to attach to. Default to the only target when unambiguous. Error with available targets listed when ambiguous or not found.
+- Detachment: the session is destroyed when the process exits (Ctrl+D, signal, or parent process termination). The browser and page are unaffected.
+- Handles SIGTERM gracefully for Monitor integration (Monitor may terminate the process)
+- Errors with clear messages for: dead instance, ambiguous target, browser crash mid-session
+- Output format is Monitor-compatible: unbuffered, one JSON object per line, no interleaved binary data
+
+**Complexity:** Large -- isolated session creation, event subscription management (CLI args + stdin protocol), per-event selectivity on top of CDP domain-level enabling, target identification with ambiguity handling, concurrent operation with one-shot commands, signal handling, and clean shutdown under various failure modes. The most complex feature in this iteration.
+
+**Traceability:** Essential Functionality Workflow 2 (Attach to Observe Browser Events), Workflow 4 (Collaborate on a Shared Browser), Key Workflows Workflow 2 (all steps), Workflow 4 (steps 3-6), Scope Boundaries Now ("attach command for persistent event observation with per-participant subscription isolation", "Event subscription isolation between participants sharing a browser"), Technical Context (user interaction model -- attach mode)
+
+### BRW-05: Instance Status
+
+**What it does:** Lists all registered browser instances with their page targets, enriching registry data with live browser state. This is how agents and humans discover what's running and identify specific page targets for attach or one-shot commands. Replaces BRW-02 (Browser Status).
+
+**Inputs:** Optional instance name to show details for a specific instance. No input lists all instances.
+
+**Outputs:** For each instance: name, port, alive/dead status. For each page target within an alive instance: target ID (truncated for readability), numeric index, URL, and title. Structured JSON output for programmatic consumers, formatted text for humans.
+
+**Behavioral details:**
+- Reads the instance registry (BRW-04) for all registered instances
+- For each instance, checks whether the Chrome process is still alive (PID liveness check and/or port check)
+- For each alive instance, queries Chrome's `/json` endpoint to enumerate page targets
+- Displays target IDs truncated to 8 characters (sufficient for disambiguation), with numeric indexes for shorthand reference
+- Dead instances are reported as dead rather than silently omitted -- helps the user understand stale state and prompts cleanup
+- Accepts an optional instance name to filter output to a single instance
+- Used by agents to discover target IDs before issuing attach or one-shot commands
+
+**Complexity:** Small -- reads the registry, checks PID/port liveness, makes HTTP requests to `/json`, and formats output. All operations are well-understood and synchronous. The logic is straightforward enumeration and formatting.
+
+**Traceability:** Essential Functionality Workflow 1 (Launch and Manage Browser Instances), Workflow 4 (Collaborate on a Shared Browser), Key Workflows Workflow 1 (step 5), Workflow 4 (step 2), Scope Boundaries Now ("status command showing all running instances with their page targets")
