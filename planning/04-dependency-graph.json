@@ -1,91 +1,100 @@
 {
   "metadata": {
+    "project": "chrome-agent",
     "source_inventory": "planning/02-feature-inventory.md",
-    "feature_count": 8,
-    "dependency_count": 9,
-    "phase": "complete"
+    "iteration": 2,
+    "phase": "complete",
+    "feature_count": 11,
+    "dependency_count": 15
   },
-  "features": {
-    "CDP-01": {
+  "features": [
+    {
+      "id": "CDP-01",
       "name": "CDP WebSocket Client",
-      "category": "Protocol Client",
+      "category": "CDP",
+      "iteration": 1,
+      "status": "implemented",
       "depends_on": []
     },
-    "CDP-02": {
+    {
+      "id": "CDP-02",
       "name": "Session Mode",
-      "category": "Protocol Client",
-      "depends_on": [
-        {
-          "feature": "CDP-01",
-          "needs": "CDPClient class for WebSocket connection, send(), on(), off(), connect(), close()"
-        }
-      ]
+      "category": "CDP",
+      "iteration": 1,
+      "status": "superseded_by_CDP-04",
+      "depends_on": ["CDP-01"]
     },
-    "CDP-03": {
+    {
+      "id": "CDP-03",
       "name": "Protocol Discovery",
-      "category": "Protocol Client",
-      "depends_on": []
+      "category": "CDP",
+      "iteration": 1,
+      "status": "update_needed",
+      "depends_on": ["BRW-04"]
     },
-    "GEN-01": {
+    {
+      "id": "CDP-04",
+      "name": "Attach Mode",
+      "category": "CDP",
+      "iteration": 2,
+      "status": "not_started",
+      "depends_on": ["CDP-01", "BRW-04"]
+    },
+    {
+      "id": "GEN-01",
       "name": "Typed Protocol Bindings",
-      "category": "Code Generation",
-      "depends_on": [
-        {
-          "feature": "CDP-01",
-          "needs": "CDPClient class that the generated code wraps -- generated methods delegate to self._client.send()"
-        }
-      ]
+      "category": "GEN",
+      "iteration": 1,
+      "status": "implemented",
+      "depends_on": ["CDP-01"]
     },
-    "BRW-01": {
+    {
+      "id": "BRW-01",
       "name": "Browser Launch",
-      "category": "Browser Management",
-      "depends_on": [
-        {
-          "feature": "BRW-02",
-          "needs": "check_cdp_port() to poll for port readiness after launch"
-        }
-      ]
+      "category": "BRW",
+      "iteration": 1,
+      "status": "update_needed",
+      "depends_on": ["BRW-02", "BRW-04"]
     },
-    "BRW-02": {
+    {
+      "id": "BRW-02",
       "name": "Browser Status",
-      "category": "Browser Management",
+      "category": "BRW",
+      "iteration": 1,
+      "status": "superseded_by_BRW-05",
       "depends_on": []
     },
-    "BRW-03": {
+    {
+      "id": "BRW-03",
       "name": "Fingerprint Profiles",
-      "category": "Browser Management",
-      "depends_on": [
-        {
-          "feature": "CDP-01",
-          "needs": "CDPClient for connecting to the browser and sending CDP commands"
-        }
-      ]
+      "category": "BRW",
+      "iteration": 1,
+      "status": "implemented",
+      "depends_on": ["CDP-01"]
     },
-    "CLI-01": {
+    {
+      "id": "BRW-04",
+      "name": "Instance Registry",
+      "category": "BRW",
+      "iteration": 2,
+      "status": "not_started",
+      "depends_on": []
+    },
+    {
+      "id": "BRW-05",
+      "name": "Instance Status",
+      "category": "BRW",
+      "iteration": 2,
+      "status": "not_started",
+      "depends_on": ["BRW-04"]
+    },
+    {
+      "id": "CLI-01",
       "name": "One-Shot Commands",
-      "category": "Command-Line Interface",
-      "depends_on": [
-        {
-          "feature": "CDP-01",
-          "needs": "CDPClient, get_ws_url for one-shot CDP commands"
-        },
-        {
-          "feature": "BRW-01",
-          "needs": "launch_browser, cleanup_sessions for the launch and cleanup commands"
-        },
-        {
-          "feature": "BRW-02",
-          "needs": "check_cdp_port for the status command"
-        },
-        {
-          "feature": "CDP-02",
-          "needs": "run_session for the session command"
-        },
-        {
-          "feature": "CDP-03",
-          "needs": "discover_protocol for the help command"
-        }
-      ]
+      "category": "CLI",
+      "iteration": 1,
+      "status": "update_needed",
+      "depends_on": ["CDP-01", "BRW-01", "BRW-02", "CDP-02", "CDP-03", "BRW-04", "CDP-04", "BRW-05"]
     }
-  }
+  ]
 }
