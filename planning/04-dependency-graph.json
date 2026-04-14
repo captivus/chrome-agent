@@ -1,0 +1,91 @@
+{
+  "metadata": {
+    "source_inventory": "planning/02-feature-inventory.md",
+    "feature_count": 8,
+    "dependency_count": 9,
+    "phase": "complete"
+  },
+  "features": {
+    "CDP-01": {
+      "name": "CDP WebSocket Client",
+      "category": "Protocol Client",
+      "depends_on": []
+    },
+    "CDP-02": {
+      "name": "Session Mode",
+      "category": "Protocol Client",
+      "depends_on": [
+        {
+          "feature": "CDP-01",
+          "needs": "CDPClient class for WebSocket connection, send(), on(), off(), connect(), close()"
+        }
+      ]
+    },
+    "CDP-03": {
+      "name": "Protocol Discovery",
+      "category": "Protocol Client",
+      "depends_on": []
+    },
+    "GEN-01": {
+      "name": "Typed Protocol Bindings",
+      "category": "Code Generation",
+      "depends_on": [
+        {
+          "feature": "CDP-01",
+          "needs": "CDPClient class that the generated code wraps -- generated methods delegate to self._client.send()"
+        }
+      ]
+    },
+    "BRW-01": {
+      "name": "Browser Launch",
+      "category": "Browser Management",
+      "depends_on": [
+        {
+          "feature": "BRW-02",
+          "needs": "check_cdp_port() to poll for port readiness after launch"
+        }
+      ]
+    },
+    "BRW-02": {
+      "name": "Browser Status",
+      "category": "Browser Management",
+      "depends_on": []
+    },
+    "BRW-03": {
+      "name": "Fingerprint Profiles",
+      "category": "Browser Management",
+      "depends_on": [
+        {
+          "feature": "CDP-01",
+          "needs": "CDPClient for connecting to the browser and sending CDP commands"
+        }
+      ]
+    },
+    "CLI-01": {
+      "name": "One-Shot Commands",
+      "category": "Command-Line Interface",
+      "depends_on": [
+        {
+          "feature": "CDP-01",
+          "needs": "CDPClient, get_ws_url for one-shot CDP commands"
+        },
+        {
+          "feature": "BRW-01",
+          "needs": "launch_browser, cleanup_sessions for the launch and cleanup commands"
+        },
+        {
+          "feature": "BRW-02",
+          "needs": "check_cdp_port for the status command"
+        },
+        {
+          "feature": "CDP-02",
+          "needs": "run_session for the session command"
+        },
+        {
+          "feature": "CDP-03",
+          "needs": "discover_protocol for the help command"
+        }
+      ]
+    }
+  }
+}

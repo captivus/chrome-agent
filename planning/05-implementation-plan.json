@@ -23,8 +23,8 @@
     "3": {
       "features": ["CLI-01"],
       "order": ["CLI-01"],
-      "gate_satisfied": false,
-      "gate_date": null
+      "gate_satisfied": true,
+      "gate_date": "2026-04-13"
     }
   },
   "features": {
@@ -88,9 +88,9 @@
       "name": "One-Shot Commands",
       "category": "Command-Line Interface",
       "phase": 3,
-      "status": "in progress",
-      "completion_date": null,
-      "notes": ""
+      "status": "complete",
+      "completion_date": "2026-04-13",
+      "notes": "First-iteration convergence, 8/8 tests pass"
     }
   },
   "execution_strategy": {

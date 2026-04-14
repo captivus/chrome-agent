@@ -185,7 +185,7 @@ Document blockers in the feature's Implementation Status. Continue with other fe
 | | GEN-01 | Typed Protocol Bindings | complete | 2026-04-13 | 2 iterations, 5/5 tests pass, 54 domains generated |
 | | BRW-01 | Browser Launch | complete | 2026-04-13 | First-iteration convergence, 6/6 tests pass |
 | | BRW-03 | Fingerprint Profiles | complete | 2026-04-13 | 3 iterations, 11/11 tests pass |
-| **3** | CLI-01 | One-Shot Commands | in progress | | |
+| **3** | CLI-01 | One-Shot Commands | complete | 2026-04-13 | First-iteration convergence, 8/8 tests pass |
 
 ### Phase Status
 
@@ -193,7 +193,7 @@ Document blockers in the feature's Implementation Status. Continue with other fe
 |-------|----------|----------|----------------|------|
 | 1 | 3 | 3 | Yes | 2026-04-13 |
 | 2 | 4 | 4 | Yes | 2026-04-13 |
-| 3 | 1 | 0 | No | |
+| 3 | 1 | 1 | Yes | 2026-04-13 |
 
 ## 5. Companion Data File Reference
 
