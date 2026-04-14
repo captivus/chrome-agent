@@ -56,9 +56,9 @@
       "name": "Typed Protocol Bindings",
       "category": "Code Generation",
       "phase": 2,
-      "status": "in progress",
-      "completion_date": null,
-      "notes": ""
+      "status": "complete",
+      "completion_date": "2026-04-13",
+      "notes": "2 iterations, 5/5 tests pass, 54 domains generated"
     },
     "BRW-01": {
       "name": "Browser Launch",
@@ -80,7 +80,7 @@
       "name": "Fingerprint Profiles",
       "category": "Browser Management",
       "phase": 2,
-      "status": "not started",
+      "status": "in progress",
       "completion_date": null,
       "notes": ""
     },

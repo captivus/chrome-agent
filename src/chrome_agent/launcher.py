@@ -28,6 +28,7 @@ class LaunchResult:
     port: int
     browser_version: str
     user_data_dir: str
+    fingerprint_guard: object | None = None  # CDPClient kept alive for fingerprint
 
 
 class BrowserNotFoundError(Exception):
@@ -114,11 +115,23 @@ async def launch_browser(
     if headless:
         args.append("--headless=new")
 
+    # Apply fingerprint via Chrome command-line flags (persistent)
+    env = os.environ.copy()
+    fp_profile = None
+    if fingerprint is not None:
+        from .fingerprint import load_fingerprint
+        fp_profile = load_fingerprint(path=fingerprint)
+        args.append(f"--user-agent={fp_profile.user_agent}")
+        args.append(f"--window-size={fp_profile.viewport['width']},{fp_profile.viewport['height']}")
+        args.append(f"--lang={fp_profile.locale}")
+        env["TZ"] = fp_profile.timezone
+
     # Phase 3: Launch subprocess
     process = subprocess.Popen(
         args,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
+        env=env,
     )
     logger.info("Launched Chrome PID %d on port %d", process.pid, port)
 
@@ -142,11 +155,12 @@ async def launch_browser(
         process.kill()
         raise TimeoutError("Browser did not start within 30 seconds")
 
-    # Phase 5: Apply fingerprint if provided
-    if fingerprint is not None:
-        # BRW-03 (Fingerprint Profiles) will provide this functionality.
-        # For now, log a warning if fingerprint is requested but not yet available.
-        logger.warning("Fingerprint profiles not yet implemented (BRW-03)")
+    # Phase 5: Apply fingerprint init script if provided
+    fingerprint_guard = None
+    if fp_profile is not None:
+        from .fingerprint import apply_fingerprint
+        fingerprint_guard = await apply_fingerprint(port=port, profile=fp_profile)
+        await asyncio.sleep(0.5)  # allow init script to execute
 
     # Phase 6: Pin to desktop (Linux/X11, best-effort)
     if pin_to_desktop and not headless:
@@ -157,6 +171,7 @@ async def launch_browser(
         port=port,
         browser_version=status.browser_version or "unknown",
         user_data_dir=session_dir,
+        fingerprint_guard=fingerprint_guard,
     )
 
 
