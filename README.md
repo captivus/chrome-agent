@@ -1,148 +1,152 @@
 # chrome-agent
 
 [![PyPI version](https://img.shields.io/pypi/v/chrome-agent)](https://pypi.org/project/chrome-agent/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/chrome-agent)](https://pypi.org/project/chrome-agent/)
 [![Python versions](https://img.shields.io/pypi/pyversions/chrome-agent)](https://pypi.org/project/chrome-agent/)
 [![License](https://img.shields.io/pypi/l/chrome-agent)](https://github.com/captivus/chrome-agent/blob/main/LICENSE)
 
-A CLI tool that gives AI coding agents the ability to observe and interact with Chrome browsers.
+A CLI tool that gives AI coding agents the ability to observe and interact with Chrome browsers via the Chrome DevTools Protocol.
 
-Built as a replacement for browser MCP tools. Faster, lower token overhead, and supports something MCP tools can't do: multiple agents sharing the same browser instance.
+Multiple agents and humans can share the same browser simultaneously. One agent drives while another observes. A human browses while an agent watches for errors. Four agents run a coordinated test suite against a single browser. The protocol supports all of it natively.
 
 ## Why this exists
 
-AI coding agents need to see and interact with browsers -- to test their code, debug automation, inspect page state. The standard approach (browser MCP tools) uses a persistent server with protocol negotiation and verbose response formatting. `chrome-agent` takes a different approach: each command is a standalone CLI call that connects to Chrome via the DevTools Protocol, does one thing, and disconnects. No server, no session state, no bloat.
+AI coding agents need to see and interact with browsers -- to test their code, debug automation, inspect page state. The standard approach (browser MCP tools) uses a persistent server with protocol negotiation and verbose response formatting. `chrome-agent` takes a different approach: direct access to Chrome's DevTools Protocol with no abstraction layer.
 
-This also enables a workflow that MCP tools can't support: one process drives the browser (your automation code) while a separate agent observes the same browser to diagnose issues and improve the code.
+This means full CDP protocol access -- every command, every event, every domain Chrome exposes. Not a curated subset of capabilities, but the complete protocol. Agents compose interactions from CDP primitives the same way DevTools does.
 
 ## Installation
 
 ```bash
 uv tool install chrome-agent
-playwright install chromium
 ```
 
 Or add to a project:
 
 ```bash
 uv add chrome-agent
-uv run playwright install chromium
 ```
 
-## Two ways to use it
+Requires Google Chrome or Chromium installed on the system. No Playwright, no browser downloads.
 
-### Drive mode -- you control the browser
-
-Launch a browser and interact with it directly. This is the MCP replacement use case.
+## Quick Start
 
 ```bash
-chrome-agent launch &
-chrome-agent navigate "https://example.com"
-chrome-agent text                        # Read page content
-chrome-agent element "h1"                # Inspect an element
-chrome-agent fill "#search" "query"      # Fill a form field
-chrome-agent click "#submit"             # Click a button
-chrome-agent screenshot /tmp/page.png    # Capture the screen
+# Launch a browser
+chrome-agent launch
+
+# Check it's running
+chrome-agent status
+
+# Read the page title
+chrome-agent Runtime.evaluate '{"expression": "document.title", "returnByValue": true}'
+
+# Navigate
+chrome-agent Page.navigate '{"url": "https://example.com"}'
+
+# Take a screenshot (returns base64 PNG in JSON)
+chrome-agent Page.captureScreenshot '{"format": "png"}'
+
+# Discover available commands
+chrome-agent help Page
+chrome-agent help Page.navigate
 ```
 
-### Attach mode -- observe a running browser
+## Two Modes
 
-Your automation code launches a browser with `--remote-debugging-port=9222`. You connect to observe what the code is doing, diagnose failures, and figure out what to change.
+### One-shot mode
+
+Send a single CDP command. Connects, sends, prints JSON response, disconnects.
 
 ```bash
-chrome-agent status                      # Is the browser running?
-chrome-agent url                         # Where is it?
-chrome-agent element "#submit-btn"       # Why can't the code click this?
-chrome-agent eval "document.querySelectorAll('.error').length"
-chrome-agent screenshot                  # What does it look like?
+chrome-agent [--port PORT] Domain.method '{"param": "value"}'
 ```
 
-The feedback loop: **write code -> run it -> observe the browser -> diagnose -> modify code -> repeat.**
+Good for spot checks, screenshots, quick queries. ~350ms per call.
 
-## Commands
+### Session mode
 
-```
-chrome-agent [--port PORT] <command> [args...]
-```
+Persistent CDP connection via stdin/stdout. Send commands, subscribe to events, get real-time notifications.
 
-### Check browser status
-
-```
-status                Check if a browser is running on the CDP port
-launch                Launch a browser with CDP enabled
-                      [--fingerprint PATH] [--headless] [--no-pin-desktop]
-help                  Print command reference
+```bash
+chrome-agent session [--port PORT]
 ```
 
-### Observe (read-only, always safe)
-
+Session protocol:
 ```
-url                   Print current URL and page title
-screenshot [path]     Save a screenshot (default: /tmp/cdp-screenshot.png)
-snapshot              Print the ARIA accessibility tree
-text                  Print visible text content
-html [selector]       Print page HTML or a specific element's HTML
-element <selector>    Detailed element inspection (visibility, dimensions,
-                      attributes, position, disabled state)
-find <selector>       Count and list all matching elements
-value <selector>      Get an input element's current value
-eval <code>           Execute JavaScript and print the result
-cookies               List all cookies
-tabs                  List all open tabs/pages
-wait <target>         Wait for a selector, milliseconds, or load state
++Page.loadEventFired              # subscribe to event
++Page.frameNavigated              # subscribe to another
+Page.navigate {"url": "https://example.com"}   # send command
+-Page.loadEventFired              # unsubscribe
 ```
 
-### Navigate
+Responses and events are JSON lines on stdout. ~0.5ms per command.
+
+## Operational Commands
 
 ```
-navigate <url>        Go to a URL
-back                  Browser back
-forward               Browser forward
-reload                Reload the page
+chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT]
+chrome-agent status [--port PORT]
+chrome-agent session [--port PORT]
+chrome-agent help [Domain | Domain.method]
+chrome-agent cleanup
 ```
 
-### Interact
+| Command | Description |
+|---------|-------------|
+| `launch` | Find Chrome, launch with CDP enabled. Refuses if port is occupied. |
+| `status` | Check if a browser is running on the CDP port. |
+| `session` | Start a persistent CDP session (stdin/stdout). |
+| `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |
+| `cleanup` | Remove stale session directories from previous launches. |
 
+## Interacting with Elements
+
+Agents interact with page elements using a three-step pattern: **locate, act, verify.**
+
+```bash
+# Locate -- find element coordinates via JavaScript
+chrome-agent Runtime.evaluate '{"expression": "(() => { const r = document.querySelector(\"#submit\").getBoundingClientRect(); return {x: r.x+r.width/2, y: r.y+r.height/2}; })()", "returnByValue": true}'
+
+# Act -- dispatch real input events at those coordinates
+chrome-agent Input.dispatchMouseEvent '{"type": "mousePressed", "x": 400, "y": 300, "button": "left", "clickCount": 1}'
+chrome-agent Input.dispatchMouseEvent '{"type": "mouseReleased", "x": 400, "y": 300, "button": "left", "clickCount": 1}'
+
+# Verify -- confirm the action worked
+chrome-agent Runtime.evaluate '{"expression": "document.title", "returnByValue": true}'
 ```
-click <selector>      Click an element (JS fallback for hidden elements)
-fill <selector> <val> Fill a form field (clears first)
-type <selector> <txt> Type text character by character
-press <key>           Press a keyboard key (Enter, Escape, Tab, etc.)
-select <sel> <value>  Select a dropdown option
-check <selector>      Check a checkbox
-uncheck <selector>    Uncheck a checkbox
-hover <selector>      Hover over an element
-scroll <target>       Scroll to element, or scroll up/down
-clickxy <x> <y>       Click at page coordinates
-close                 Close the current page
-viewport <w> <h>      Resize the viewport
+
+Chrome processes dispatched input events identically to physical input. A human watching the browser sees the cursor move, buttons depress, text highlight, and pages load in real time.
+
+## Python API
+
+```python
+from chrome_agent.cdp_client import CDPClient, get_ws_url
+from chrome_agent.domains.page import Page
+from chrome_agent.domains.runtime import Runtime
+
+async with CDPClient(ws_url=get_ws_url(port=9222)) as cdp:
+    page = Page(client=cdp)
+    runtime = Runtime(client=cdp)
+
+    await page.navigate(url="https://example.com")
+    result = await runtime.evaluate(expression="document.title", return_by_value=True)
+    print(result["result"]["value"])
 ```
 
-## For AI agents
+54 typed domain classes with snake_case methods generated from Chrome's protocol schema.
 
-The primary user of this tool is an AI coding agent, not a human. See [INSTRUCTIONS.md](INSTRUCTIONS.md) for comprehensive agent instructions covering:
-
-- Drive mode vs attach mode mental model
-- Safety rules for shared browser access
-- The development feedback loop
-- When to observe vs intervene
-- Command recipes for common tasks
-- Failure modes and recovery
-
-Include the contents of `INSTRUCTIONS.md` in your project's `CLAUDE.md` or agent instructions file.
-
-## Browser fingerprinting (optional)
+## Browser Fingerprinting
 
 For sites that detect automated browsers, launch with a fingerprint profile:
 
 ```bash
-chrome-agent launch --fingerprint path/to/fingerprint.json
+chrome-agent launch --fingerprint profile.json
 ```
-
-The fingerprint JSON overrides the browser's user agent, viewport, locale, timezone, and platform to match a real desktop browser:
 
 ```json
 {
-    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) ...",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 ...",
     "platform": "Linux x86_64",
     "vendor": "Google Inc.",
     "language": "en-US",
@@ -151,13 +155,27 @@ The fingerprint JSON overrides the browser's user agent, viewport, locale, timez
 }
 ```
 
-Without `--fingerprint`, the browser launches with default Chromium settings.
+Overrides user agent (HTTP header and JavaScript), viewport, language, timezone, `navigator.webdriver`, `navigator.platform`, `navigator.vendor`, and `window.chrome`. Persists across page navigations.
+
+## For AI Agents
+
+See [AGENTS.md](AGENTS.md) for concise agent instructions (the standard for AI agent tool documentation). Covers commands, session protocol, interaction patterns, and gotchas.
+
+## Collaboration
+
+Multiple participants -- humans, AI agents, or both -- can share a browser simultaneously. Chrome's CDP multiplexes connections: events fan out to all subscribers, DOM mutations are cross-visible, and concurrent access is handled gracefully.
+
+See [docs/collaboration-guide.md](docs/collaboration-guide.md) for:
+- Human-agent collaboration patterns (you browse, agent watches)
+- Agent-driven workflows (agent drives, you supervise)
+- Multi-agent setups (actor + observers)
+- The observation gap (what CDP sees vs what it misses)
+- Full interaction observation via the binding bridge
 
 ## Requirements
 
 - Python >= 3.11
-- Playwright >= 1.50.0
-- Chromium (installed via `playwright install chromium`)
+- Google Chrome or Chromium (system-installed)
 - Linux with xdotool (optional, for virtual desktop pinning)
 
 ## License
