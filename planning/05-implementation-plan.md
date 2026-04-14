@@ -144,20 +144,20 @@ Follow the recommended implementation order within each phase. The order is advi
 
 | Phase | Feature | Status | Notes |
 |-------|---------|--------|-------|
-| 1 | BRW-04 Instance Registry | Not started | |
-| 2 | BRW-05 Instance Status | Not started | |
-| 2 | BRW-01 Browser Launch (update) | Not started | |
-| 2 | CDP-04 Attach Mode | Not started | |
-| 2 | CDP-03 Protocol Discovery (update) | Not started | |
-| 3 | CLI-01 One-Shot Commands (update) | Not started | |
+| 1 | BRW-04 Instance Registry | **Complete** | 12 tests, 131 total suite passing |
+| 2 | BRW-05 Instance Status | **Complete** | 10 tests, 141 total suite passing |
+| 2 | BRW-01 Browser Launch (update) | **Complete** | 8 tests, 142 total suite passing |
+| 2 | CDP-04 Attach Mode | **Complete** | 9 tests, 151 total suite passing |
+| 2 | CDP-03 Protocol Discovery (update) | **Complete** | 8 existing tests still passing, 151 total |
+| 3 | CLI-01 One-Shot Commands (update) | **Complete** | 11 tests, 154 total suite passing |
 
 ### Phase Status
 
 | Phase | Gate Satisfied | Notes |
 |-------|---------------|-------|
-| 1 | No | |
-| 2 | No | |
-| 3 | No | |
+| 1 | **Yes** | BRW-04 complete, all tests passing, process_is_running extracted to utils.py |
+| 2 | **Yes** | All 4 features complete, 151 tests passing, cross-session events and isolation verified |
+| 3 | **Yes** | CLI-01 complete, all routing forms working, 154 tests passing, no regressions |
 
 ## 5. Companion Data File Reference
 
