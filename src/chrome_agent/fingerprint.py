@@ -6,7 +6,12 @@ user agent, timezone, and locale to make the browser appear as a
 real desktop browser.
 """
 
+import asyncio
 import json
+import os
+import subprocess
+import sys
+import textwrap
 from dataclasses import dataclass
 
 from .cdp_client import CDPClient, get_ws_url
@@ -104,7 +109,17 @@ async def apply_fingerprint(
     Raises CDPError if CDP commands fail.
     """
     if client is None:
-        ws_url = get_ws_url(port=port, target_type="page")
+        # Retry page target lookup -- Chrome may not have created the initial
+        # page target yet immediately after launch
+        ws_url = None
+        for _ in range(30):
+            try:
+                ws_url = get_ws_url(port=port, target_type="page")
+                break
+            except RuntimeError:
+                await asyncio.sleep(0.2)
+        if ws_url is None:
+            ws_url = get_ws_url(port=port, target_type="page")
         client = CDPClient(ws_url=ws_url)
         await client.connect()
 
@@ -126,3 +141,55 @@ async def apply_fingerprint(
     )
 
     return client
+
+
+def spawn_fingerprint_guard(port: int, profile: BrowserFingerprint) -> subprocess.Popen:
+    """Spawn a background daemon that holds the fingerprint init script alive.
+
+    Page.addScriptToEvaluateOnNewDocument is session-scoped in CDP -- the
+    script only runs on new documents while the registering CDP connection
+    is alive. This daemon holds that connection open for the lifetime of
+    the browser.
+
+    The daemon is a separate process so it survives the caller exiting.
+    It connects to the browser, registers the init script, and blocks
+    until the browser dies (WebSocket disconnection).
+
+    Returns the Popen handle for the daemon process.
+    """
+    # Serialize the init script as JSON to avoid quoting issues
+    init_script_json = json.dumps(_build_init_script(profile=profile))
+
+    # Build the guard script as a standalone Python program.
+    # No indentation in the heredoc to avoid textwrap issues.
+    guard_script = (
+        "import asyncio, json\n"
+        "from chrome_agent.cdp_client import CDPClient, get_ws_url\n"
+        "async def guard():\n"
+        f"    port = {port}\n"
+        f"    init_script = json.loads({init_script_json!r})\n"
+        "    ws_url = None\n"
+        "    for _ in range(30):\n"
+        "        try:\n"
+        '            ws_url = get_ws_url(port=port, target_type="page")\n'
+        "            break\n"
+        "        except Exception:\n"
+        "            await asyncio.sleep(0.2)\n"
+        "    if ws_url is None:\n"
+        '        ws_url = get_ws_url(port=port, target_type="page")\n'
+        "    cdp = CDPClient(ws_url=ws_url)\n"
+        "    await cdp.connect()\n"
+        '    await cdp.send(method="Page.enable")\n'
+        '    await cdp.send(method="Page.addScriptToEvaluateOnNewDocument", params={"source": init_script})\n'
+        '    await cdp.send(method="Page.navigate", params={"url": "data:text/html,<html></html>"})\n'
+        "    while cdp._connected:\n"
+        "        await asyncio.sleep(1)\n"
+        "asyncio.run(guard())\n"
+    )
+
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-c", guard_script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return process

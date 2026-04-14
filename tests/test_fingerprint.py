@@ -56,9 +56,10 @@ def fingerprinted_browser(profile_path):
 
     yield result
 
-    # Close the fingerprint guard connection
+    # Terminate the fingerprint guard daemon
     if result.fingerprint_guard is not None:
-        loop.run_until_complete(result.fingerprint_guard.close())
+        result.fingerprint_guard.terminate()
+        result.fingerprint_guard.wait(timeout=5)
     try:
         os.kill(result.pid, signal.SIGTERM)
     except ProcessLookupError:
