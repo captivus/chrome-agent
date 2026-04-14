@@ -75,21 +75,22 @@ chrome-agent Runtime.evaluate '{"expression": "(() => { const el = document.quer
 
 ## Observing a Browser
 
-Use the Python API for persistent monitoring:
+Use the observer script with Claude Code's Monitor tool for real-time event notifications:
 
-```python
-from chrome_agent.cdp_client import CDPClient, get_ws_url
-
-async def observe():
-    ws_url = get_ws_url(port=9222, target_type="page")
-    async with CDPClient(ws_url=ws_url) as cdp:
-        await cdp.send(method="Page.enable")
-        cdp.on(event="Page.frameNavigated", callback=lambda p:
-            print(f"Navigated: {p.get('frame',{}).get('url','')}"))
-        # stays connected, receiving events
+```bash
+# Three tiers: nav (navigation only), dev (+ errors + network), full (+ clicks/scrolls/selection)
+uv run python scripts/observe.py --tier dev
 ```
 
-Multiple CDP connections coexist. A monitor, query connections, and a human using the browser all share it without conflict.
+The observer streams filtered events as `[TAG] content` lines:
+```
+[PAGE] Example Domain | https://example.com
+[LOADED]
+[XHR] POST https://api.example.com/login
+[ERR] TypeError: Cannot read properties of null
+```
+
+Multiple CDP connections coexist. The observer, query connections, and a human all share the browser without conflict. See `docs/monitor-integration.md` for the full Monitor integration guide.
 
 ## What You Can and Cannot See
 
@@ -122,4 +123,5 @@ async with CDPClient(ws_url=ws_url) as cdp:
 ## Further Reading
 
 - `docs/collaboration-guide.md` -- human-agent collaboration patterns, multi-agent workflows
+- `docs/monitor-integration.md` -- Claude Code Monitor integration, observer script, push vs pull
 - `docs/cdp-collaboration-reference.md` -- CDP protocol mechanics, event catalog, binding bridge

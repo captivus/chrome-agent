@@ -2,7 +2,7 @@
 
 Chrome-agent lets multiple participants -- humans, AI agents, or both -- share one browser in real time. This guide shows you how, starting with the simplest case and building to multi-agent development workflows.
 
-For the underlying protocol mechanics, see [cdp-collaboration-reference.md](cdp-collaboration-reference.md) .
+For the underlying protocol mechanics, see [cdp-collaboration-reference.md](cdp-collaboration-reference.md) . For real-time observation using Claude Code's Monitor tool, see [monitor-integration.md](monitor-integration.md) .
 
 ## Key Ideas
 
@@ -205,56 +205,32 @@ You're exploring a site or testing your web app. An AI agent follows along, catc
 
 ### Setup
 
-The agent starts a monitoring script that holds a persistent CDP connection and prints events to stdout. In Claude Code, the Monitor tool streams each line as a real-time notification:
+The agent starts the observer script via Claude Code's Monitor tool. The script subscribes to CDP events and streams formatted notifications. See [monitor-integration.md](monitor-integration.md) for full details.
 
-```python
-# monitor_browser.py
-import asyncio
-from chrome_agent.cdp_client import CDPClient, get_ws_url
-
-async def observe():
-    ws_url = get_ws_url(port=9222, target_type="page")
-    cdp = CDPClient(ws_url=ws_url)
-    await cdp.connect()
-
-    await cdp.send(method="Page.enable")
-    await cdp.send(method="Network.enable")
-
-    def on_navigate(params):
-        frame = params.get("frame", {})
-        if not frame.get("parentId"):  # top-level only
-            print(f'[PAGE] {frame.get("title", "")} | {frame.get("url", "")}', flush=True)
-
-    def on_request(params):
-        req_type = params.get("type", "")
-        if req_type in ("Document", "XHR", "Fetch"):
-            url = params.get("request", {}).get("url", "")
-            print(f"[{req_type}] {url[:120]}", flush=True)
-
-    cdp.on(event="Page.frameNavigated", callback=on_navigate)
-    cdp.on(event="Network.requestWillBeSent", callback=on_request)
-
-    print("[MONITOR] Watching -- navigate freely", flush=True)
-    while cdp._connected:
-        await asyncio.sleep(1)
-
-asyncio.run(observe())
+```bash
+# Agent starts the observer (three tiers: nav, dev, full)
+uv run python scripts/observe.py --tier dev
 ```
 
-While the monitor runs, the agent queries the page on demand via separate one-shot connections:
-
-```python
-# Agent reads the page -- separate connection, doesn't interfere with monitor
-async with CDPClient(ws_url=ws_url) as cdp:
-    title = await cdp.send(method="Runtime.evaluate", params={
-        "expression": "document.querySelector('#productTitle')?.textContent.trim()",
-        "returnByValue": True,
-    })
-
-    screenshot = await cdp.send(method="Page.captureScreenshot", params={"format": "png"})
+The agent sees notifications like:
+```
+[PAGE] Products | https://myapp.com/products
+[LOADED]
+[XHR] POST https://myapp.com/api/search
+[ERR] Failed to load image: 404
 ```
 
-The monitor streams events continuously. DOM queries and screenshots happen on demand. Both are separate CDP connections that coexist with the human's browser usage.
+While the monitor runs, the agent queries the page on demand via separate one-shot commands:
+
+```bash
+# Read page content
+chrome-agent Runtime.evaluate '{"expression": "document.querySelector(\"#productTitle\")?.textContent.trim()", "returnByValue": true}'
+
+# Take a screenshot
+chrome-agent Page.captureScreenshot '{"format": "png"}'
+```
+
+The monitor and one-shot commands are separate CDP connections that coexist with the human's browser usage.
 
 ### What the agent sees
 
@@ -312,51 +288,13 @@ chrome-agent launch
 
 ### Step 2: Agent starts monitoring errors
 
-The agent sets up a monitor that watches for problems:
+The agent starts the observer script with the `dev` tier, which captures console errors, unhandled exceptions, and failed network requests:
 
-```python
-# error_monitor.py
-import asyncio
-from chrome_agent.cdp_client import CDPClient, get_ws_url
-
-async def watch_errors():
-    ws_url = get_ws_url(port=9222, target_type="page")
-    cdp = CDPClient(ws_url=ws_url)
-    await cdp.connect()
-
-    await cdp.send(method="Runtime.enable")
-    await cdp.send(method="Log.enable")
-    await cdp.send(method="Network.enable")
-
-    def on_console(params):
-        level = params.get("type", "log")
-        args = params.get("args", [])
-        text = " ".join(a.get("value", a.get("description", "?")) for a in args)
-        if level in ("error", "warning"):
-            print(f"[{level.upper()}] {text[:200]}", flush=True)
-
-    def on_exception(params):
-        details = params.get("exceptionDetails", {})
-        text = details.get("text", "")
-        url = details.get("url", "")
-        line = details.get("lineNumber", "?")
-        print(f"[EXCEPTION] {text} at {url}:{line}", flush=True)
-
-    def on_network_fail(params):
-        url = params.get("request", {}).get("url", "") if "request" in params else ""
-        error = params.get("errorText", "")
-        print(f"[NET FAIL] {error}: {url[:120]}", flush=True)
-
-    cdp.on(event="Runtime.consoleAPICalled", callback=on_console)
-    cdp.on(event="Runtime.exceptionThrown", callback=on_exception)
-    cdp.on(event="Network.loadingFailed", callback=on_network_fail)
-
-    print("[ERROR MONITOR] Watching for errors", flush=True)
-    while cdp._connected:
-        await asyncio.sleep(1)
-
-asyncio.run(watch_errors())
+```bash
+uv run python scripts/observe.py --tier dev
 ```
+
+See [monitor-integration.md](monitor-integration.md) for how to launch this via Claude Code's Monitor tool.
 
 ### Step 3: You use the app
 

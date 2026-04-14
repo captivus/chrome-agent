@@ -172,6 +172,8 @@ See [docs/collaboration-guide.md](docs/collaboration-guide.md) for:
 - The observation gap (what CDP sees vs what it misses)
 - Full interaction observation via the binding bridge
 
+For real-time observation using Claude Code's Monitor tool, see [docs/monitor-integration.md](docs/monitor-integration.md) . Includes a ready-to-use observer script with three verbosity tiers and rate limiting for noisy pages.
+
 ## Requirements
 
 - Python >= 3.11
