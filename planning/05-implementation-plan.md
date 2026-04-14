@@ -182,8 +182,8 @@ Document blockers in the feature's Implementation Status. Continue with other fe
 | | CDP-03 | Protocol Discovery | complete | 2026-04-13 | First-iteration convergence, 8/8 tests pass |
 | | BRW-02 | Browser Status | complete | 2026-04-13 | Pre-existing code, added validation tests, 4/4 pass |
 | **2** | CDP-02 | Session Mode | complete | 2026-04-13 | 3 iterations to converge, 9/9 tests pass |
-| | GEN-01 | Typed Protocol Bindings | not started | | |
-| | BRW-01 | Browser Launch | in progress | | |
+| | GEN-01 | Typed Protocol Bindings | in progress | | |
+| | BRW-01 | Browser Launch | complete | 2026-04-13 | First-iteration convergence, 6/6 tests pass |
 | | BRW-03 | Fingerprint Profiles | not started | | |
 | **3** | CLI-01 | One-Shot Commands | not started | | |
 

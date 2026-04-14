@@ -56,7 +56,7 @@
       "name": "Typed Protocol Bindings",
       "category": "Code Generation",
       "phase": 2,
-      "status": "not started",
+      "status": "in progress",
       "completion_date": null,
       "notes": ""
     },
@@ -64,9 +64,9 @@
       "name": "Browser Launch",
       "category": "Browser Management",
       "phase": 2,
-      "status": "in progress",
-      "completion_date": null,
-      "notes": ""
+      "status": "complete",
+      "completion_date": "2026-04-13",
+      "notes": "First-iteration convergence, 6/6 tests pass"
     },
     "BRW-02": {
       "name": "Browser Status",
