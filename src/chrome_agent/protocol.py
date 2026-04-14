@@ -10,7 +10,44 @@ Synchronous. Uses stdlib only (urllib + json).
 """
 
 import json
+import logging
 import urllib.request
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_port(
+    instance_name: str | None,
+    port: int | None,
+) -> int | None:
+    """Resolve a port from instance name, auto-selection, or explicit port.
+
+    Precedence:
+    1. instance_name provided -> registry lookup
+    2. Auto-select single live instance (when instance_name is None)
+    3. Explicit port (when port is not None)
+    4. None (caller falls back to static usage)
+    """
+    if instance_name is not None:
+        from .registry import lookup
+        info = lookup(instance_name=instance_name)
+        return info.port
+
+    # Auto-select: if exactly one live instance, use it
+    try:
+        from .registry import enumerate_instances
+        instances = enumerate_instances()
+        live = [i for i in instances if i.alive]
+        if len(live) == 1:
+            return live[0].port
+    except Exception:
+        pass  # Registry not available or empty
+
+    # Explicit port fallback
+    if port is not None:
+        return port
+
+    return None
 
 
 def fetch_protocol_schema(port: int = 9222) -> dict:
@@ -33,8 +70,9 @@ def fetch_protocol_schema(port: int = 9222) -> dict:
 
 
 def discover_protocol(
-    port: int = 9222,
+    port: int | None = None,
     query: str | None = None,
+    instance_name: str | None = None,
 ) -> None:
     """Query the browser's protocol schema and print formatted output.
 
@@ -42,12 +80,22 @@ def discover_protocol(
     query="Page": list commands and events in the Page domain
     query="Page.navigate": show full details for Page.navigate
 
+    Port resolution precedence:
+    1. instance_name (registry lookup)
+    2. Auto-select single live instance
+    3. Explicit port parameter
+    4. None -> caller handles static usage fallback
+
     Synchronous. Uses stdlib urllib.
 
-    Raises ConnectionError if no browser is running on the port.
+    Raises ConnectionError if no browser is running on the resolved port.
     Raises ValueError if the domain or method is not found.
+    Raises InstanceNotFoundError if instance_name is not in the registry.
     """
-    schema = fetch_protocol_schema(port=port)
+    resolved_port = _resolve_port(instance_name=instance_name, port=port)
+    if resolved_port is None:
+        raise ConnectionError("No browser available for protocol discovery")
+    schema = fetch_protocol_schema(port=resolved_port)
     domains = schema["domains"]
 
     if query is None:
