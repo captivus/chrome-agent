@@ -148,6 +148,55 @@ def test_browser_not_found(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Port already occupied
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_launch_port_occupied():
+    """Refuses to launch when port is already in use."""
+    # Launch a browser on the test port
+    first = await launch_browser(
+        port=LAUNCH_PORT,
+        headless=True,
+        pin_to_desktop=False,
+    )
+    try:
+        # Count Chrome processes before second launch attempt
+        import subprocess as sp
+        before = sp.run(
+            ["pgrep", "--count", "--full", "remote-debugging-port"],
+            capture_output=True, text=True,
+        )
+        count_before = int(before.stdout.strip()) if before.returncode == 0 else 0
+
+        # Attempt to launch on the same port
+        with pytest.raises(RuntimeError, match="already in use"):
+            await launch_browser(
+                port=LAUNCH_PORT,
+                headless=True,
+                pin_to_desktop=False,
+            )
+
+        # Verify no new Chrome process was spawned
+        after = sp.run(
+            ["pgrep", "--count", "--full", "remote-debugging-port"],
+            capture_output=True, text=True,
+        )
+        count_after = int(after.stdout.strip()) if after.returncode == 0 else 0
+        assert count_after == count_before, (
+            f"New Chrome process spawned despite occupied port: {count_before} -> {count_after}"
+        )
+
+        # Verify original browser is undisturbed
+        status = check_cdp_port(port=LAUNCH_PORT)
+        assert status.listening is True
+    finally:
+        os.kill(first.pid, signal.SIGTERM)
+        await asyncio.sleep(0.5)
+
+
+# ---------------------------------------------------------------------------
 # Session cleanup
 # ---------------------------------------------------------------------------
 

@@ -94,8 +94,19 @@ async def launch_browser(
     The browser continues running after this function returns.
 
     Raises BrowserNotFoundError if Chrome is not installed.
+    Raises RuntimeError if the port is already in use.
     Raises TimeoutError if the browser doesn't start within 30 seconds.
     """
+    # Phase 0: Check if port is already occupied
+    existing = check_cdp_port(port=port)
+    if existing.listening:
+        version = existing.browser_version or "unknown"
+        raise RuntimeError(
+            f"Port {port} is already in use ({version}). "
+            f"Kill the existing browser with: kill $(lsof -ti:{port}) "
+            f"or use a different port with --port."
+        )
+
     # Phase 1: Find Chrome binary
     binary = find_chrome_binary()
     if binary is None:

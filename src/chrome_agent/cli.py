@@ -72,11 +72,15 @@ async def _run_launch(port: int, args: list[str]) -> None:
             print(f"Error: unknown launch option: {args[i]}", file=sys.stderr)
             sys.exit(1)
 
-    result = await launch_browser(
-        port=port,
-        fingerprint=fingerprint_path,
-        headless=headless,
-    )
+    try:
+        result = await launch_browser(
+            port=port,
+            fingerprint=fingerprint_path,
+            headless=headless,
+        )
+    except (RuntimeError, TimeoutError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     print(f"Browser launched on port {port}")
     print(f"  PID:     {result.pid}")
     print(f"  Version: {result.browser_version}")
