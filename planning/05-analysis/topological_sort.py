@@ -2,126 +2,124 @@
 
 Reads planning/04-dependency-graph.json and:
 1. Assigns each feature to a phase based on dependency depth
-2. Verifies no intra-phase dependencies
-3. Computes the critical path (longest sequential chain)
+2. Computes the critical path (longest sequential chain)
+3. Identifies parallel development opportunities within each phase
+4. Outputs phase assignments and critical path
 """
-
 import json
+from collections import defaultdict
 from pathlib import Path
 
 
-def load_graph():
+def main():
     path = Path(__file__).parent.parent / "04-dependency-graph.json"
     with open(path) as f:
-        return json.load(f)
+        data = json.load(f)
 
+    # Build adjacency and reverse adjacency
+    features = {}
+    deps = {}
+    for f in data["features"]:
+        fid = f["id"]
+        features[fid] = f
+        d = f.get("depends_on", [])
+        deps[fid] = d if isinstance(d, list) and (not d or isinstance(d[0], str)) else []
 
-def compute_phases(features):
-    """Assign each feature to a phase based on dependency depth."""
+    # Compute phases by dependency depth (BFS-based layer assignment)
+    in_degree = {fid: 0 for fid in features}
+    for fid, dep_list in deps.items():
+        for dep in dep_list:
+            if dep in features:
+                in_degree[fid] += 1  # wrong direction, let me fix
+
+    # Actually: in_degree counts how many deps each feature has
+    in_degree = {fid: len([d for d in dep_list if d in features]) for fid, dep_list in deps.items()}
+
+    # Reverse map: feature -> features that depend on it
+    dependents = defaultdict(list)
+    for fid, dep_list in deps.items():
+        for dep in dep_list:
+            if dep in features:
+                dependents[dep].append(fid)
+
+    # BFS layer assignment
     phases = {}
+    queue = [fid for fid, deg in in_degree.items() if deg == 0]
+    remaining_deps = dict(in_degree)
+    phase_num = 1
 
-    def get_phase(fid):
-        if fid in phases:
-            return phases[fid]
-        deps = features[fid].get("depends_on", [])
-        if not deps:
-            phases[fid] = 1
-            return 1
-        max_dep_phase = max(get_phase(d["feature"]) for d in deps)
-        phases[fid] = max_dep_phase + 1
-        return phases[fid]
+    while queue:
+        # All features in this batch have all deps satisfied
+        for fid in queue:
+            phases[fid] = phase_num
 
-    for fid in features:
-        get_phase(fid)
+        next_queue = []
+        for fid in queue:
+            for dependent in dependents[fid]:
+                remaining_deps[dependent] -= 1
+                if remaining_deps[dependent] == 0:
+                    next_queue.append(dependent)
 
-    return phases
-
-
-def verify_no_intra_phase_deps(features, phases):
-    """Check that no features within the same phase depend on each other."""
-    errors = []
-    for fid, feature in features.items():
-        for dep in feature.get("depends_on", []):
-            dep_id = dep["feature"]
-            if dep_id in phases and phases[fid] == phases[dep_id]:
-                errors.append(f"{fid} and {dep_id} are both in phase {phases[fid]} but {fid} depends on {dep_id}")
-    return errors
-
-
-def compute_critical_path(features, phases):
-    """Find the longest sequential chain through the phase structure."""
-    # Build reverse lookup: for each feature, what depends on it
-    dependents = {fid: [] for fid in features}
-    for fid, feature in features.items():
-        for dep in feature.get("depends_on", []):
-            dep_id = dep["feature"]
-            if dep_id in dependents:
-                dependents[dep_id].append(fid)
-
-    # Find longest path from each root
-    memo = {}
-
-    def longest_path(fid):
-        if fid in memo:
-            return memo[fid]
-        deps_of = dependents[fid]
-        if not deps_of:
-            memo[fid] = [fid]
-            return [fid]
-        best = max((longest_path(d) for d in deps_of), key=len)
-        memo[fid] = [fid] + best
-        return memo[fid]
-
-    # Start from all roots (no dependencies)
-    roots = [fid for fid, f in features.items() if not f.get("depends_on")]
-    all_paths = [longest_path(r) for r in roots]
-    critical = max(all_paths, key=len)
-    return critical
-
-
-def main():
-    graph = load_graph()
-    features = graph["features"]
-
-    # Compute phases
-    phases = compute_phases(features)
-
-    # Verify
-    errors = verify_no_intra_phase_deps(features, phases)
-    if errors:
-        print("INTRA-PHASE DEPENDENCY ERRORS:")
-        for e in errors:
-            print(f"  - {e}")
-        return
+        queue = next_queue
+        phase_num += 1
 
     # Group by phase
-    phase_groups = {}
-    for fid, phase in phases.items():
-        phase_groups.setdefault(phase, []).append(fid)
+    phase_groups = defaultdict(list)
+    for fid, phase in sorted(phases.items(), key=lambda x: (x[1], x[0])):
+        phase_groups[phase].append(fid)
 
     # Print phases
     print("PHASE ASSIGNMENTS")
     print("=" * 60)
-    for phase_num in sorted(phase_groups):
-        features_in_phase = phase_groups[phase_num]
-        names = [f"{fid} ({features[fid]['name']})" for fid in features_in_phase]
-        print(f"\n  Phase {phase_num} ({len(features_in_phase)} features):")
-        for name in names:
-            print(f"    - {name}")
+    for phase in sorted(phase_groups.keys()):
+        fids = phase_groups[phase]
+        print(f"\nPhase {phase} ({len(fids)} features):")
+        for fid in fids:
+            f = features[fid]
+            dep_str = ", ".join(deps[fid]) if deps[fid] else "none"
+            status = f.get("status", "?")
+            print(f"  {fid} ({f['name']}) [iter {f.get('iteration', '?')}, {status}] deps: {dep_str}")
 
-    # Critical path
-    critical = compute_critical_path(features, phases)
-    print(f"\nCRITICAL PATH ({len(critical)} features, {max(phases.values())} phases):")
-    print(f"  {' -> '.join(critical)}")
+    # Critical path: longest path through the DAG
+    # Use dynamic programming on topological order
+    longest = {fid: 0 for fid in features}
+    predecessor = {fid: None for fid in features}
 
-    # Output as JSON for the implementation plan
-    output = {
-        "phases": {str(p): sorted(fids) for p, fids in sorted(phase_groups.items())},
-        "critical_path": critical,
-        "feature_phases": phases,
-    }
-    print(f"\nJSON output:")
-    print(json.dumps(output, indent=2))
+    # Process in phase order (topological order)
+    for phase in sorted(phase_groups.keys()):
+        for fid in phase_groups[phase]:
+            for dep in deps[fid]:
+                if dep in features and longest[dep] + 1 > longest[fid]:
+                    longest[fid] = longest[dep] + 1
+                    predecessor[fid] = dep
+
+    # Find the feature with the longest path
+    max_feature = max(longest, key=longest.get)
+    max_length = longest[max_feature]
+
+    # Trace back the critical path
+    critical_path = []
+    current = max_feature
+    while current is not None:
+        critical_path.append(current)
+        current = predecessor[current]
+    critical_path.reverse()
+
+    print(f"\nCRITICAL PATH (length {max_length + 1}):")
+    print(" -> ".join(critical_path))
+    print(f"Phases on critical path: {[phases[fid] for fid in critical_path]}")
+
+    # Identify features NOT on critical path
+    critical_set = set(critical_path)
+    off_critical = [fid for fid in features if fid not in critical_set]
+    print(f"\nOff critical path: {off_critical}")
+
+    # Iteration 2 scope only
+    print(f"\nITERATION 2 SCOPE:")
+    iter2_features = [fid for fid, f in features.items()
+                      if f.get("status") in ("not_started", "update_needed")]
+    for fid in sorted(iter2_features, key=lambda x: phases[x]):
+        print(f"  Phase {phases[fid]}: {fid} ({features[fid]['name']}) [{features[fid]['status']}]")
 
 
 if __name__ == "__main__":

@@ -6,19 +6,24 @@
 
 ### Phase Overview
 
+This plan covers **iteration 2 scope only** -- 3 new features and 3 updates to existing features. Iteration 1 features (CDP-01, CDP-02, BRW-02, BRW-03, GEN-01) are already implemented and not re-tracked.
+
 | Phase | Features | Count | Dependencies Satisfied By |
 |-------|----------|-------|--------------------------|
-| 1 | CDP-01 (CDP WebSocket Client) <br> CDP-03 (Protocol Discovery) <br> BRW-02 (Browser Status) | 3 | None -- root features |
-| 2 | CDP-02 (Session Mode) <br> GEN-01 (Typed Protocol Bindings) <br> BRW-01 (Browser Launch) <br> BRW-03 (Fingerprint Profiles) | 4 | Phase 1: CDP-01, BRW-02 |
-| 3 | CLI-01 (One-Shot Commands) | 1 | Phase 1: CDP-01, CDP-03, BRW-02 <br> Phase 2: CDP-02, BRW-01 |
+| 1 | BRW-04 (Instance Registry) | 1 | None -- root feature |
+| 2 | BRW-05 (Instance Status) | 4 | Phase 1: BRW-04 |
+| | BRW-01 (Browser Launch update) | | Phase 1: BRW-04 + iter 1: BRW-02 |
+| | CDP-04 (Attach Mode) | | Phase 1: BRW-04 + iter 1: CDP-01 |
+| | CDP-03 (Protocol Discovery update) | | Phase 1: BRW-04 |
+| 3 | CLI-01 (One-Shot Commands update) | 1 | Phase 1: BRW-04 + Phase 2: all + iter 1: CDP-01, BRW-02, CDP-02 |
 
 ### Critical Path
 
 ```mermaid
 flowchart LR
-    P1["Phase 1<br/>3 root features<br/>(CDP-01, CDP-03, BRW-02)"]
-    P2["Phase 2<br/>4 features<br/>(CDP-02, GEN-01, BRW-01, BRW-03)"]
-    P3["Phase 3<br/>1 feature<br/>(CLI-01)"]
+    P1["Phase 1<br/>BRW-04<br/>Instance Registry"]
+    P2["Phase 2<br/>4 features<br/>BRW-05, BRW-01, CDP-04, CDP-03"]
+    P3["Phase 3<br/>CLI-01<br/>One-Shot Commands"]
 
     P1 --> P2 --> P3
 
@@ -27,11 +32,7 @@ flowchart LR
     style P3 fill:#ff9,stroke:#333,stroke-width:2px
 ```
 
-The critical path runs: **CDP WebSocket Client → Session Mode → One-Shot Commands**. This is the longest sequential chain -- 3 phases, can't be compressed. CDP WebSocket Client is the most critical feature: it blocks 4 of the 7 downstream features. Any delay in CDP WebSocket Client cascades through the entire plan.
-
-Phase 1 has 3 independent features and Phase 2 has 4 independent features -- significant parallel opportunity in both. Phase 3 is a single feature that integrates everything.
-
-Protocol Discovery and Browser Status are off the critical path -- delays in either can be absorbed within Phase 1 without pushing back Phase 2 (as long as Browser Status finishes before Browser Launch needs it in Phase 2).
+The critical path runs through all 3 phases: BRW-04 -> (any Phase 2 feature) -> CLI-01. Every feature is on the critical path since Phase 1 and Phase 3 have single features, and Phase 2 must complete entirely before Phase 3 begins. Phase 2 is the widest phase with 4 features -- the main parallelism opportunity.
 
 ## 2. Phase Details
 
@@ -39,162 +40,125 @@ Protocol Discovery and Browser Status are off the critical path -- delays in eit
 
 #### Features
 
-- CDP-01 (CDP WebSocket Client)
-- CDP-03 (Protocol Discovery)
-- BRW-02 (Browser Status)
+- BRW-04 (Instance Registry) -- **new**
 
 #### Parallel Development Opportunities
 
-All three features are fully independent -- no formal or conceptual dependencies between them. However, CDP WebSocket Client establishes the async patterns and connection infrastructure that Phase 2 features will build on. Building it first gives a working foundation to test against.
-
-Browser Status and Protocol Discovery are both small, stdlib-only features with no async complexity. They can be built in parallel with each other at any point during Phase 1.
+Single feature -- no parallelism. This is the foundational feature that everything else depends on.
 
 #### Recommended Implementation Order
 
-1. **CDP WebSocket Client** -- on the critical path, foundation for everything. Establishes the async patterns (context manager, event dispatch, error propagation) that the rest of the project follows. Build first.
-2. **Browser Status** -- small, already exists in the current codebase. Quick to port. Browser Launch in Phase 2 needs it.
-3. **Protocol Discovery** -- small, standalone. Lowest priority in Phase 1 because only One-Shot Commands (Phase 3) depends on it.
+1. BRW-04 -- creates `registry.py` with register, lookup, enumerate, cleanup, allocate_port, derive_instance_name. Also extracts `process_is_running` to a shared utility module.
 
 #### Phase Completion Criteria
 
-- **CDP WebSocket Client**: All tests pass -- command round-trip, event subscription and delivery, message ID correlation, session multiplexing (sessionId routing), CDP error propagation, WebSocket disconnection handling, context manager lifecycle (normal and exception paths). The client connects to a real browser, sends commands, and receives events.
-- **Browser Status**: All tests pass -- detects running browser with version/URL/title, reports "no browser" on empty port, handles non-Chrome port gracefully.
-- **Protocol Discovery**: All tests pass -- lists domains, shows domain detail, shows method detail, handles no-browser and unknown-domain errors. `fetch_protocol_schema()` returns valid schema JSON from a running browser.
-- **Integration verification**: CDP WebSocket Client connects to a browser that Browser Status confirms is running. Protocol Discovery queries the same browser's protocol schema endpoint.
-- **Phase gate**: All 3 features complete, all tests passing, integration verified. Phase 2 may begin.
+- BRW-04: All test definitions pass -- register/lookup, sequential registration, port override, port skips occupied, name special characters, lookup not found, lookup empty registry, enumerate mixed liveness, cleanup removes stale, cleanup preserves live, corrupted registry recovery
+- `process_is_running` extracted to shared utility, imported by both registry and launcher
+- **Phase gate:** BRW-04 complete, all tests passing. Phase 2 features may begin.
 
 ### Phase 2
 
 #### Features
 
-- CDP-02 (Session Mode)
-- GEN-01 (Typed Protocol Bindings)
-- BRW-01 (Browser Launch)
-- BRW-03 (Fingerprint Profiles)
+- BRW-05 (Instance Status) -- **new**
+- BRW-01 (Browser Launch) -- **update**
+- CDP-04 (Attach Mode) -- **new**
+- CDP-03 (Protocol Discovery) -- **update**
 
 #### Parallel Development Opportunities
 
-All four features are independent of each other -- they share Phase 1 dependencies (CDP WebSocket Client, Browser Status) but not each other. All four could theoretically be built in parallel.
+All 4 features depend on BRW-04 (Phase 1) but not on each other. They could all be built in parallel. However, sequential ordering provides benefits:
 
-Session Mode and Typed Protocol Bindings both build on CDP WebSocket Client but in completely different ways -- Session Mode wraps it in a stdin/stdout bridge, Typed Protocol Bindings generates code that delegates to it. No conceptual overlap.
-
-Browser Launch and Fingerprint Profiles operate in the same domain (browser management) but are independent -- Launch starts a browser, Fingerprint Profiles configures one that's already running.
+- BRW-05 is the simplest (Small complexity) and validates that the registry interfaces work correctly from a consumer's perspective. Building it first exercises the registry before more complex features depend on it.
+- BRW-01 update integrates the registry with the launch flow. After this, `chrome-agent launch` creates named instances -- providing the infrastructure that CDP-04 and CDP-03 need for end-to-end testing.
+- CDP-04 is the most complex feature (Large complexity). Building it after BRW-05 and BRW-01 means the registry is well-exercised and launch produces registered instances that attach can connect to.
+- CDP-03 update is the simplest change (just instance name routing). It can go last because nothing else in this phase depends on it.
 
 #### Recommended Implementation Order
 
-1. **Session Mode** -- on the critical path. Blocking Phase 3. Most complex feature in the iteration. Build first to surface problems early.
-2. **Browser Launch** -- highest risk (platform-specific binary discovery, subprocess lifecycle). Build early to catch environment-specific failures.
-3. **Typed Protocol Bindings** -- the code generator. Can run in parallel with Browser Launch since they're independent. Produces the library API surface.
-4. **Fingerprint Profiles** -- lowest priority in Phase 2. Medium complexity, only used when the agent explicitly requests fingerprinting.
+1. BRW-05 (Instance Status) -- simplest new feature, validates registry consumer interface
+2. BRW-01 (Browser Launch update) -- integrates registry with launch, enables end-to-end testing
+3. CDP-04 (Attach Mode) -- most complex, benefits from registry being exercised via launch
+4. CDP-03 (Protocol Discovery update) -- simplest update, independent of other Phase 2 features
 
 #### Phase Completion Criteria
 
-- **Session Mode**: All tests pass -- command round-trip through stdin/stdout, event subscription and unsubscription, malformed input handling, CDP error forwarding, browser crash handling, clean shutdown via EOF, readiness signal, multi-command sequences. Monitor integration verified (unbuffered output, single-line messages, SIGTERM handling).
-- **Typed Protocol Bindings**: Generator runs against a browser's protocol schema and produces importable Python modules for all domains. Generated code is importable, methods have correct snake_case signatures with typed parameters, a command works end-to-end through the typed interface (e.g., `page.navigate(url=...)` produces the same result as `cdp.send("Page.navigate", {"url": ...})`).
-- **Browser Launch**: All tests pass -- successful launch on the current platform, binary-not-found error with searched paths, headless mode, cleanup of stale session directories (removes stale, preserves active). A launched browser is connectable via CDP WebSocket Client.
-- **Fingerprint Profiles**: All tests pass -- all 9 fingerprint signals verified (user agent, platform, vendor, webdriver, window.chrome, viewport dimensions, timezone, language), fingerprint persists across navigation.
-- **Integration verification**: Session Mode connects to a browser launched by Browser Launch. Typed Protocol Bindings' generated code works through CDP WebSocket Client against a launched browser. Fingerprint Profiles applies to a launched browser and the overrides are visible through CDP WebSocket Client.
-- **Phase gate**: All 4 features complete, all tests passing, integration verified. Phase 3 may begin.
+- BRW-05: Status lists all instances with page targets, dead instances shown, single-instance filtering works
+- BRW-01: Launch auto-allocates ports, registers instances, returns InstanceInfo, structured JSON output works
+- CDP-04: Attach connects with isolated subscriptions, events stream to stdout, cross-session event delivery works, clean shutdown on EOF/SIGTERM
+- CDP-03: Help resolves instance names, auto-selects single live instance, explicit port fallback works
+- **Integration verification:** Launch an instance -> status shows it -> attach to it -> verify events flow -> one-shot commands work alongside attach -> help resolves the instance name
+- **Phase gate:** All 4 features complete, all tests passing, integration pipeline verified. Phase 3 may begin.
 
 ### Phase 3
 
 #### Features
 
-- CLI-01 (One-Shot Commands)
+- CLI-01 (One-Shot Commands) -- **update**
 
 #### Parallel Development Opportunities
 
-Single feature -- no parallel opportunities.
+Single feature -- no parallelism. This is the integration layer that wires everything together.
 
 #### Recommended Implementation Order
 
-1. **One-Shot Commands** -- the only feature in this phase.
+1. CLI-01 -- rewrites the routing logic for instance name addressing, adds attach route, updates status routing, adds flag extraction for --target/--url, adds default instance resolution, adds help disambiguation
 
 #### Phase Completion Criteria
 
-- **One-Shot Commands**: All tests pass -- CDP one-shot round-trip, status command, unknown command error, malformed JSON error, no-browser error, no-arguments help output, cleanup command. CLI routes correctly to launch, status, session, help, and cleanup.
-- **Integration verification -- full end-to-end workflow**: The complete MPS workflow operates against a live, complex website (amazon.com). This is the highest-fidelity validation of the entire system:
-
-  1. `chrome-agent launch` with a fingerprint profile
-  2. `chrome-agent status` confirms the browser is running
-  3. Multiple agents connect via `chrome-agent session` simultaneously, each with a different objective:
-     - **Agent 1 (interaction)**: Navigates to amazon.com, moves the mouse to the search bar, clicks it, types a search query character by character, presses Enter, waits for results, hovers over product listings, clicks a product, scrolls the product page, interacts with product options, adds to cart. All through raw CDP commands (Input.dispatchMouseEvent, Input.dispatchKeyEvent, DOM operations, Page lifecycle events).
-     - **Agent 2 (network observer)**: Connected to the same browser, subscribes to Network events, captures all requests and responses during Agent 1's interactions. Verifies event fan-out to multiple clients.
-     - **Agent 3 (performance/visual observer)**: Connected to the same browser, captures performance metrics and takes screenshots at regular intervals. Verifies the browser is rendering correctly throughout.
-     - **Agent 4 (parallel navigator)**: Navigates a different section of the site (e.g., browse categories), demonstrating that multi-agent interaction works with different objectives on the same browser.
-  4. `chrome-agent help Page` returns accurate protocol information
-  5. `chrome-agent Page.captureScreenshot '{"format": "png"}'` works in one-shot mode
-  6. `chrome-agent cleanup` removes stale session directories
-  7. Typed Protocol Bindings work for the same interactions (e.g., `page.navigate()`, `runtime.evaluate()`)
-
-  This validates: full CDP protocol surface against a hostile site, collaborative multi-client model, fingerprint anti-detection, reactive event streaming, human-like interaction patterns (mouse movement, typing, hovering, scrolling), and the complete CLI surface.
-
-- **Phase gate**: All features complete, all tests passing, full end-to-end workflow verified against a live site. Iteration is done.
+- CLI-01: All routing forms work correctly (operational commands, instance+method, bare method with default resolution, attach, status with instance filter, help disambiguation)
+- --target and --url flag extraction works, mutual exclusivity enforced
+- Backward compatibility: `chrome-agent Page.navigate '...'` still works via default instance resolution
+- **Integration verification:** Full end-to-end workflow from terminal: launch -> status -> attach in background -> one-shot navigate -> verify attach captured events -> help with instance name -> cleanup
+- **Phase gate:** All tests passing, full end-to-end verified, no regressions in iteration 1 tests.
 
 ## 3. Execution Strategy
 
 ### Phase Gates
 
-Phase transitions follow a strict gate protocol:
-
-1. **All features in the phase are complete** -- implementation finished, all tests passing, feature specification's Implementation Status updated to "complete."
-2. **Integration verification passed** -- all cross-feature integration points defined in the phase's completion criteria have been verified.
-3. **No regressions** -- tests from all prior phases still pass.
-4. **Phase gate recorded** -- the progress tracking below reflects the phase as complete with its completion date.
-
-No partial phase completion. If a feature is blocked, other features in the same phase can proceed, but the gate cannot close until the blocked feature is resolved.
+All features in a phase must pass their tests before the next phase begins. No regressions in prior phase tests -- the full test suite must pass at each gate, not just the new tests. Progress tracking is updated after each feature completion.
 
 ### Feature Selection Guidance
 
-Within each phase, follow the recommended implementation order unless:
-
-- **A feature is blocked** -- skip it, move to the next feature. Return when the blocker is resolved. Document the skip and blocker.
-- **A critical-path feature is at risk** -- if a critical-path feature hasn't started and non-critical-path features are available, prioritize the critical-path feature.
-- **Learning from a completed feature suggests reordering** -- if implementing one feature reveals that another feature in the same phase should be built next (shared patterns, discovered constraints), deviate and note the rationale.
+Follow the recommended implementation order within each phase. The order is advisory, not strict -- if a feature reveals that a different ordering would be more efficient (e.g., learning from BRW-05 suggests modifying the registry before updating BRW-01), reorder as needed. Critical-path features (all of them in this iteration) take priority over perfectionism on non-critical concerns.
 
 ### Blocker Management
 
-When a feature is blocked during implementation:
-
-1. **Technical obstacle** (unexpected behavior, library limitation) -- attempt resolution within the current session. If not resolvable within reasonable effort, document and move to the next feature.
-2. **Design question** (spec ambiguity, interface mismatch) -- escalate to the user immediately. Do not make design decisions autonomously when the specification is ambiguous.
-3. **Dependency issue** (a dependency feature's interface doesn't match spec) -- fix if minor correction. Escalate if it requires re-specification.
-4. **External constraint** (Chrome not installed, platform issue) -- document and skip. These require user action.
-
-Document blockers in the feature's Implementation Status. Continue with other features in the same phase.
+- **Technical obstacles:** Attempt to resolve from the spec and existing code context. Use exploratory coding to test hypotheses before changing the approach.
+- **Spec gaps:** If a spec doesn't address a situation encountered during implementation, resolve it using the spec's design principles and existing patterns in the codebase. Document the resolution in the spec's Implementation Status.
+- **Dependency issues:** If a Phase 2 feature discovers a problem with BRW-04's interface, fix BRW-04 first, re-run its tests, then continue.
+- **External system behavior:** If Chrome's CDP behavior doesn't match assumptions in the spec, explore empirically (we have a browser running), update the spec, and adapt.
+- **Escalation:** Only escalate to user for architectural decisions that fundamentally change the design direction -- not for implementation details the spec leaves to the implementer.
 
 ### Risk Identification
 
-| Feature | Risk | Why | Mitigation |
-|---------|------|-----|------------|
-| BRW-01 (Browser Launch) | High | Platform-specific binary discovery, subprocess lifecycle, window management. Most likely to encounter environment-specific failures. | Implement early in Phase 2. Test on the target platform first. Accept that window management may need to be best-effort. |
-| CDP-02 (Session Mode) | Medium | stdin/stdout protocol with concurrent event delivery, SIGTERM handling, async coordination between stdin reader and WebSocket receiver. Most complex feature. | On the critical path, built first in Phase 2. The REPL prototype (experiments) provides a working reference implementation. |
-| GEN-01 (Typed Protocol Bindings) | Medium | Code generator must handle all CDP type variations across 50 domains. Cross-domain type references, reserved word conflicts, dataclass serialization edge cases. | Test generated output against a real browser. Start with a few key domains (Page, DOM, Runtime) and expand to all 50 once the patterns are solid. |
-| Phase 3 end-to-end (Amazon) | Medium | Amazon actively fights automated browsers. The multi-agent integration test is the most complex validation in the iteration. | Fingerprint profiles mitigate detection. If Amazon blocks the test, try a different complex site (e.g., a shopping site with less aggressive anti-bot). The validation objective is real-site interaction, not specifically Amazon. |
+| Feature | Risk | Mitigation |
+|---------|------|------------|
+| CDP-04 (Attach Mode) | Most complex new feature -- browser-level WebSocket, Target.attachToTarget, event isolation, concurrent operation with one-shot, signal handling | Implement after BRW-05 and BRW-01 so registry is well-exercised. Leverage the experiment scripts from earlier in this session (exp1, exp2, exp3 at /tmp/) as reference implementations. |
+| CLI-01 (One-Shot Commands) | Three-way routing logic is the highest-risk change. Argument parsing for flags interleaved with positional args. Backward compatibility with bare CDP methods. | Implement last (Phase 3) so all dependencies are stable. Test every command form that the review agents walked through. |
+| BRW-01 (Browser Launch update) | Signature change from `port: int` to `port_override: int | None` breaks existing callers. LaunchResult -> InstanceInfo transition. | Update all call sites (CLI, tests) as part of the implementation. Run full test suite after changes. |
 
 ## 4. Implementation Progress
 
 ### Progress Table
 
-| Phase | Feature | Name | Status | Completion Date | Notes |
-|-------|---------|------|--------|-----------------|-------|
-| **1** | CDP-01 | CDP WebSocket Client | complete | 2026-04-13 | First-iteration convergence, 14/14 tests pass |
-| | CDP-03 | Protocol Discovery | complete | 2026-04-13 | First-iteration convergence, 8/8 tests pass |
-| | BRW-02 | Browser Status | complete | 2026-04-13 | Pre-existing code, added validation tests, 4/4 pass |
-| **2** | CDP-02 | Session Mode | complete | 2026-04-13 | 3 iterations to converge, 9/9 tests pass |
-| | GEN-01 | Typed Protocol Bindings | complete | 2026-04-13 | 2 iterations, 5/5 tests pass, 54 domains generated |
-| | BRW-01 | Browser Launch | complete | 2026-04-13 | First-iteration convergence, 6/6 tests pass |
-| | BRW-03 | Fingerprint Profiles | complete | 2026-04-13 | 3 iterations, 11/11 tests pass |
-| **3** | CLI-01 | One-Shot Commands | complete | 2026-04-13 | First-iteration convergence, 8/8 tests pass |
+| Phase | Feature | Status | Notes |
+|-------|---------|--------|-------|
+| 1 | BRW-04 Instance Registry | Not started | |
+| 2 | BRW-05 Instance Status | Not started | |
+| 2 | BRW-01 Browser Launch (update) | Not started | |
+| 2 | CDP-04 Attach Mode | Not started | |
+| 2 | CDP-03 Protocol Discovery (update) | Not started | |
+| 3 | CLI-01 One-Shot Commands (update) | Not started | |
 
 ### Phase Status
 
-| Phase | Features | Complete | Gate Satisfied | Date |
-|-------|----------|----------|----------------|------|
-| 1 | 3 | 3 | Yes | 2026-04-13 |
-| 2 | 4 | 4 | Yes | 2026-04-13 |
-| 3 | 1 | 1 | Yes | 2026-04-13 |
+| Phase | Gate Satisfied | Notes |
+|-------|---------------|-------|
+| 1 | No | |
+| 2 | No | |
+| 3 | No | |
 
 ## 5. Companion Data File Reference
 
-The phase structure, execution strategy, and progress data are stored in `planning/05-implementation-plan.json`. Analysis scripts are in `planning/05-analysis/`.
+The machine-readable companion file is at `planning/05-implementation-plan.json`. It contains the same phase structure, feature ordering, and progress tracking as this document, in JSON format consumed by the Implementation Loop for feature selection and progress updates.

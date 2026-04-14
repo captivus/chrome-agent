@@ -2,116 +2,54 @@
   "metadata": {
     "source_dependency_graph": "planning/04-dependency-graph.json",
     "source_feature_inventory": "planning/02-feature-inventory.md",
-    "feature_count": 8,
+    "iteration": 2,
+    "feature_count": 6,
     "phase_count": 3,
-    "created": "2026-04-13"
+    "note": "Iteration 2 scope only -- 3 new features + 3 updates. Iteration 1 implemented features not re-tracked."
   },
-  "critical_path": ["CDP-01", "CDP-02", "CLI-01"],
-  "phases": {
-    "1": {
-      "features": ["CDP-01", "CDP-03", "BRW-02"],
-      "order": ["CDP-01", "BRW-02", "CDP-03"],
-      "gate_satisfied": true,
-      "gate_date": "2026-04-13"
-    },
-    "2": {
-      "features": ["CDP-02", "GEN-01", "BRW-01", "BRW-03"],
-      "order": ["CDP-02", "BRW-01", "GEN-01", "BRW-03"],
-      "gate_satisfied": true,
-      "gate_date": "2026-04-13"
-    },
-    "3": {
-      "features": ["CLI-01"],
-      "order": ["CLI-01"],
-      "gate_satisfied": true,
-      "gate_date": "2026-04-13"
-    }
-  },
-  "features": {
-    "CDP-01": {
-      "name": "CDP WebSocket Client",
-      "category": "Protocol Client",
+  "phases": [
+    {
       "phase": 1,
-      "status": "complete",
-      "completion_date": "2026-04-13",
-      "notes": "First-iteration convergence, 14/14 tests pass"
+      "features": [
+        {"id": "BRW-04", "name": "Instance Registry", "type": "new", "status": "not_started", "order": 1}
+      ],
+      "gate": {
+        "satisfied": false,
+        "criteria": "BRW-04 tests pass, registry CRUD operations verified, shared process_is_running utility extracted"
+      }
     },
-    "CDP-02": {
-      "name": "Session Mode",
-      "category": "Protocol Client",
+    {
       "phase": 2,
-      "status": "complete",
-      "completion_date": "2026-04-13",
-      "notes": "3 iterations to converge, 9/9 tests pass"
+      "features": [
+        {"id": "BRW-05", "name": "Instance Status", "type": "new", "status": "not_started", "order": 1},
+        {"id": "BRW-01", "name": "Browser Launch (update)", "type": "update", "status": "not_started", "order": 2},
+        {"id": "CDP-04", "name": "Attach Mode", "type": "new", "status": "not_started", "order": 3},
+        {"id": "CDP-03", "name": "Protocol Discovery (update)", "type": "update", "status": "not_started", "order": 4}
+      ],
+      "gate": {
+        "satisfied": false,
+        "criteria": "All 4 features complete and tested. Launch registers instances, status lists them, attach connects with isolation, help resolves instance names. Cross-feature: launch -> status -> attach -> one-shot pipeline verified end-to-end."
+      }
     },
-    "CDP-03": {
-      "name": "Protocol Discovery",
-      "category": "Protocol Client",
-      "phase": 1,
-      "status": "complete",
-      "completion_date": "2026-04-13",
-      "notes": "First-iteration convergence, 8/8 tests pass"
-    },
-    "GEN-01": {
-      "name": "Typed Protocol Bindings",
-      "category": "Code Generation",
-      "phase": 2,
-      "status": "complete",
-      "completion_date": "2026-04-13",
-      "notes": "2 iterations, 5/5 tests pass, 54 domains generated"
-    },
-    "BRW-01": {
-      "name": "Browser Launch",
-      "category": "Browser Management",
-      "phase": 2,
-      "status": "complete",
-      "completion_date": "2026-04-13",
-      "notes": "First-iteration convergence, 6/6 tests pass"
-    },
-    "BRW-02": {
-      "name": "Browser Status",
-      "category": "Browser Management",
-      "phase": 1,
-      "status": "complete",
-      "completion_date": "2026-04-13",
-      "notes": "Pre-existing code, added validation tests, 4/4 pass"
-    },
-    "BRW-03": {
-      "name": "Fingerprint Profiles",
-      "category": "Browser Management",
-      "phase": 2,
-      "status": "complete",
-      "completion_date": "2026-04-13",
-      "notes": "3 iterations, 11/11 tests pass"
-    },
-    "CLI-01": {
-      "name": "One-Shot Commands",
-      "category": "Command-Line Interface",
+    {
       "phase": 3,
-      "status": "complete",
-      "completion_date": "2026-04-13",
-      "notes": "First-iteration convergence, 8/8 tests pass"
-    }
-  },
-  "execution_strategy": {
-    "phase_gate_policy": "Strict gates. All features complete, all tests passing, no regressions in prior phases, integration verified. No partial phase completion.",
-    "feature_selection_policy": "Follow recommended order. Skip blocked features and return later. Prioritize critical-path features at risk. Deviate when learning suggests reordering.",
-    "risks": {
-      "BRW-01": {
-        "level": "high",
-        "why": "Platform-specific binary discovery, subprocess lifecycle, window management",
-        "mitigation": "Implement early in Phase 2. Test on target platform first."
-      },
-      "CDP-02": {
-        "level": "medium",
-        "why": "stdin/stdout protocol with concurrent event delivery, SIGTERM handling, async coordination",
-        "mitigation": "On critical path, built first in Phase 2. REPL prototype provides reference implementation."
-      },
-      "GEN-01": {
-        "level": "medium",
-        "why": "Code generator must handle all CDP type variations across 50 domains",
-        "mitigation": "Test generated output against real browser. Start with key domains, expand."
+      "features": [
+        {"id": "CLI-01", "name": "One-Shot Commands (update)", "type": "update", "status": "not_started", "order": 1}
+      ],
+      "gate": {
+        "satisfied": false,
+        "criteria": "CLI routing works for all command forms: operational commands, instance+method, bare method with default resolution. All iteration 2 tests pass. Full end-to-end: launch -> status -> attach -> one-shot -> help with instance names."
       }
     }
+  ],
+  "critical_path": ["BRW-04", "BRW-01", "CLI-01"],
+  "execution_strategy": {
+    "phase_gates": "All features in a phase must pass their tests and integration verification before the next phase begins. No regressions in prior phase tests.",
+    "feature_selection": "Follow the recommended order within each phase. Phase 2 order: BRW-05 first (simplest, validates registry), BRW-01 update (integrates registry with launch), CDP-04 (most complex, benefits from registry being exercised), CDP-03 (simplest update, last).",
+    "blocker_management": "If a feature is blocked by a spec gap, attempt to resolve from the spec's context. If blocked by an external system behavior, explore empirically. Escalate to user only for architectural decisions not covered by specs.",
+    "risk_assessment": [
+      {"feature": "CDP-04", "risk": "Most complex new feature -- browser-level WebSocket, Target.attachToTarget, event isolation, concurrent operation with one-shot", "mitigation": "Implement after BRW-05 and BRW-01 so registry is well-exercised. Leverage experiment scripts from earlier in this session."},
+      {"feature": "CLI-01", "risk": "Three-way routing logic, backward compatibility, argument parsing changes", "mitigation": "Implement last (Phase 3) so all dependencies are stable. Test every command form from the review agents' examples."}
+    ]
   }
 }
