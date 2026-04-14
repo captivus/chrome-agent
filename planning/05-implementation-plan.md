@@ -179,9 +179,9 @@ Document blockers in the feature's Implementation Status. Continue with other fe
 | Phase | Feature | Name | Status | Completion Date | Notes |
 |-------|---------|------|--------|-----------------|-------|
 | **1** | CDP-01 | CDP WebSocket Client | complete | 2026-04-13 | First-iteration convergence, 14/14 tests pass |
-| | CDP-03 | Protocol Discovery | in progress | | |
+| | CDP-03 | Protocol Discovery | complete | 2026-04-13 | First-iteration convergence, 8/8 tests pass |
 | | BRW-02 | Browser Status | complete | 2026-04-13 | Pre-existing code, added validation tests, 4/4 pass |
-| **2** | CDP-02 | Session Mode | not started | | |
+| **2** | CDP-02 | Session Mode | in progress | | |
 | | GEN-01 | Typed Protocol Bindings | not started | | |
 | | BRW-01 | Browser Launch | not started | | |
 | | BRW-03 | Fingerprint Profiles | not started | | |
@@ -191,7 +191,7 @@ Document blockers in the feature's Implementation Status. Continue with other fe
 
 | Phase | Features | Complete | Gate Satisfied | Date |
 |-------|----------|----------|----------------|------|
-| 1 | 3 | 2 | No | |
+| 1 | 3 | 3 | Yes | 2026-04-13 |
 | 2 | 4 | 0 | No | |
 | 3 | 1 | 0 | No | |
 
