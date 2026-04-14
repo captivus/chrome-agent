@@ -3,12 +3,12 @@ revision = 3
 requires-python = ">=3.11"
 
 [options]
-exclude-newer = "2026-04-06T23:29:51.988150568Z"
+exclude-newer = "2026-04-07T03:25:16.619642744Z"
 exclude-newer-span = "P7D"
 
 [[package]]
 name = "chrome-agent"
-version = "0.2.1"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "playwright" },
