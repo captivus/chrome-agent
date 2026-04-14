@@ -49,6 +49,7 @@ Multiple participants (agents, humans, tools) independently attach to the same b
 - One-shot commands routed by instance name
 - `status` command showing all running instances with their page targets (target IDs, URLs, titles)
 - Replacement of the `session` command with `attach`
+- Subsumption of the standalone observer script (`scripts/observe.py`) into `attach` -- the observer's event streaming functionality becomes a native capability of the attach command rather than a separate script
 - Event subscription isolation between participants sharing a browser
 - Target identification within a browser instance (by target ID, index, or URL)
 

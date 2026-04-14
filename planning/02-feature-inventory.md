@@ -132,6 +132,8 @@
 
 **Complexity:** Small -- HTTP GET, JSON parsing, text formatting. The protocol schema is well-structured and the formatting is straightforward.
 
+- **Iteration 2 update:** Accepts an instance name (resolved via BRW-04 Instance Registry) instead of a port number, consistent with the instance-name routing used by all other commands.
+
 **Traceability:** Essential Functionality Workflow 2 (Discover Protocol Capabilities), Key Workflows Workflow 2
 
 ### GEN-01: Typed Protocol Bindings
@@ -168,7 +170,7 @@
 - Supports headless mode
 - Optionally manages window placement (platform-specific, best-effort)
 - Fails with a helpful error if Chrome is not found, listing searched paths
-- **Iteration 2 update:** Integrates with BRW-04 (Instance Registry) for auto-port allocation, instance naming, registration, and structured JSON output. The core launch mechanics (binary discovery, subprocess management, port readiness) are unchanged.
+- **Iteration 2 update:** Integrates with BRW-04 (Instance Registry) for auto-port allocation, instance naming, registration, and structured JSON output. `--port` remains available as an override for users who need a specific port (e.g., matching a firewall rule, or connecting to a Chrome launched externally). The core launch mechanics (binary discovery, subprocess management, port readiness) are unchanged.
 
 **Complexity:** Large -- browser binary discovery across platforms, subprocess management, port readiness polling, integration with fingerprint profiles, and window management. Highest-risk feature due to platform-specific behavior.
 
