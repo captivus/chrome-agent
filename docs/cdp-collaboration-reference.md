@@ -127,7 +127,7 @@ document.addEventListener('selectionchange', () => {
 });
 ```
 
-Bindings are tied to the CDP session that registered them. The JS function survives page navigations within the session and even lingers in the current execution context after the session disconnects (though the CDP event pipe breaks). Re-registering on a new connection restores everything. For reliable observation, maintain a long-lived connection (attach mode).
+Bindings are tied to the CDP session that registered them. The binding function itself survives page navigations within the session, but the `addEventListener` calls do not -- they belong to the old page's JavaScript context. To get listeners on every page, use `Page.addScriptToEvaluateOnNewDocument` to auto-inject them (guard with `if (typeof reportInteraction === 'function')` in case the binding isn't registered yet). See [collaboration-guide.md](collaboration-guide.md) for the full persistence pattern. For reliable observation, maintain a long-lived connection (attach mode).
 
 ## Collaboration Patterns
 

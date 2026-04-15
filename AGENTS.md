@@ -2,6 +2,8 @@
 
 CLI tool for AI agents to observe and interact with Chrome browsers via CDP.
 
+Install: `uv tool install chrome-agent` (or `pip install chrome-agent`). Requires Chrome/Chromium installed on the system.
+
 ## Quick Reference
 
 ```bash
@@ -9,6 +11,7 @@ chrome-agent launch [--port PORT] [--headless] [--fingerprint profile.json]
 chrome-agent status [<instance>]
 chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
 chrome-agent help [<instance>] [Domain | Domain.method]
+chrome-agent stop <instance>
 chrome-agent cleanup
 chrome-agent <instance> Domain.method '{"param": "value"}'
 ```
@@ -44,6 +47,9 @@ chrome-agent status
 # See a specific instance
 chrome-agent status mysite-01
 
+# Stop a browser gracefully (sends CDP Browser.close)
+chrome-agent stop mysite-01
+
 # Clean up dead instances
 chrome-agent cleanup
 ```
@@ -62,6 +68,9 @@ chrome-agent mysite-01 Page.navigate '{"url": "https://example.com"}'
 
 # Take screenshot (returns base64 PNG in JSON)
 chrome-agent mysite-01 Page.captureScreenshot '{"format": "png"}'
+
+# Decode and save a screenshot
+chrome-agent mysite-01 Page.captureScreenshot '{"format": "png"}' | python3 -c "import sys,json,base64; d=json.load(sys.stdin); open('/tmp/screenshot.png','wb').write(base64.b64decode(d['data']))"
 
 # Evaluate JavaScript
 chrome-agent mysite-01 Runtime.evaluate '{"expression": "document.querySelector(\"#price\")?.textContent", "returnByValue": true}'

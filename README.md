@@ -95,6 +95,7 @@ Subscribe to exactly the events you need. Each attach session is isolated -- sub
 chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT]
 chrome-agent status [<instance>]
 chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
+chrome-agent stop <instance>
 chrome-agent help [<instance>] [Domain | Domain.method]
 chrome-agent cleanup
 ```
@@ -103,9 +104,10 @@ chrome-agent cleanup
 |---------|-------------|
 | `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. |
 | `status` | List running instances with their page targets (IDs, URLs, titles). |
-| `attach` | Persistent event observation with isolated subscriptions. |
+| `attach` | Persistent event observation with isolated subscriptions. Use `--target N` or `--url substring` for multi-tab browsers. |
+| `stop` | Gracefully shut down a browser instance via CDP `Browser.close`. Cleans up the registry entry and session directory. |
 | `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |
-| `cleanup` | Remove stale instances and their session directories. |
+| `cleanup` | Remove stale instances (dead browsers) and their session directories. |
 
 ## Interacting with Elements
 
@@ -179,7 +181,7 @@ See [docs/collaboration-guide.md](docs/collaboration-guide.md) for:
 - The observation gap (what CDP sees vs what it misses)
 - Full interaction observation via the binding bridge
 
-For real-time observation using Claude Code's Monitor tool, see [docs/monitor-integration.md](docs/monitor-integration.md) .
+For real-time observation using Claude Code's Monitor tool, see [docs/monitor-integration.md](docs/monitor-integration.md).
 
 ## Requirements
 
