@@ -77,6 +77,7 @@ async def launch_browser(
     pin_to_desktop: bool = True,
     working_dir: str | None = None,
     registry_path: str | None = None,
+    extra_args: list[str] | None = None,
 ) -> InstanceInfo:
     """Launch Chrome with CDP enabled and register as a named instance.
 
@@ -134,6 +135,8 @@ async def launch_browser(
     ]
     if headless:
         args.append("--headless=new")
+    if extra_args:
+        args.extend(extra_args)
 
     # Apply fingerprint via Chrome command-line flags (persistent)
     env = os.environ.copy()
