@@ -54,7 +54,10 @@ def query_targets(*, port: int) -> list[PageTarget]:
     except Exception:
         return []
 
-    pages = [t for t in all_targets if t.get("type") == "page"]
+    pages = sorted(
+        (t for t in all_targets if t.get("type") == "page"),
+        key=lambda t: t.get("id", ""),
+    )
 
     results = []
     for index, target in enumerate(pages, start=1):

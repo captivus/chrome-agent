@@ -245,7 +245,10 @@ def _run_stop(args: list[str], target_spec: str | None, url_spec: str | None) ->
             browser_ws = get_ws_url(port=info.port, target_type="browser")
             async with CDPClient(ws_url=browser_ws) as cdp:
                 result = await cdp.send(method="Target.getTargets")
-                return [t for t in result.get("targetInfos", []) if t.get("type") == "page"]
+                return sorted(
+                    (t for t in result.get("targetInfos", []) if t.get("type") == "page"),
+                    key=lambda t: t.get("targetId", ""),
+                )
 
         import asyncio
         page_targets = asyncio.run(_get_targets())
@@ -344,10 +347,11 @@ async def _run_cdp_one_shot(
         async with CDPClient(ws_url=browser_ws_url) as cdp:
             # Resolve target
             targets_result = await cdp.send(method="Target.getTargets")
-            page_targets = [
-                t for t in targets_result.get("targetInfos", [])
-                if t.get("type") == "page"
-            ]
+            page_targets = sorted(
+                (t for t in targets_result.get("targetInfos", [])
+                 if t.get("type") == "page"),
+                key=lambda t: t.get("targetId", ""),
+            )
 
             if not page_targets:
                 print("Error: no page targets in browser", file=sys.stderr)

@@ -152,10 +152,11 @@ async def run_attach(
     try:
         # Phase 3: Resolve page target
         targets_result = await cdp.send(method="Target.getTargets")
-        page_targets = [
-            t for t in targets_result.get("targetInfos", [])
-            if t.get("type") == "page"
-        ]
+        page_targets = sorted(
+            (t for t in targets_result.get("targetInfos", [])
+             if t.get("type") == "page"),
+            key=lambda t: t.get("targetId", ""),
+        )
 
         if not page_targets:
             raise NoPageError(f"No page targets in instance '{instance_name}'")
