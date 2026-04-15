@@ -27,7 +27,7 @@ Or add to a project:
 uv add chrome-agent
 ```
 
-Requires Google Chrome or Chromium installed on the system. No Playwright, no browser downloads.
+Requires Google Chrome or Chromium installed on the system. Single runtime dependency (`websockets`). No Playwright, no browser downloads.
 
 ## Quick Start
 
@@ -53,6 +53,9 @@ chrome-agent myproject-01 Page.captureScreenshot '{"format": "png"}'
 # Discover available commands
 chrome-agent help myproject-01 Page
 chrome-agent help myproject-01 Page.navigate
+
+# Stop the browser when done
+chrome-agent stop myproject-01
 ```
 
 ## Two Channels
@@ -95,7 +98,7 @@ Subscribe to exactly the events you need. Each attach session is isolated -- sub
 chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT]
 chrome-agent status [<instance>]
 chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
-chrome-agent stop <instance>
+chrome-agent stop <instance> [--target SPEC] [--url SUBSTRING]
 chrome-agent help [<instance>] [Domain | Domain.method]
 chrome-agent cleanup
 ```
@@ -105,7 +108,7 @@ chrome-agent cleanup
 | `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. |
 | `status` | List running instances with their page targets (IDs, URLs, titles). |
 | `attach` | Persistent event observation with isolated subscriptions. Use `--target N` or `--url substring` for multi-tab browsers. |
-| `stop` | Gracefully shut down a browser instance via CDP `Browser.close`. Cleans up the registry entry and session directory. |
+| `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Use `--target` or `--url` to close a single tab without affecting the browser. |
 | `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |
 | `cleanup` | Remove stale instances (dead browsers) and their session directories. |
 
