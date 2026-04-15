@@ -239,14 +239,18 @@ def enumerate_instances(
 
 def stop(
     instance_name: str,
+    target_id: str | None = None,
     registry_path: str | None = None,
-) -> bool:
-    """Stop a running browser instance gracefully via CDP Browser.close.
+) -> str:
+    """Stop a browser instance or close a specific tab.
 
-    Sends Browser.close to the browser, waits for the process to exit,
-    then removes the registry entry and cleans up the session directory.
+    Without target_id: sends Browser.close to shut down the entire browser,
+    waits for the process to exit, removes the registry entry and session dir.
 
-    Returns True if the browser was stopped, False if it was already dead.
+    With target_id: sends Target.closeTarget for that specific tab. The
+    browser and other tabs remain alive.
+
+    Returns a status message describing what was done.
     Raises InstanceNotFoundError if the instance name is not in the registry.
     """
     import asyncio
@@ -265,9 +269,28 @@ def stop(
                 shutil.rmtree(session_dir, ignore_errors=True)
         _save_registry(registry, path)
         logger.info("Instance %s was already dead, cleaned up", instance_name)
-        return False
+        return f"{instance_name} was already dead, cleaned up"
 
-    # Send Browser.close via CDP
+    if target_id is not None:
+        # Close a specific tab via Target.closeTarget
+        async def _close_target():
+            from .cdp_client import CDPClient, get_ws_url
+            browser_ws = get_ws_url(port=info.port, target_type="browser")
+            async with CDPClient(ws_url=browser_ws) as cdp:
+                result = await cdp.send(
+                    method="Target.closeTarget",
+                    params={"targetId": target_id},
+                )
+                return result.get("success", False)
+
+        success = asyncio.run(_close_target())
+        if success:
+            logger.info("Closed target %s in instance %s", target_id[:8], instance_name)
+            return f"Closed tab {target_id[:8]} in {instance_name}"
+        else:
+            return f"Failed to close tab {target_id[:8]} in {instance_name}"
+
+    # Close the entire browser via Browser.close
     async def _close_browser():
         from .cdp_client import CDPClient, get_ws_url
         try:
@@ -276,9 +299,8 @@ def stop(
                 await cdp.send(method="Browser.close")
         except Exception as exc:
             logger.warning("Browser.close failed for %s: %s", instance_name, exc)
-            # Fall back to SIGTERM
             try:
-                os.kill(info.pid, 15)  # SIGTERM
+                os.kill(info.pid, 15)  # SIGTERM fallback
             except ProcessLookupError:
                 pass
 
@@ -301,7 +323,7 @@ def stop(
     _save_registry(registry, path)
 
     logger.info("Stopped instance %s", instance_name)
-    return True
+    return f"Stopped {instance_name}"
 
 
 def cleanup(

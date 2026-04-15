@@ -221,23 +221,61 @@ def _run_help(args: list[str]) -> None:
         sys.exit(1)
 
 
-def _run_stop(args: list[str]) -> None:
-    """Stop a running browser instance gracefully."""
+def _run_stop(args: list[str], target_spec: str | None, url_spec: str | None) -> None:
+    """Stop a browser instance or close a specific tab."""
     from .registry import InstanceNotFoundError, stop
 
     if not args:
         print("Error: stop requires an instance name", file=sys.stderr)
-        print("Usage: chrome-agent stop <instance>", file=sys.stderr)
+        print("Usage: chrome-agent stop <instance> [--target SPEC | --url SUBSTRING]", file=sys.stderr)
         sys.exit(1)
 
     instance_name = args[0]
+
+    # If a target specifier was provided, resolve it to a target ID
+    resolved_target_id = None
+    if target_spec is not None or url_spec is not None:
+        from .attach import resolve_target
+        from .cdp_client import CDPClient, get_ws_url
+        from .registry import lookup
+
+        info = lookup(instance_name=instance_name)
+
+        async def _get_targets():
+            browser_ws = get_ws_url(port=info.port, target_type="browser")
+            async with CDPClient(ws_url=browser_ws) as cdp:
+                result = await cdp.send(method="Target.getTargets")
+                return [t for t in result.get("targetInfos", []) if t.get("type") == "page"]
+
+        import asyncio
+        page_targets = asyncio.run(_get_targets())
+
+        target_by = None
+        spec = None
+        if target_spec is not None:
+            spec = target_spec
+            target_by = "index" if target_spec.isdigit() else "id"
+        elif url_spec is not None:
+            spec = url_spec
+            target_by = "url"
+
+        try:
+            resolved_target_id = resolve_target(
+                page_targets=page_targets,
+                target_spec=spec,
+                target_by=target_by,
+            )
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     try:
-        was_running = stop(instance_name=instance_name)
-        if was_running:
-            print(f"Stopped {instance_name}")
-        else:
-            print(f"{instance_name} was already dead, cleaned up")
+        result = stop(instance_name=instance_name, target_id=resolved_target_id)
+        print(result)
     except InstanceNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -385,7 +423,7 @@ def main() -> None:
         elif command == "help":
             _run_help(args=rest)
         elif command == "stop":
-            _run_stop(args=rest)
+            _run_stop(args=rest, target_spec=target_spec, url_spec=url_spec)
         elif command == "cleanup":
             _run_cleanup()
         return
