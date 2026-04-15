@@ -270,17 +270,15 @@ def _process_is_running(pid: int) -> bool:
 
 
 async def _move_to_launching_desktop(pid: int) -> None:
-    """Move the browser window to the terminal's virtual desktop.
+    """Move the browser window to the launching terminal's virtual desktop.
 
     Linux/X11 only. Requires xdotool. Silently does nothing if
     xdotool is unavailable or on non-X11 systems.
 
-    Uses the terminal's WINDOWID to determine the target desktop
-    (stable even if the user switches desktops during launch), and
-    searches for browser windows by PID (Chrome ignores the --class
-    flag, so WM_CLASS-based search doesn't work).
-
-    Polls for the window at 30ms intervals to minimize the time the
+    Uses $WINDOWID to determine the terminal's desktop. Falls back to
+    xdotool get_desktop (the currently viewed desktop) if $WINDOWID is
+    not set. Searches for browser windows by PID (Chrome ignores the
+    --class flag). Polls at 30ms intervals to minimize the time the
     browser is visible on the wrong desktop.
     """
     try:
@@ -319,9 +317,21 @@ async def _move_to_launching_desktop(pid: int) -> None:
                 ).stdout.strip()
                 if wid_desktop != "-1" and wid_desktop != "":
                     if wid_desktop != desktop:
+                        # Wait briefly for window manager registration to settle
+                        await asyncio.sleep(0.05)
                         subprocess.run(
                             ["xdotool", "set_desktop_for_window", wid, desktop],
                         )
+                        # Verify the move succeeded -- retry if needed
+                        verify = subprocess.run(
+                            ["xdotool", "get_desktop_for_window", wid],
+                            capture_output=True, text=True,
+                        ).stdout.strip()
+                        if verify != desktop:
+                            await asyncio.sleep(0.1)
+                            subprocess.run(
+                                ["xdotool", "set_desktop_for_window", wid, desktop],
+                            )
                         logger.info("Moved browser window to desktop %s", desktop)
                     else:
                         logger.info("Browser window already on desktop %s", desktop)
