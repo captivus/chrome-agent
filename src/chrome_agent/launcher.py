@@ -6,6 +6,7 @@ No Playwright dependency -- uses subprocess directly.
 """
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -111,12 +112,25 @@ async def launch_browser(
     os.makedirs(_SESSION_ROOT, exist_ok=True)
     session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
 
+    # Write Chrome preferences to disable password save prompts
+    default_dir = os.path.join(session_dir, "Default")
+    os.makedirs(default_dir, exist_ok=True)
+    prefs = {
+        "credentials_enable_service": False,
+        "profile": {
+            "password_manager_enabled": False,
+        },
+    }
+    with open(os.path.join(default_dir, "Preferences"), "w") as f:
+        json.dump(prefs, f)
+
     args = [
         binary,
         f"--remote-debugging-port={port}",
         f"--user-data-dir={session_dir}",
         "--no-first-run",
         "--no-default-browser-check",
+        "--password-store=basic",
     ]
     if headless:
         args.append("--headless=new")
