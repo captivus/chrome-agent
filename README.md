@@ -7,7 +7,7 @@
 
 A CLI tool that gives AI coding agents the ability to observe and interact with Chrome browsers via the Chrome DevTools Protocol.
 
-Multiple agents and humans can share the same browser simultaneously. One agent drives while another observes. A human browses while an agent watches for errors. Four agents run a coordinated test suite against a single browser. The protocol supports all of it natively.
+Multiple agents and humans can share the same browser simultaneously, each with isolated event subscriptions. One agent drives while another observes network traffic. A human browses while an agent watches for errors. Four agents run a coordinated test suite against a single browser. Each participant sees only the events they subscribed to -- no interference.
 
 ## Why this exists
 
@@ -32,73 +32,80 @@ Requires Google Chrome or Chromium installed on the system. No Playwright, no br
 ## Quick Start
 
 ```bash
-# Launch a browser
+# Launch a browser -- auto-allocates a port and names the instance
 chrome-agent launch
+# {"name": "myproject-01", "port": 9222, "pid": 58469, "browser_version": "Chrome/147"}
 
-# Check it's running
+# Check what's running
 chrome-agent status
+# myproject-01  port 9222
+#   [1] 956FD3C2  https://example.com  "Example Domain"
 
 # Read the page title
-chrome-agent Runtime.evaluate '{"expression": "document.title", "returnByValue": true}'
+chrome-agent myproject-01 Runtime.evaluate '{"expression": "document.title", "returnByValue": true}'
 
 # Navigate
-chrome-agent Page.navigate '{"url": "https://example.com"}'
+chrome-agent myproject-01 Page.navigate '{"url": "https://example.com"}'
 
 # Take a screenshot (returns base64 PNG in JSON)
-chrome-agent Page.captureScreenshot '{"format": "png"}'
+chrome-agent myproject-01 Page.captureScreenshot '{"format": "png"}'
 
 # Discover available commands
-chrome-agent help Page
-chrome-agent help Page.navigate
+chrome-agent help myproject-01 Page
+chrome-agent help myproject-01 Page.navigate
 ```
 
-## Two Modes
+## Two Channels
 
-### One-shot mode
+chrome-agent uses a two-channel pattern for browser interaction:
+
+### One-shot mode (commands)
 
 Send a single CDP command. Connects, sends, prints JSON response, disconnects.
 
 ```bash
-chrome-agent [--port PORT] Domain.method '{"param": "value"}'
+chrome-agent <instance> Domain.method '{"param": "value"}'
 ```
 
-Good for spot checks, screenshots, quick queries. ~350ms per call.
+Good for spot checks, screenshots, quick queries. ~50-80ms per call. If only one instance is running, the instance name can be omitted.
 
-### Session mode
+### Attach mode (events)
 
-Persistent CDP connection via stdin/stdout. Send commands, subscribe to events, get real-time notifications.
+Persistent connection with isolated event subscriptions. Streams events to stdout as JSON lines.
 
 ```bash
-chrome-agent session [--port PORT]
+chrome-agent attach <instance> +Page.loadEventFired +Network.requestWillBeSent
 ```
 
-Session protocol:
-```
-+Page.loadEventFired              # subscribe to event
-+Page.frameNavigated              # subscribe to another
-Page.navigate {"url": "https://example.com"}   # send command
--Page.loadEventFired              # unsubscribe
+Run it in the background while sending one-shot commands:
+
+```bash
+# Background: observe events
+chrome-agent attach myproject-01 +Page.loadEventFired +Network.requestWillBeSent > /tmp/events.jsonl &
+
+# Foreground: send commands -- events appear in the attach stream
+chrome-agent myproject-01 Page.navigate '{"url": "https://example.com"}'
 ```
 
-Responses and events are JSON lines on stdout. ~0.5ms per command.
+Subscribe to exactly the events you need. Each attach session is isolated -- subscribing to Network events in one session does not affect other sessions.
 
 ## Operational Commands
 
 ```
 chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT]
-chrome-agent status [--port PORT]
-chrome-agent session [--port PORT]
-chrome-agent help [Domain | Domain.method]
+chrome-agent status [<instance>]
+chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
+chrome-agent help [<instance>] [Domain | Domain.method]
 chrome-agent cleanup
 ```
 
 | Command | Description |
 |---------|-------------|
-| `launch` | Find Chrome, launch with CDP enabled. Refuses if port is occupied. |
-| `status` | Check if a browser is running on the CDP port. |
-| `session` | Start a persistent CDP session (stdin/stdout). |
+| `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. |
+| `status` | List running instances with their page targets (IDs, URLs, titles). |
+| `attach` | Persistent event observation with isolated subscriptions. |
 | `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |
-| `cleanup` | Remove stale session directories from previous launches. |
+| `cleanup` | Remove stale instances and their session directories. |
 
 ## Interacting with Elements
 
@@ -106,14 +113,14 @@ Agents interact with page elements using a three-step pattern: **locate, act, ve
 
 ```bash
 # Locate -- find element coordinates via JavaScript
-chrome-agent Runtime.evaluate '{"expression": "(() => { const r = document.querySelector(\"#submit\").getBoundingClientRect(); return {x: r.x+r.width/2, y: r.y+r.height/2}; })()", "returnByValue": true}'
+chrome-agent myproject-01 Runtime.evaluate '{"expression": "(() => { const r = document.querySelector(\"#submit\").getBoundingClientRect(); return {x: r.x+r.width/2, y: r.y+r.height/2}; })()", "returnByValue": true}'
 
 # Act -- dispatch real input events at those coordinates
-chrome-agent Input.dispatchMouseEvent '{"type": "mousePressed", "x": 400, "y": 300, "button": "left", "clickCount": 1}'
-chrome-agent Input.dispatchMouseEvent '{"type": "mouseReleased", "x": 400, "y": 300, "button": "left", "clickCount": 1}'
+chrome-agent myproject-01 Input.dispatchMouseEvent '{"type": "mousePressed", "x": 400, "y": 300, "button": "left", "clickCount": 1}'
+chrome-agent myproject-01 Input.dispatchMouseEvent '{"type": "mouseReleased", "x": 400, "y": 300, "button": "left", "clickCount": 1}'
 
 # Verify -- confirm the action worked
-chrome-agent Runtime.evaluate '{"expression": "document.title", "returnByValue": true}'
+chrome-agent myproject-01 Runtime.evaluate '{"expression": "document.title", "returnByValue": true}'
 ```
 
 Chrome processes dispatched input events identically to physical input. A human watching the browser sees the cursor move, buttons depress, text highlight, and pages load in real time.
@@ -159,20 +166,20 @@ Overrides user agent (HTTP header and JavaScript), viewport, language, timezone,
 
 ## For AI Agents
 
-See [AGENTS.md](AGENTS.md) for concise agent instructions (the standard for AI agent tool documentation). Covers commands, session protocol, interaction patterns, and gotchas.
+See [AGENTS.md](AGENTS.md) for concise agent instructions (the standard for AI agent tool documentation). Covers commands, the two-channel pattern, interaction patterns, and gotchas.
 
 ## Collaboration
 
-Multiple participants -- humans, AI agents, or both -- can share a browser simultaneously. Chrome's CDP multiplexes connections: events fan out to all subscribers, DOM mutations are cross-visible, and concurrent access is handled gracefully.
+Multiple participants -- humans, AI agents, or both -- can share a browser simultaneously. Each participant creates an independent CDP session with isolated event subscriptions. One agent enabling Network observation does not flood another agent's event stream.
 
 See [docs/collaboration-guide.md](docs/collaboration-guide.md) for:
 - Human-agent collaboration patterns (you browse, agent watches)
 - Agent-driven workflows (agent drives, you supervise)
-- Multi-agent setups (actor + observers)
+- Multi-agent setups with isolated event subscriptions
 - The observation gap (what CDP sees vs what it misses)
 - Full interaction observation via the binding bridge
 
-For real-time observation using Claude Code's Monitor tool, see [docs/monitor-integration.md](docs/monitor-integration.md) . Includes a ready-to-use observer script with three verbosity tiers and rate limiting for noisy pages.
+For real-time observation using Claude Code's Monitor tool, see [docs/monitor-integration.md](docs/monitor-integration.md) .
 
 ## Requirements
 

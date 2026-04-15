@@ -8,32 +8,57 @@ Chrome's DevTools Protocol (CDP) supports multiple simultaneous WebSocket connec
 
 This is not a limitation. It is the design. Chrome handles concurrent access gracefully at the protocol level:
 
-- **Events fan out to all subscribers.** If three agents each call `Page.enable`, all three receive `Page.loadEventFired` when a page loads. Each participant sees the same events independently.
 - **DOM mutations are immediately cross-visible.** If Agent A changes `document.title`, Agent B sees the change on its next `Runtime.evaluate`. There is no synchronization delay -- both operate on the same V8 execution context.
 - **Navigation by one participant affects all others.** If the human navigates, all connected agents see the new page. If an agent navigates, the human sees it in the browser window. Pending JavaScript evaluations in other connections receive a context-destroyed error (not a hang or crash).
-- **Each connection has independent state.** Message ID namespaces, domain subscriptions, and binding registrations are per-connection. One agent enabling the DOM domain does not affect another agent's subscriptions.
+- **Each connection has independent message state.** Message ID namespaces and binding registrations are per-connection.
 
-These properties were verified experimentally against Chrome's CDP implementation. See `planning/03-specs/CDP-02-learnings/01-multi-client-behavior.md` for the full test results.
+Event subscription behavior depends on which connection model is used. See the next section.
+
+## Connection Models and Event Isolation
+
+CDP offers two WebSocket endpoints, and the choice between them fundamentally affects how event subscriptions interact across participants.
+
+### Page-level WebSocket (`/devtools/page/<ID>`)
+
+Multiple clients connect directly to a page target. Each gets its own WebSocket, but **event domain subscriptions are shared across all connections to the same page.** If any client calls `Network.enable`, all clients connected to that page receive network events -- even if they never subscribed. This is Chrome's original multi-client model, designed for DevTools coexistence.
+
+This model is simple but creates coupling. A network observer agent that enables the Network domain causes every other connected agent to receive hundreds of network events per page load. There is no way for one client to opt out of domains another client enabled.
+
+### Browser-level WebSocket (`/devtools/browser/<ID>`) + `Target.attachToTarget`
+
+A single WebSocket connects to the browser process itself. To interact with a page, the client calls `Target.attachToTarget` with `flatten: true`, which creates an isolated CDP session scoped to that target. Each session has its own domain subscriptions, independent of every other session -- even sessions attached to the same page.
+
+**This is the model chrome-agent uses.** Both `attach` mode and one-shot commands connect to the browser-level WebSocket and create isolated sessions via `Target.attachToTarget`. The practical consequence:
+
+- Agent A enables `Network` in its session. Agent B's session receives zero network events.
+- Agent B enables `Page` in its session. Agent A's session is unaffected.
+- Each participant controls exactly which events it receives. No cross-talk.
+
+This isolation is per-session, not per-connection. A single browser-level WebSocket can multiplex many sessions (each with its own `sessionId`), and each session's subscriptions are independent.
+
+### Why this matters for collaboration
+
+With page-level connections, adding an observer agent has side effects -- it changes the event stream other agents see. With browser-level connections and `Target.attachToTarget`, observers are invisible to each other. You can attach a network observer, a DOM mutation watcher, and a screenshot agent to the same page without any of them interfering with the others' event streams.
 
 ## Participants
 
-A participant is anything that holds a CDP WebSocket connection to the browser. Participants fall into two roles: **actors** (sending commands that change the browser state) and **observers** (watching what happens without changing it). Any participant can play either role, and roles can shift during a session.
+A participant is anything that holds a CDP connection to the browser. Participants fall into two roles: **actors** (sending commands that change the browser state) and **observers** (watching what happens without changing it). Any participant can play either role, and roles can shift during a session.
 
 ### Human
 
 The human interacts through the browser's GUI -- clicking, typing, scrolling, selecting text. The human is always an actor. The human's actions produce real browser input events that the page's JavaScript sees, but CDP does not report them (see "The Observation Gap" below).
 
-### AI Agent (session mode)
+### AI Agent (attach mode)
 
-An agent running `chrome-agent session` holds a persistent CDP connection. It can send commands (navigate, evaluate JS, dispatch input events) and subscribe to events. It can act and observe simultaneously. Multiple agents can each run their own session against the same browser.
+An agent running `chrome-agent attach <instance> +Event.name` holds a persistent connection with an isolated CDP session. It can subscribe to events, and dynamically add or remove subscriptions at runtime by writing `+Event.name` or `-Event.name` to stdin. Its event subscriptions do not affect other participants. Multiple agents can each run their own attach session against the same browser instance, each with independent subscriptions.
 
 ### AI Agent (one-shot mode)
 
-An agent running individual `chrome-agent Domain.method` commands connects, sends one command, prints the response, and disconnects. It is a momentary actor that cannot observe events over time. Useful for spot checks, not for continuous collaboration.
+An agent running individual `chrome-agent <instance> Domain.method '{...}'` commands connects, creates a temporary isolated session via `Target.attachToTarget`, sends one command, prints the response, and disconnects. Connection overhead is ~50-80ms. Useful for spot checks, commands, and queries -- not for continuous event observation.
 
 ### DevTools
 
-Chrome's built-in DevTools is just another CDP client. If a human opens DevTools while agents are connected, all coexist. DevTools' network panel, console, and element inspector work normally alongside agent connections.
+Chrome's built-in DevTools is just another CDP client. If a human opens DevTools while agents are connected, all coexist. DevTools uses page-level connections internally, so its domain subscriptions are shared with other page-level clients -- but not with chrome-agent's browser-level sessions. DevTools' network panel, console, and element inspector work normally alongside agent connections.
 
 ## The Observation Gap
 
@@ -80,7 +105,7 @@ Two mechanisms connect the layers:
 
 **Pull model: `Runtime.evaluate`.** Any participant can run JavaScript in the page at any time to read the current state -- scroll position, selected text, focused element, form values, DOM content. This is a snapshot, not a stream. You ask, the page answers.
 
-**Push model: `Runtime.addBinding`.** A participant registers a named JavaScript function via CDP. When page JavaScript calls that function, CDP fires a `Runtime.bindingCalled` event to the registering connection. Combine this with injected DOM event listeners to get real-time notification of user interactions:
+**Push model: `Runtime.addBinding`.** A participant registers a named JavaScript function via CDP. When page JavaScript calls that function, CDP fires a `Runtime.bindingCalled` event to the registering session. Combine this with injected DOM event listeners to get real-time notification of user interactions:
 
 ```javascript
 // Register on CDP side: Runtime.addBinding(name="reportEvent")
@@ -102,7 +127,7 @@ document.addEventListener('selectionchange', () => {
 });
 ```
 
-Bindings are tied to the CDP session that registered them. The JS function survives page navigations within the session and even lingers in the current execution context after the session disconnects (though the CDP event pipe breaks). Re-registering on a new connection restores everything. For reliable observation, maintain a long-lived connection (session mode).
+Bindings are tied to the CDP session that registered them. The JS function survives page navigations within the session and even lingers in the current execution context after the session disconnects (though the CDP event pipe breaks). Re-registering on a new connection restores everything. For reliable observation, maintain a long-lived connection (attach mode).
 
 ## Collaboration Patterns
 
@@ -110,7 +135,7 @@ Bindings are tied to the CDP session that registered them. The JS function survi
 
 The human browses. The agent watches via CDP events (navigations, network) and periodically takes screenshots or reads the DOM to stay synchronized.
 
-**Setup:** One `chrome-agent session` for the observer agent. Subscribe to `Page.frameNavigated` and `Page.loadEventFired`. Optionally add `Network.requestWillBeSent` filtered to `Document` and `XHR`/`Fetch` types.
+**Setup:** One `chrome-agent attach <instance> +Page.frameNavigated +Page.loadEventFired` for the observer agent. Optionally add `+Network.requestWillBeSent` filtered to `Document` and `XHR`/`Fetch` types.
 
 **What the agent sees:** Which pages the human visits, when they load, what API calls the page makes. The agent can take screenshots, read page text, query DOM elements, and check form values at any time via `Runtime.evaluate`.
 
@@ -122,7 +147,7 @@ The human browses. The agent watches via CDP events (navigations, network) and p
 
 The agent navigates, fills forms, clicks buttons, takes screenshots. The human watches the browser window to verify the agent is doing the right thing.
 
-**Setup:** One `chrome-agent session` for the driving agent. The human simply watches the browser window.
+**Setup:** One `chrome-agent attach <instance>` for the driving agent, plus one-shot commands for actions. The human simply watches the browser window.
 
 **What the human sees:** Every navigation, every form fill, every click -- because the agent dispatches real input events that Chrome renders visually.
 
@@ -130,21 +155,21 @@ The agent navigates, fills forms, clicks buttons, takes screenshots. The human w
 
 ### Pattern 3: Multiple agents, specialized roles
 
-Several agents connect simultaneously, each with a different job. This is the most powerful pattern and the one the Phase 3 end-to-end specification describes.
+Several agents connect simultaneously, each with a different job. Because chrome-agent uses browser-level connections with isolated sessions, each agent's event subscriptions are independent -- adding an observer does not change what other agents receive.
 
 **Example setup:**
 - **Agent A (actor):** Navigates, fills forms, clicks. Uses `Input.dispatch*` for human-like interactions.
-- **Agent B (network observer):** Subscribes to `Network.requestWillBeSent` and `Network.responseReceived`. Captures all HTTP traffic during Agent A's interactions.
-- **Agent C (visual observer):** Takes periodic screenshots via `Page.captureScreenshot`. Captures the visual state at regular intervals.
+- **Agent B (network observer):** `chrome-agent attach <instance> +Network.requestWillBeSent +Network.responseReceived`. Captures all HTTP traffic during Agent A's interactions. Agent A sees none of these network events.
+- **Agent C (visual observer):** Takes periodic screenshots via `chrome-agent <instance> Page.captureScreenshot`. Creates temporary isolated sessions per invocation.
 - **Agent D (interaction observer):** Registers `Runtime.addBinding` and injects DOM event listeners. Sees every click, scroll, and selection from Agent A's dispatched events.
 
-**Coordination:** No explicit coordination is needed for observation. Each agent subscribes to its own events and operates independently. Chrome fans out events to all subscribers.
+**Coordination:** No explicit coordination is needed for observation. Each agent's session has isolated subscriptions, so agents cannot interfere with each other's event streams.
 
 For action coordination -- preventing two agents from navigating simultaneously -- use a shared signal. The simplest approach is a convention: only one agent is the designated actor at any time. The actor navigates and interacts; all others observe. Actor designation can be managed outside chrome-agent (e.g., via a shared file, environment variable, or orchestrator process).
 
 ### Pattern 4: Agent-to-agent with no human
 
-The same as Pattern 3, but no browser window is needed. Launch with `--headless`. Agents interact, observe, and coordinate entirely through CDP. Verification is through screenshots (visual), DOM queries (structural), and network capture (behavioral) rather than a human watching a window.
+The same as Pattern 3, but no browser window is needed. Launch with `chrome-agent launch --headless`. Agents interact, observe, and coordinate entirely through CDP. Verification is through screenshots (visual), DOM queries (structural), and network capture (behavioral) rather than a human watching a window.
 
 ### Choosing a pattern
 
@@ -160,6 +185,8 @@ The same as Pattern 3, but no browser window is needed. Launch with `--headless`
 ## Filtering CDP Events
 
 A real-world page generates hundreds of CDP events per page load. Amazon produces 200+ network requests per page (ad tracking, analytics, lazy-loading, video transcoding). Subscribing to all events drowns meaningful signals in noise.
+
+With isolated sessions, event filtering is straightforward: each agent subscribes only to the events it needs, and those subscriptions affect nobody else. But filtering within your own stream is still important for managing volume.
 
 ### Filtering by use case
 
@@ -261,7 +288,7 @@ Other observers (agents with bindings, or a human watching the screen) see the a
 
 ## Protocol Reference
 
-This document describes the CDP protocol as implemented by Chrome 146. Event availability may differ across Chrome versions. Query the live protocol:
+This document describes the CDP protocol as implemented by Chrome 147. Event availability may differ across Chrome versions. Query the live protocol:
 
 ```bash
 chrome-agent help                     # list all domains

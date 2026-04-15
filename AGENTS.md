@@ -5,51 +5,76 @@ CLI tool for AI agents to observe and interact with Chrome browsers via CDP.
 ## Quick Reference
 
 ```bash
-chrome-agent launch [--headless] [--fingerprint profile.json] [--port PORT]
-chrome-agent status [--port PORT]
-chrome-agent session [--port PORT]
-chrome-agent help [Domain | Domain.method]
+chrome-agent launch [--port PORT] [--headless] [--fingerprint profile.json]
+chrome-agent status [<instance>]
+chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
+chrome-agent help [<instance>] [Domain | Domain.method]
 chrome-agent cleanup
-chrome-agent [--port PORT] Domain.method '{"param": "value"}'
+chrome-agent <instance> Domain.method '{"param": "value"}'
 ```
 
-## Two Modes
+## Two Channels
 
-**One-shot:** `chrome-agent Domain.method '{"params": ...}'` connects, sends one CDP command, prints JSON, disconnects. ~350ms per call. Good for spot checks.
+chrome-agent uses a two-channel pattern for browser interaction:
 
-**Session:** `chrome-agent session` holds a persistent CDP connection. Send commands on stdin, read responses and events on stdout as JSON lines. ~0.5ms per command. Use for sustained work.
+**Observe (attach):** `chrome-agent attach mysite-01 +Page.loadEventFired +Network.requestWillBeSent` holds a persistent connection and streams subscribed events to stdout as JSON lines. Run it in the background (with `&`, under Monitor, or redirected to a file). Each attach session has isolated event subscriptions -- other participants don't see your subscriptions, and you don't see theirs.
 
-Session protocol:
-```
-+Domain.eventName          subscribe to event (auto-enables domain)
--Domain.eventName          unsubscribe
-Domain.method {"params"}   send command
+**Act (one-shot):** `chrome-agent mysite-01 Runtime.evaluate '{"expression": "document.title", "returnByValue": true}'` connects, sends one CDP command, prints the JSON response, and disconnects. ~50-80ms per call (Python startup dominates). Use for navigation, evaluation, screenshots, input dispatch -- any command-response interaction.
+
+Both channels address browsers by **instance name**, not port number. Launch creates a named instance; all subsequent commands use that name.
+
+## Launching and Managing Browsers
+
+```bash
+# Launch -- auto-allocates a port, names the instance from the current directory
+chrome-agent launch
+# Output: {"name": "myproject-01", "port": 9222, "pid": 58469, "browser_version": "Chrome/147"}
+
+# Launch with specific port
+chrome-agent launch --port 9500
+
+# See what's running
+chrome-agent status
+# aroundchicago.tech-01  port 9222
+#   [1] 956FD3C2  https://www.meetup.com/find/...  "Find Events | Meetup"
+#
+# kindle2markdown-01     port 9223
+#   [1] F9G0H1I2  about:blank
+
+# See a specific instance
+chrome-agent status mysite-01
+
+# Clean up dead instances
+chrome-agent cleanup
 ```
 
 ## Common Operations
 
 ```bash
-# Check browser status
-chrome-agent status
-
 # Read page title
-chrome-agent Runtime.evaluate '{"expression": "document.title", "returnByValue": true}'
+chrome-agent mysite-01 Runtime.evaluate '{"expression": "document.title", "returnByValue": true}'
 
 # Read visible text
-chrome-agent Runtime.evaluate '{"expression": "document.body.innerText.substring(0, 500)", "returnByValue": true}'
+chrome-agent mysite-01 Runtime.evaluate '{"expression": "document.body.innerText.substring(0, 500)", "returnByValue": true}'
 
 # Navigate
-chrome-agent Page.navigate '{"url": "https://example.com"}'
+chrome-agent mysite-01 Page.navigate '{"url": "https://example.com"}'
 
 # Take screenshot (returns base64 PNG in JSON)
-chrome-agent Page.captureScreenshot '{"format": "png"}'
+chrome-agent mysite-01 Page.captureScreenshot '{"format": "png"}'
 
 # Evaluate JavaScript
-chrome-agent Runtime.evaluate '{"expression": "document.querySelector(\"#price\")?.textContent", "returnByValue": true}'
+chrome-agent mysite-01 Runtime.evaluate '{"expression": "document.querySelector(\"#price\")?.textContent", "returnByValue": true}'
 
 # Query protocol -- discover available commands
-chrome-agent help Page
-chrome-agent help Page.navigate
+chrome-agent help mysite-01 Page
+chrome-agent help mysite-01 Page.navigate
+```
+
+If only one instance is running, you can omit the instance name for one-shot commands:
+
+```bash
+chrome-agent Page.navigate '{"url": "https://example.com"}'
 ```
 
 ## Interacting with Elements
@@ -58,39 +83,64 @@ Pattern: **locate, act, verify.**
 
 ```bash
 # Locate -- get pixel coordinates via JS
-chrome-agent Runtime.evaluate '{"expression": "(() => { const r = document.querySelector(\"#btn\").getBoundingClientRect(); return {x: r.x+r.width/2, y: r.y+r.height/2}; })()", "returnByValue": true}'
+chrome-agent mysite-01 Runtime.evaluate '{"expression": "(() => { const r = document.querySelector(\"#btn\").getBoundingClientRect(); return {x: r.x+r.width/2, y: r.y+r.height/2}; })()", "returnByValue": true}'
 
 # Act -- dispatch real input events at those coordinates
-chrome-agent Input.dispatchMouseEvent '{"type": "mousePressed", "x": 400, "y": 300, "button": "left", "clickCount": 1}'
-chrome-agent Input.dispatchMouseEvent '{"type": "mouseReleased", "x": 400, "y": 300, "button": "left", "clickCount": 1}'
+chrome-agent mysite-01 Input.dispatchMouseEvent '{"type": "mousePressed", "x": 400, "y": 300, "button": "left", "clickCount": 1}'
+chrome-agent mysite-01 Input.dispatchMouseEvent '{"type": "mouseReleased", "x": 400, "y": 300, "button": "left", "clickCount": 1}'
 
 # Verify
-chrome-agent Runtime.evaluate '{"expression": "document.title", "returnByValue": true}'
+chrome-agent mysite-01 Runtime.evaluate '{"expression": "document.title", "returnByValue": true}'
 ```
 
 For filling form fields (React-compatible):
 ```bash
-chrome-agent Runtime.evaluate '{"expression": "(() => { const el = document.querySelector(\"#email\"); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, \"value\").set; set.call(el, \"test@example.com\"); el.dispatchEvent(new Event(\"input\", {bubbles:true})); })()"}'
+chrome-agent mysite-01 Runtime.evaluate '{"expression": "(() => { const el = document.querySelector(\"#email\"); const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, \"value\").set; set.call(el, \"test@example.com\"); el.dispatchEvent(new Event(\"input\", {bubbles:true})); })()"}'
 ```
 
 ## Observing a Browser
 
-Use the observer script with Claude Code's Monitor tool for real-time event notifications:
+Use `attach` to stream events. Run it in the background while you send commands:
 
 ```bash
-# Three tiers: nav (navigation only), dev (+ errors + network), full (+ clicks/scrolls/selection)
-uv run python scripts/observe.py --tier dev
+# Start event observation in background
+chrome-agent attach mysite-01 +Page.loadEventFired +Network.requestWillBeSent > /tmp/events.jsonl &
+
+# Send commands -- events caused by these appear in the attach stream
+chrome-agent mysite-01 Page.navigate '{"url": "https://example.com"}'
+
+# Read the captured events
+cat /tmp/events.jsonl
+# {"status": "ready", "sessionId": "42A165B16155FB", "target": "F980DEDB623E4B"}
+# {"method": "Network.requestWillBeSent", "params": {"request": {"url": "https://example.com/"}...}}
+# {"method": "Page.loadEventFired", "params": {"timestamp": 22932.859519}}
 ```
 
-The observer streams filtered events as `[TAG] content` lines:
-```
-[PAGE] Example Domain | https://example.com
-[LOADED]
-[XHR] POST https://api.example.com/login
-[ERR] TypeError: Cannot read properties of null
+Modify subscriptions during the session by writing to stdin:
+```bash
+# If running interactively (not backgrounded):
++Network.responseReceived    # subscribe to additional event
+-Network.requestWillBeSent   # unsubscribe
 ```
 
-Multiple CDP connections coexist. The observer, query connections, and a human all share the browser without conflict. See `docs/monitor-integration.md` for the full Monitor integration guide.
+Multiple attach sessions can coexist on the same browser. Each has isolated subscriptions -- one agent enabling Network events does not flood another agent's event stream.
+
+## Target Specifiers
+
+When a browser has multiple tabs, specify which one to target:
+
+```bash
+# By numeric index (from status output)
+chrome-agent mysite-01 --target 2 Page.navigate '{"url": "..."}'
+
+# By target ID prefix (from status output)
+chrome-agent mysite-01 --target 956FD3C2 Runtime.evaluate '{"expression": "document.title"}'
+
+# By URL substring
+chrome-agent mysite-01 --url meetup.com Runtime.evaluate '{"expression": "document.title"}'
+```
+
+When there's only one tab, no specifier is needed.
 
 ## What You Can and Cannot See
 
@@ -98,10 +148,11 @@ CDP events show **consequences** (pages loading, network requests, DOM mutations
 
 ## Key Gotchas
 
-- **Port conflicts.** `chrome-agent launch` refuses if the port is occupied. Use `--port N` or kill the existing process.
-- **One-shot overhead.** Each CLI invocation costs ~350ms. For multi-step workflows, use session mode or the Python CDPClient directly.
+- **Instance naming.** `chrome-agent launch` creates a named instance from the current directory basename. Use `chrome-agent status` to see what's running.
+- **One-shot overhead.** Each CLI invocation costs ~50-80ms (Python startup dominates). For multi-step workflows with event observation, use `attach` in the background and one-shot for commands.
 - **Navigation kills context.** If someone navigates while you have a pending `Runtime.evaluate`, you get a context-destroyed error. Retry on the new page.
 - **Fingerprint for hostile sites.** Use `--fingerprint profile.json` to override user agent, viewport, timezone, and anti-detection signals.
+- **Event isolation.** Each `attach` session has its own event subscriptions. Subscribing to Network events in one session does not affect other sessions.
 
 ## Python API
 
@@ -123,5 +174,5 @@ async with CDPClient(ws_url=ws_url) as cdp:
 ## Further Reading
 
 - `docs/collaboration-guide.md` -- human-agent collaboration patterns, multi-agent workflows
-- `docs/monitor-integration.md` -- Claude Code Monitor integration, observer script, push vs pull
+- `docs/monitor-integration.md` -- Claude Code Monitor integration, dual-channel pattern
 - `docs/cdp-collaboration-reference.md` -- CDP protocol mechanics, event catalog, binding bridge

@@ -8,7 +8,9 @@ For the underlying protocol mechanics, see [cdp-collaboration-reference.md](cdp-
 
 Three things to understand before diving in:
 
-**Multiple connections coexist.** Chrome's CDP protocol supports many simultaneous WebSocket connections to the same browser. A monitoring agent, a querying agent, a human using the browser, and DevTools can all operate at the same time without interfering. Events fan out to all subscribers. DOM mutations by one participant are instantly visible to all others.
+**Multiple connections coexist.** Chrome's CDP protocol supports many simultaneous WebSocket connections to the same browser. A monitoring agent, a querying agent, a human using the browser, and DevTools can all operate at the same time without interfering. DOM mutations by one participant are instantly visible to all others.
+
+**Event subscriptions are isolated.** Each `attach` session gets its own CDP session via `Target.attachToTarget` on the browser-level WebSocket. One agent subscribing to Network events does NOT flood other agents with network traffic. Each agent sees only the events it asked for. This is the key architectural property that makes multi-agent collaboration practical.
 
 **CDP sees consequences, not causes.** When you click a link, CDP reports that a navigation started and network requests fired. It does not report the click itself. When you scroll, CDP reports lazy-loaded XHR requests. It does not report the scroll position. CDP tells you what the *browser* is doing. It does not tell you what the *user* is doing. For most development workflows, consequences are enough. When they're not, the gap can be bridged (see "Full Interaction Observation").
 
@@ -24,7 +26,7 @@ Launch a browser and observe it from a separate process.
 chrome-agent launch
 ```
 
-A Chrome window opens. Navigate to any page.
+A Chrome window opens with a name derived from your current directory (e.g., `myproject-01`). The name auto-increments if one already exists. Navigate to any page.
 
 **From a separate terminal, check the browser:**
 
@@ -32,59 +34,59 @@ A Chrome window opens. Navigate to any page.
 chrome-agent status
 ```
 
-```
-Browser running on port 9222
-  Version: Chrome/146.0.7680.177
-  URL:     https://www.google.com
-  Title:   Google
+```json
+[
+  {
+    "name": "myproject-01",
+    "port": 9222,
+    "alive": true,
+    "targets": [
+      {
+        "id": "A1B2C3D4",
+        "index": 1,
+        "url": "https://www.google.com",
+        "title": "Google"
+      }
+    ]
+  }
+]
 ```
 
 **Read the page from outside the browser:**
 
 ```bash
 # Page title
-chrome-agent Runtime.evaluate '{"expression": "document.title", "returnByValue": true}'
+chrome-agent myproject-01 Runtime.evaluate '{"expression": "document.title", "returnByValue": true}'
 
 # Visible text (first 200 chars)
-chrome-agent Runtime.evaluate '{"expression": "document.body.innerText.substring(0, 200)", "returnByValue": true}'
+chrome-agent myproject-01 Runtime.evaluate '{"expression": "document.body.innerText.substring(0, 200)", "returnByValue": true}'
 
 # Screenshot
-chrome-agent Page.captureScreenshot '{"format": "png"}' > /tmp/screenshot.json
+chrome-agent myproject-01 Page.captureScreenshot '{"format": "png"}' > /tmp/screenshot.json
 python3 -c "import json, base64; d=json.load(open('/tmp/screenshot.json')); open('/tmp/screenshot.png','wb').write(base64.b64decode(d['data'])); print('Saved /tmp/screenshot.png')"
 ```
 
-Each command connects to the browser, does one thing, and disconnects. The browser doesn't blink. You're observing it without interfering.
+Each command connects to the browser by instance name, does one thing, and disconnects. The browser doesn't blink. You're observing it without interfering.
 
 **Watch events in real time:**
 
-Start a persistent session in one terminal, subscribe to navigation events, then navigate the browser by hand in the window:
+Start an attach session in one terminal, subscribe to navigation events, then navigate the browser by hand in the window:
 
 ```bash
-# Start session (stays open, reading commands from stdin)
-chrome-agent session
+# Attach to the instance and subscribe to events (streams to stdout)
+chrome-agent attach myproject-01 +Page.loadEventFired +Page.frameNavigated
 ```
 
-The session prints a readiness line confirming the connection:
-
-```json
-{"ready":true,"ws_url":"ws://localhost:9222/devtools/page/ABC123"}
-```
-
-Now type these subscribe commands:
-
-```
-+Page.loadEventFired
-+Page.frameNavigated
-```
-
-Go click around in the browser window. Every time a page loads, the session prints a JSON event line:
+Go click around in the browser window. Every time a page loads, attach prints a JSON event line:
 
 ```json
 {"method":"Page.frameNavigated","params":{"frame":{"url":"https://example.com","title":"Example Domain",...}}}
 {"method":"Page.loadEventFired","params":{"timestamp":12345.67}}
 ```
 
-You're watching the human browse in real time. Press Ctrl+D to end the session.
+You're watching the human browse in real time. Press Ctrl+C to end the session.
+
+For background observation, run attach with `&`, under Claude Code's Monitor tool, or redirect to a file -- then send one-shot commands from the same terminal. This is the **two-channel pattern**: attach is the observation channel (push -- events stream when they happen), one-shot commands are the action channel (pull -- send a command, get a response). Both address browsers by instance name and both can run concurrently on the same browser.
 
 ## How Agents Find and Interact with Elements
 
@@ -205,37 +207,40 @@ You're exploring a site or testing your web app. An AI agent follows along, catc
 
 ### Setup
 
-The agent starts the observer script via Claude Code's Monitor tool. The script subscribes to CDP events and streams formatted notifications. See [monitor-integration.md](monitor-integration.md) for full details.
+The agent attaches to the browser instance and subscribes to the events it needs. Run this in the background or under Claude Code's Monitor tool. See [monitor-integration.md](monitor-integration.md) for full details.
 
 ```bash
-# Agent starts the observer (three tiers: nav, dev, full)
-uv run python scripts/observe.py --tier dev
+# Attach with dev-level event subscriptions
+chrome-agent attach myproject-01 \
+  +Page.frameNavigated +Page.loadEventFired \
+  +Network.requestWillBeSent +Network.responseReceived \
+  +Runtime.consoleAPICalled +Runtime.exceptionThrown &
 ```
 
-The agent sees notifications like:
-```
-[PAGE] Products | https://myapp.com/products
-[LOADED]
-[XHR] POST https://myapp.com/api/search
-[ERR] Failed to load image: 404
+The agent sees events like:
+
+```json
+{"method":"Page.frameNavigated","params":{"frame":{"url":"https://myapp.com/products","title":"Products",...}}}
+{"method":"Network.responseReceived","params":{"response":{"url":"https://myapp.com/api/search","status":200,...},...}}
+{"method":"Runtime.exceptionThrown","params":{"exceptionDetails":{"text":"Failed to load image: 404",...},...}}
 ```
 
-While the monitor runs, the agent queries the page on demand via separate one-shot commands:
+While the attach session runs in the background, the agent queries the page on demand via separate one-shot commands:
 
 ```bash
 # Read page content
-chrome-agent Runtime.evaluate '{"expression": "document.querySelector(\"#productTitle\")?.textContent.trim()", "returnByValue": true}'
+chrome-agent myproject-01 Runtime.evaluate '{"expression": "document.querySelector(\"#productTitle\")?.textContent.trim()", "returnByValue": true}'
 
 # Take a screenshot
-chrome-agent Page.captureScreenshot '{"format": "png"}'
+chrome-agent myproject-01 Page.captureScreenshot '{"format": "png"}'
 ```
 
-The monitor and one-shot commands are separate CDP connections that coexist with the human's browser usage.
+The attach session and one-shot commands are separate CDP connections that coexist with the human's browser usage.
 
 ### What the agent sees
 
 - Which pages you visit (URL, title, load timing)
-- Network activity (API calls, failed requests -- filtered to Document/XHR/Fetch)
+- Network activity (API calls, failed requests)
 - DOM state at any moment (via `Runtime.evaluate`)
 - Visual state at any moment (via screenshots)
 - Console output (if subscribed to `Runtime.consoleAPICalled`)
@@ -246,7 +251,7 @@ Your clicks, scrolling, hovering, typing, or text selection. The agent sees *con
 
 ### What this looks like in practice
 
-During a collaborative Amazon browsing session, a navigation-only monitor saw 2-3 events per page visit (frameNavigated + loadEventFired). Adding network events produced 200+ per page (ads, tracking, lazy-loading, video transcoding). Filtering to Document + XHR/Fetch brought it down to 10-20 meaningful events. Start with navigation only and add network when you need it.
+During a collaborative Amazon browsing session, navigation-only subscriptions saw 2-3 events per page visit (frameNavigated + loadEventFired). Adding all network events produced 200+ per page (ads, tracking, lazy-loading, video transcoding). Filtering to Document + XHR/Fetch brought it down to 10-20 meaningful events. Start with navigation only and add network when you need it.
 
 ### Handoff
 
@@ -288,10 +293,12 @@ chrome-agent launch
 
 ### Step 2: Agent starts monitoring errors
 
-The agent starts the observer script with the `dev` tier, which captures console errors, unhandled exceptions, and failed network requests:
+The agent attaches to the instance with error-relevant event subscriptions:
 
 ```bash
-uv run python scripts/observe.py --tier dev
+chrome-agent attach myproject-01 \
+  +Runtime.consoleAPICalled +Runtime.exceptionThrown \
+  +Network.responseReceived +Page.frameNavigated &
 ```
 
 See [monitor-integration.md](monitor-integration.md) for how to launch this via Claude Code's Monitor tool.
@@ -383,14 +390,14 @@ For automated testing, multiple agents operate the same browser headlessly.
 chrome-agent launch --headless
 ```
 
-Each agent runs its own script with a persistent CDPClient connection:
+Each agent attaches with its own event subscriptions. Because each attach session gets an isolated CDP session via `Target.attachToTarget`, one agent's subscriptions don't flood the others:
 
-- **Agent A (actor):** Navigates through critical user flows. Fills forms, clicks buttons, follows links.
-- **Agent B (network monitor):** Subscribes to `Network.requestWillBeSent` and `Network.responseReceived`. Records every API call, response time, and status code.
-- **Agent C (visual regression):** Takes screenshots at each step via `Page.captureScreenshot`. Compares against baselines.
-- **Agent D (error monitor):** Subscribes to `Runtime.exceptionThrown` and `Runtime.consoleAPICalled`. Flags any errors during Agent A's workflow.
+- **Agent A (actor):** Navigates through critical user flows. Fills forms, clicks buttons, follows links via one-shot commands.
+- **Agent B (network monitor):** `chrome-agent attach myapp-01 +Network.requestWillBeSent +Network.responseReceived` -- records every API call, response time, and status code. Sees only network events.
+- **Agent C (visual regression):** Takes screenshots at each step via one-shot `Page.captureScreenshot`. Compares against baselines.
+- **Agent D (error monitor):** `chrome-agent attach myapp-01 +Runtime.exceptionThrown +Runtime.consoleAPICalled` -- flags any errors during Agent A's workflow. Sees only console/exception events.
 
-All four see the same browser state. When Agent A navigates, Agents B-D observe through their subscriptions. Chrome fans out events to all connections.
+All four see the same browser state. When Agent A navigates, Agents B-D observe through their own subscriptions. Crucially, Agent B subscribing to network events does not cause Agent D to receive network traffic -- each attach session's event subscriptions are isolated.
 
 For action coordination, designate one agent as the actor. Others observe only. This is a convention, not a lock -- chrome-agent doesn't enforce it because Chrome's multi-client model handles concurrent access gracefully (navigation by one connection sends a clean context-destroyed error to others with pending work, rather than hanging or crashing).
 
@@ -503,7 +510,7 @@ The `if (typeof reportInteraction === 'function')` guard prevents errors if the 
 
 ### The browser crashes
 
-All CDP connections receive a WebSocket close event. Pending `send()` calls raise `ConnectionError`. The monitor exits. Session mode exits with code 1 and prints "WebSocket disconnected" to stderr. Recovery: `chrome-agent status`, relaunch, reconnect.
+All CDP connections receive a WebSocket close event. Pending `send()` calls raise `ConnectionError`. Attach sessions exit with code 1 and print "WebSocket disconnected" to stderr. Recovery: `chrome-agent status`, relaunch, reconnect.
 
 ### Navigation destroys execution context
 
@@ -512,28 +519,30 @@ When any participant navigates, Chrome destroys the current page's JavaScript ex
 ### Port is already occupied
 
 ```
-Error: Port 9222 is already in use (Chrome/146.0.7680.177).
+Error: Port 9222 is already in use.
 Kill the existing browser with: kill $(lsof -ti:9222)
-or use a different port with --port.
+or use a different port: chrome-agent launch --port 9223
 ```
 
-The existing browser is not disturbed. Use `--port 9223` to launch alongside it, or kill the existing process.
+Only `launch` accepts `--port` as an override. All other commands address browsers by instance name, not port number.
 
 ### Agent sends a bad CDP command
 
-Invalid commands return a `CDPError` with Chrome's error code and message. The connection stays alive. In session mode, the error appears on stdout and the session continues.
+Invalid commands return a `CDPError` with Chrome's error code and message. The connection stays alive. In attach mode, the error appears on stdout and the session continues.
 
 ## Tips
 
-- **Start simple.** Use `chrome-agent status` and one-shot `Runtime.evaluate` before setting up monitors. Get comfortable with what you can see.
+- **Start simple.** Use `chrome-agent status` and one-shot `Runtime.evaluate` before setting up attach sessions. Get comfortable with what you can see.
 
 - **Screenshots are cheap verification.** When in doubt, take a screenshot. Fastest way to confirm agent and human see the same thing.
 
-- **Filter events aggressively.** Start with `Page.frameNavigated` only. Add Network filtered to `Document` and `XHR`/`Fetch` when you need it.
+- **Filter events aggressively.** Start with `+Page.frameNavigated` only. Add `+Network.requestWillBeSent` and `+Network.responseReceived` when you need them.
 
-- **Session mode for sustained work.** One-shot commands cost ~350ms each. Session mode: ~0.5ms per command.
+- **Attach for sustained observation.** One-shot commands cost ~50-80ms each. Attach sessions hold a persistent connection for near-instant event delivery.
 
-- **Multiple connections coexist.** Monitor, query connection, and human share the browser without conflict.
+- **Event isolation scales.** Each attach session has isolated subscriptions. Five agents can each subscribe to different events on the same browser without interfering.
+
+- **Target specifiers for multi-tab browsers.** Use `--target <id-or-index>` or `--url <substring>` on attach and one-shot commands to pick a specific tab.
 
 - **The console is a communication channel.** `console.log` from the agent. Human sees it in DevTools. Other agents see it via `Runtime.consoleAPICalled`.
 

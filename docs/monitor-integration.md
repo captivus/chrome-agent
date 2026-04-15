@@ -4,14 +4,14 @@ How to use Claude Code's Monitor tool with chrome-agent for real-time browser ob
 
 ## How Monitor Works
 
-Claude Code's Monitor tool runs a background script and streams each stdout line as a real-time notification to the agent. The agent keeps working while notifications arrive asynchronously -- no polling, no blocking.
+Claude Code's Monitor tool runs a background command and streams each stdout line as a real-time notification to the agent. The agent keeps working while notifications arrive asynchronously -- no polling, no blocking.
 
 Key behaviors:
 
 - **Each stdout line is one notification.** Lines within 200ms of each other batch into a single notification.
-- **`flush=True` is mandatory.** Python buffers stdout by default. Without `flush=True` on every print, events are delayed by seconds or minutes.
-- **Too many events auto-stops the monitor.** If the script produces output too fast, the Monitor tool kills it to prevent context overflow. Filter aggressively at the source.
-- **Monitor is read-only.** The agent receives notifications but cannot write to the monitored script's stdin. This is the fundamental constraint that shapes the architecture.
+- **`flush=True` is mandatory for custom scripts.** Python buffers stdout by default. Without `flush=True` on every print, events are delayed by seconds or minutes. The `attach` command handles flushing internally.
+- **Too many events auto-stops the monitor.** If the command produces output too fast, the Monitor tool kills it to prevent context overflow. Subscribe to fewer events to stay under the threshold.
+- **Monitor is read-only.** The agent receives notifications but cannot write to the monitored command's stdin. This is the fundamental constraint that shapes the architecture.
 - **Persistent mode** runs for the session's lifetime. **Timeout mode** auto-stops after a deadline.
 
 ## Architecture: Dual Channel
@@ -21,13 +21,13 @@ Because Monitor is read-only, the agent uses two channels:
 ```mermaid
 flowchart TB
     subgraph Agent
-        M["Monitor channel (push)\nobserve.py → stdout → notifications"]
-        A["Action channel (pull)\nchrome-agent CLI or CDPClient"]
+        M["Monitor channel (push)\nattach instance +Events → stdout → notifications"]
+        A["Action channel (pull)\nchrome-agent instance Domain.method"]
     end
 
     subgraph Browser["Chrome Browser"]
-        CDP1["CDP connection 1\npersistent, events"]
-        CDP2["CDP connection 2\nephemeral, commands"]
+        CDP1["CDP session 1\npersistent, events"]
+        CDP2["CDP session 2\nephemeral, commands"]
     end
 
     M --> CDP1
@@ -36,85 +36,117 @@ flowchart TB
     CDP2 --> Browser
 ```
 
-**Monitor channel (push):** A persistent Python script subscribes to CDP events and prints filtered, formatted lines to stdout. The agent receives these as real-time notifications. The script runs for the entire session.
+**Monitor channel (push):** `chrome-agent attach <instance> +Event1 +Event2` creates a persistent CDP session, subscribes to the specified events, and streams them to stdout as JSON lines. The agent receives these as real-time notifications. The command runs for the entire session.
 
-**Action channel (pull):** Separate one-shot `chrome-agent` CLI calls or CDPClient scripts for commands and queries -- navigate, take screenshots, read the DOM, dispatch input events. Each opens its own CDP connection, does its work, and closes.
+**Action channel (pull):** Separate one-shot `chrome-agent <instance> Domain.method` calls for commands and queries -- navigate, take screenshots, read the DOM, dispatch input events. Each creates its own isolated CDP session, does its work, and disconnects. ~50-80ms per call.
 
-Both channels connect to the same browser simultaneously. Chrome multiplexes CDP connections -- they don't interfere.
+Both channels connect to the same browser simultaneously. Chrome multiplexes CDP connections -- they don't interfere. Each attach session's event subscriptions are isolated: subscribing to Network events in one session does not flood another session with Network events.
 
-### Why not pipe session mode through Monitor?
+### Why attach instead of session mode?
 
-`chrome-agent session` reads commands from stdin and writes events to stdout. It would seem natural to run it via Monitor. But Monitor can't write to stdin -- the agent has no way to send commands. Session mode through Monitor would give the agent event observation but no way to act. The dual-channel architecture solves this: Monitor for observation, Bash for action.
+`chrome-agent attach` is purpose-built for Monitor. It subscribes to events on startup, streams them to stdout as JSON lines, and requires no stdin interaction for its primary use case (event observation). The agent sends commands in parallel via one-shot calls on the action channel.
 
-## The Observer Script
+`chrome-agent session` reads commands from stdin and writes events to stdout. Monitor can't write to stdin, so session mode through Monitor would give event observation but no way to send commands. The dual-channel architecture avoids this limitation entirely: `attach` for observation, one-shot for action.
 
-Chrome-agent includes a ready-to-use observer script at `scripts/observe.py`:
+## The Attach Command
+
+The `attach` command connects to a named browser instance, creates an isolated CDP session, subscribes to the specified events, and streams them to stdout as JSON lines.
 
 ```bash
-uv run python scripts/observe.py [--port 9222] [--tier nav|dev|full]
+chrome-agent attach <instance> +Event1 +Event2 [+Event3 ...]
 ```
 
-**Note:** This script is part of the chrome-agent source repository. It requires the chrome-agent package to be importable (either installed or run from the project directory with `uv run`). If you installed chrome-agent as a tool via `uv tool install`, clone the repo for access to the observer script, or copy the script into your project.
+**Startup order matters:** The browser must be running before attach connects. Launch with `chrome-agent launch` first, then start the attach session.
 
-**Startup order matters:** The browser must be running before the observer connects. Launch with `chrome-agent launch` first, then start the observer.
+### Event Subscription Sets
 
-### Tiers
+There are no built-in tiers or presets. You subscribe to exactly the events you need. Here are common subscription sets:
 
-Three verbosity tiers encode filtering decisions so the agent doesn't need to understand CDP event semantics:
+**Navigation only (2-3 events per page load)**
 
-**`nav` -- Navigation only (2-3 events per page)**
-
-Subscribes to: `Page.frameNavigated`, `Page.loadEventFired`
-
-Output:
-```
-[PAGE] Example Domain | https://example.com
-[LOADED]
+```bash
+chrome-agent attach myapp +Page.frameNavigated +Page.loadEventFired
 ```
 
 Use when: following along with a browsing session, minimal noise.
 
-**`dev` -- Navigation + errors + filtered network (default)**
+**Navigation + errors**
 
-Adds: `Runtime.consoleAPICalled` (errors/warnings only), `Runtime.exceptionThrown`, `Network.requestWillBeSent` (Document/XHR/Fetch only), `Network.loadingFailed`
-
-Output:
-```
-[PAGE] My App | http://localhost:3000
-[LOADED]
-[XHR] POST https://api.example.com/login
-[ERR] TypeError: Cannot read properties of null
-[EXCEPTION] Unhandled rejection at http://localhost:3000/app.js:42
-[NET FAIL] net::ERR_CONNECTION_REFUSED
+```bash
+chrome-agent attach myapp +Page.frameNavigated +Page.loadEventFired \
+  +Runtime.exceptionThrown +Network.loadingFailed
 ```
 
-Use when: debugging a web app, watching for errors during development.
+Use when: monitoring for problems while the browser is in use.
 
-**`full` -- Dev + interaction bridge**
+**Navigation + network**
 
-Adds: `Runtime.addBinding` + injected DOM listeners for click, scroll, and text selection. Uses JavaScript-side scroll debouncing (300ms) to avoid flooding.
-
-Output:
-```
-[PAGE] Amazon.com | https://www.amazon.com
-[LOADED]
-[CLICK] A#nav-link-accountList "Account & Lists"
-[SCROLL] y=1200
-[SELECT] "Climate Pledge Friendly"
-[XHR] GET https://www.amazon.com/api/recommendations
+```bash
+chrome-agent attach myapp +Page.frameNavigated +Page.loadEventFired \
+  +Network.requestWillBeSent
 ```
 
-Use when: recording user interactions, understanding what a human or agent is clicking/scrolling/selecting.
+Use when: watching API calls, tracking what requests the page makes.
 
-### Rate limiting
+**Navigation + errors + network**
 
-All tiers include a token-bucket rate limiter: max 15 events per 2-second window. Excess events are silently dropped and periodically summarized:
+```bash
+chrome-agent attach myapp +Page.frameNavigated +Page.loadEventFired \
+  +Runtime.exceptionThrown +Network.loadingFailed \
+  +Network.requestWillBeSent
+```
+
+Use when: debugging a web app during development.
+
+**Console output**
+
+```bash
+chrome-agent attach myapp +Runtime.consoleAPICalled +Runtime.exceptionThrown
+```
+
+Use when: watching for console logs and exceptions.
+
+### Output Format
+
+Each event is a single JSON line:
+
+```json
+{"method": "Page.frameNavigated", "params": {"frame": {"id": "...", "url": "https://example.com", ...}}}
+{"method": "Page.loadEventFired", "params": {"timestamp": 12345.678}}
+{"method": "Runtime.exceptionThrown", "params": {"exceptionDetails": {...}}}
+```
+
+On startup, attach emits a ready line:
+
+```json
+{"status": "ready", "sessionId": "ABC123...", "target": "DEF456..."}
+```
+
+### Filtering Downstream
+
+Attach passes events through without filtering. If you need to reduce noise, filter downstream with standard tools:
+
+```bash
+# Only show navigation events
+chrome-agent attach myapp +Page.frameNavigated +Page.loadEventFired \
+  +Network.requestWillBeSent | jq 'select(.method | startswith("Page."))'
+
+# Save all events to a file while also watching for errors
+chrome-agent attach myapp +Page.frameNavigated +Page.loadEventFired \
+  +Runtime.exceptionThrown +Network.requestWillBeSent \
+  > /tmp/events.jsonl &
+```
+
+### Dynamic Subscriptions
+
+Attach also accepts subscription changes on stdin while running:
 
 ```
-[SUPPRESSED] 23 events dropped (rate limited)
++Network.responseReceived    # subscribe to a new event
+-Network.requestWillBeSent   # unsubscribe from an event
 ```
 
-This prevents Monitor auto-stop on noisy pages like Amazon (200+ network events per page load). The rate limiter drops events at the output level -- suppressed events are genuinely lost, not buffered. The trade-off is acceptable because the suppressed events are noise (the 15th ad-tracking XHR on a page load), not signal.
+This is useful when running attach interactively but is not relevant when running via Monitor (which cannot write to stdin).
 
 ## Usage Patterns
 
@@ -125,17 +157,17 @@ The agent drives the browser and the monitor provides feedback. The agent doesn'
 ```
 Agent starts monitor (see "Starting the Monitor" below)
 
-Agent runs:      chrome-agent Page.navigate '{"url": "https://example.com/login"}'
+Agent runs:      chrome-agent myapp Page.navigate '{"url": "https://example.com/login"}'
 
-Monitor reports: [PAGE] Login | https://example.com/login
-                 [LOADED]
+Monitor reports: {"method": "Page.frameNavigated", "params": {"frame": {"url": "https://example.com/login", ...}}}
+                 {"method": "Page.loadEventFired", "params": {...}}
 
-Agent runs:      chrome-agent Runtime.evaluate '{"expression": "..."}'  (fill form)
-Agent runs:      chrome-agent Input.dispatchMouseEvent ...              (click submit)
+Agent runs:      chrome-agent myapp Runtime.evaluate '{"expression": "..."}'  (fill form)
+Agent runs:      chrome-agent myapp Input.dispatchMouseEvent ...              (click submit)
 
-Monitor reports: [XHR] POST https://api.example.com/auth
-                 [PAGE] Dashboard | https://example.com/dashboard
-                 [LOADED]
+Monitor reports: {"method": "Network.requestWillBeSent", "params": {"request": {"url": "https://api.example.com/auth", ...}}}
+                 {"method": "Page.frameNavigated", "params": {"frame": {"url": "https://example.com/dashboard", ...}}}
+                 {"method": "Page.loadEventFired", "params": {...}}
 
 Agent knows:     Login succeeded (saw navigation to dashboard, no errors).
 ```
@@ -147,92 +179,88 @@ Without the monitor, the agent would need to explicitly check the URL and page s
 The human browses. The agent watches via Monitor and answers questions or catches problems.
 
 ```
-Agent starts monitor with --tier dev
+Agent starts monitor with navigation + error events
 
 Human clicks:    (navigates to various pages)
-Monitor reports: [PAGE] Products | https://myapp.com/products
-                 [LOADED]
-                 [PAGE] Product Detail | https://myapp.com/products/42
-                 [LOADED]
-                 [ERR] Failed to load image: 404
+Monitor reports: {"method": "Page.frameNavigated", "params": {"frame": {"url": "https://myapp.com/products", ...}}}
+                 {"method": "Page.loadEventFired", "params": {...}}
+                 {"method": "Page.frameNavigated", "params": {"frame": {"url": "https://myapp.com/products/42", ...}}}
+                 {"method": "Network.loadingFailed", "params": {"errorText": "net::ERR_FILE_NOT_FOUND", ...}}
 
-Agent responds:  "I see a 404 error loading an image on the product detail page.
-                  Let me check which image."
-Agent runs:      chrome-agent Runtime.evaluate '{"expression": "..."}'
-Agent runs:      chrome-agent Page.captureScreenshot '{"format": "png"}'
+Agent responds:  "I see a loading failure on the product detail page.
+                  Let me check which resource failed."
+Agent runs:      chrome-agent myapp Runtime.evaluate '{"expression": "..."}'
+Agent runs:      chrome-agent myapp Page.captureScreenshot '{"format": "png"}'
 ```
 
 The monitor is the agent's peripheral vision -- it notices the error without being asked to look.
 
-### Pattern 3: Agent observes a human with full interaction visibility
-
-Same as Pattern 2, but with the `full` tier. The agent sees what the human clicks, scrolls to, and selects.
-
-```
-Agent starts monitor with --tier full
-
-Human browses:   (clicks around, scrolls, selects text)
-Monitor reports: [PAGE] Amazon.com | https://www.amazon.com
-                 [CLICK] INPUT#twotabsearchtextbox
-                 [CLICK] INPUT#nav-search-submit-button
-                 [PAGE] Search results | https://www.amazon.com/s?k=...
-                 [SCROLL] y=800
-                 [CLICK] A "Keychron K8 Tenkeyless..."
-                 [PAGE] Product | https://www.amazon.com/dp/...
-                 [SELECT] "Climate Pledge Friendly"
-
-Agent knows:     The human searched for something, scrolled through results,
-                 clicked the Keychron K8, and highlighted "Climate Pledge Friendly."
-```
-
-### Pattern 4: Agent observes another agent
+### Pattern 3: Agent observes another agent
 
 Agent A drives the browser. Agent B monitors. This is the multi-agent testing pattern.
 
 ```
-Agent B starts:  monitor with --tier full
+Agent B starts:  monitor with navigation + errors + network events
 
-Agent A runs:    chrome-agent Page.navigate '{"url": "http://localhost:3000/checkout"}'
+Agent A runs:    chrome-agent myapp Page.navigate '{"url": "http://localhost:3000/checkout"}'
 
-Agent B sees:    [PAGE] Checkout | http://localhost:3000/checkout
-                 [LOADED]
+Agent B sees:    {"method": "Page.frameNavigated", "params": {"frame": {"url": "http://localhost:3000/checkout", ...}}}
+                 {"method": "Page.loadEventFired", "params": {...}}
 
-Agent A runs:    (locates #email, dispatches Input events to fill it)
+Agent A runs:    (fills form fields via Runtime.evaluate + Input events)
 
-Agent B sees:    [CLICK] INPUT#email "test@example.com"
-                 [XHR] POST http://localhost:3000/api/validate-email
+Agent B sees:    {"method": "Network.requestWillBeSent", "params": {"request": {"url": "http://localhost:3000/api/validate-email", ...}}}
 
-Agent A runs:    (locates #submit, dispatches click)
+Agent A runs:    (clicks submit)
 
-Agent B sees:    [CLICK] BUTTON#submit "Place Order"
-                 [XHR] POST http://localhost:3000/api/orders
-                 [PAGE] Confirmation | http://localhost:3000/order/12345
-                 [LOADED]
+Agent B sees:    {"method": "Network.requestWillBeSent", "params": {"request": {"url": "http://localhost:3000/api/orders", "method": "POST", ...}}}
+                 {"method": "Page.frameNavigated", "params": {"frame": {"url": "http://localhost:3000/order/12345", ...}}}
+                 {"method": "Page.loadEventFired", "params": {...}}
 
-Agent B knows:   Agent A completed the checkout flow. The order API returned
-                 successfully. The confirmation page loaded. No errors.
+Agent B knows:   Agent A completed the checkout flow. The order API was called.
+                 The confirmation page loaded. No errors.
 ```
 
-With the `full` tier, Agent B sees Agent A's dispatched input events through the binding bridge. This is a built-in feedback loop: Agent A acts on one CDP connection, Agent B's monitor on another connection reports both the interactions and their consequences. Agent B can verify the complete workflow without any coordination protocol -- it simply watches.
+Agent B sees Agent A's actions through their consequences (navigation events, network requests). Each agent's attach session is isolated -- Agent B's event subscriptions don't affect Agent A's CDP connection.
 
-### Pattern 5: Error-triggered investigation
+### Pattern 4: Error-triggered investigation
 
 The agent works on code while the monitor watches the browser. When an error appears, the agent investigates.
 
 ```
 Agent:           (editing source code)
-Monitor reports: [EXCEPTION] TypeError: Cannot read properties of null at app.js:42
+Monitor reports: {"method": "Runtime.exceptionThrown", "params": {"exceptionDetails": {"text": "TypeError: Cannot read properties of null", ...}}}
 
-Agent responds:  "I see an unhandled TypeError at app.js line 42. Let me check."
-Agent runs:      chrome-agent Runtime.evaluate '{"expression": "..."}'
-Agent runs:      chrome-agent Page.captureScreenshot '{"format": "png"}'
-Agent:           (reads the code at line 42, identifies the fix, edits the file)
+Agent responds:  "I see an unhandled TypeError. Let me check."
+Agent runs:      chrome-agent myapp Runtime.evaluate '{"expression": "..."}'
+Agent runs:      chrome-agent myapp Page.captureScreenshot '{"format": "png"}'
+Agent:           (reads the code, identifies the fix, edits the file)
 
-Monitor reports: [PAGE] My App | http://localhost:3000  (hot reload)
-                 [LOADED]
+Monitor reports: {"method": "Page.frameNavigated", "params": {...}}  (hot reload)
+                 {"method": "Page.loadEventFired", "params": {...}}
                  (no more errors)
 
 Agent:           "The error is fixed. The page reloaded cleanly."
+```
+
+### Pattern 5: Background event logging
+
+Redirect attach output to a file for later analysis. The agent can review the log at any time without a live monitor.
+
+```bash
+chrome-agent attach myapp +Page.frameNavigated +Page.loadEventFired \
+  +Network.requestWillBeSent +Runtime.exceptionThrown \
+  > /tmp/events.jsonl &
+```
+
+The agent (or a human) can then search or analyze the log:
+
+```bash
+# Find all errors
+jq 'select(.method == "Runtime.exceptionThrown")' /tmp/events.jsonl
+
+# Count requests by domain
+jq -r 'select(.method == "Network.requestWillBeSent") | .params.request.url' /tmp/events.jsonl | sort | uniq -c | sort -rn
 ```
 
 ## Push vs Pull
@@ -246,9 +274,8 @@ The monitor provides push (events arrive when they happen). One-shot commands pr
 | Did an error occur? | Push (monitor) | Errors are unpredictable |
 | What does the page look like? | Pull (screenshot) | Snapshots are point-in-time |
 | What text is on the page? | Pull (Runtime.evaluate) | DOM state is a snapshot |
-| Is the page loaded? | Push (monitor: [LOADED]) | Timing matters |
-| Did the API call succeed? | Push (monitor: [XHR]) | You need to know when |
-| What did the human click? | Push (monitor: [CLICK], full tier) | You need to know when |
+| Is the page loaded? | Push (monitor) | Timing matters |
+| Did the API call succeed? | Push (Network events) | You need to know when |
 
 **Heuristic:** If you need to know **when** something happens, use push. If you need to know **what** something is, use pull.
 
@@ -260,7 +287,7 @@ For session-length observation:
 
 ```
 Monitor tool:
-  command:     "uv run python scripts/observe.py --tier dev"
+  command:     "chrome-agent attach myapp +Page.frameNavigated +Page.loadEventFired +Runtime.exceptionThrown +Network.loadingFailed"
   description: "Browser observer (navigation + errors)"
   persistent:  true
 ```
@@ -269,26 +296,33 @@ For time-bounded observation (e.g., watching a specific test run):
 
 ```
 Monitor tool:
-  command:     "uv run python scripts/observe.py --tier dev"
+  command:     "chrome-agent attach myapp +Page.frameNavigated +Page.loadEventFired +Runtime.exceptionThrown"
   description: "Watching test run"
   timeout_ms:  300000  (5 minutes)
   persistent:  false
 ```
 
-The agent receives each stdout line from the observer script as a real-time notification in the conversation. To stop the monitor, use the TaskStop tool with the monitor's task ID.
+The agent receives each stdout line from the attach command as a real-time notification in the conversation. To stop the monitor, use the TaskStop tool with the monitor's task ID.
 
 ## Handoff
 
-The agent can switch from observing to acting without stopping the monitor. It simply starts sending commands via one-shot calls or a CDPClient script. The monitor continues running on its own CDP connection, now reporting the consequences of the agent's actions alongside any human activity.
+The agent can switch from observing to acting without stopping the monitor. It simply starts sending commands via one-shot calls. The monitor continues running on its own isolated CDP session, reporting the consequences of the agent's actions alongside any human activity.
 
-To fully stop observing: use TaskStop with the monitor's task ID. Then the agent operates through action commands only.
+To fully stop observing: use TaskStop with the monitor's task ID. Then the agent operates through one-shot commands only.
 
 ## Troubleshooting
 
-**Monitor auto-stops:** The page is generating too many events. Switch to a lower tier (`nav` instead of `dev`). The rate limiter handles most cases, but if `[SUPPRESSED]` lines themselves are too frequent, reduce `max_events` in the observer script.
+**Monitor auto-stops:** The page is generating too many events. Subscribe to fewer events -- remove `Network.requestWillBeSent` first (high-traffic pages can produce hundreds of network events per load). If you need network visibility on noisy pages, filter downstream with `jq` and pipe only matched lines to a secondary script that prints to stdout.
 
-**No events appearing:** Check that the browser is running (`chrome-agent status`). Check the port matches (`--port`). The observer prints `[OBSERVE] tier=dev port=9222` on startup -- if you don't see this, the script failed to connect. Most common cause: the browser wasn't launched yet. Launch first, then start the observer.
+**No events appearing:** Check that the browser is running (`chrome-agent status`). The attach command prints a `{"status": "ready", ...}` line on startup -- if you don't see this, it failed to connect. Most common cause: the browser wasn't launched yet. Launch first, then start the attach session.
 
-**Events appear delayed:** Ensure all `print()` calls use `flush=True`. The observer script does this. If you write a custom script, every print must flush.
+**Events appear delayed:** This should not happen with the `attach` command, which flushes every line. If you are writing a custom observation script, ensure all `print()` calls use `flush=True`.
 
-**Binding bridge doesn't work after navigation:** The `full` tier uses `Page.addScriptToEvaluateOnNewDocument` to persist listeners across navigations. If the monitor's CDP connection drops and reconnects, the document script registration is lost. Restart the monitor.
+**Attach exits immediately:** The instance name may not be registered. Run `chrome-agent status` to see registered instances and their names. If the instance was launched before the registry existed, relaunch it.
+
+**Multiple page targets:** If the browser has multiple tabs, attach auto-selects when there is exactly one page target. With multiple targets, it reports the available targets and exits. Use `--target` (ID prefix or 1-based index) or `--url` (substring match) to specify which tab:
+
+```bash
+chrome-agent attach myapp +Page.loadEventFired --url localhost:3000
+chrome-agent attach myapp +Page.loadEventFired --target 1
+```
