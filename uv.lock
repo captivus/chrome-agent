@@ -3,12 +3,12 @@ revision = 3
 requires-python = ">=3.11"
 
 [options]
-exclude-newer = "2026-04-08T02:02:09.783265419Z"
+exclude-newer = "2026-04-08T04:07:09.9718101Z"
 exclude-newer-span = "P7D"
 
 [[package]]
 name = "chrome-agent"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "websockets" },
