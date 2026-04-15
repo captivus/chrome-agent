@@ -12,12 +12,30 @@ import json
 import logging
 import signal
 import sys
+import warnings
 
 from .cdp_client import CDPClient, get_ws_url
 from .errors import CDPError, NoPageError
 from .registry import InstanceNotFoundError, lookup
 
 logger = logging.getLogger(__name__)
+
+
+def _suppress_shutdown_noise() -> None:
+    """Suppress asyncio and websockets noise during clean shutdown.
+
+    When attach exits (EOF, SIGTERM, browser disconnect), the asyncio
+    event loop and websockets library can produce warnings about
+    unfinished tasks and connection closures. These are expected during
+    shutdown and should not leak to stderr where they'd corrupt the
+    JSONL event stream for consumers using `> file.jsonl`.
+    """
+    # Suppress asyncio "Task was destroyed but it is pending" warnings
+    warnings.filterwarnings("ignore", message=".*was destroyed but.*", category=ResourceWarning)
+    # Suppress websockets connection close noise
+    logging.getLogger("websockets").setLevel(logging.CRITICAL)
+    # Suppress asyncio debug noise
+    logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 
 
 class AmbiguousTargetError(Exception):
@@ -119,6 +137,8 @@ async def run_attach(
     """
     if subscriptions is None:
         subscriptions = []
+
+    _suppress_shutdown_noise()
 
     # Phase 1: Resolve instance to port
     info = lookup(instance_name=instance_name, registry_path=registry_path)
@@ -260,8 +280,8 @@ async def run_attach(
             task.cancel()
             try:
                 await task
-            except asyncio.CancelledError:
-                pass
+            except (asyncio.CancelledError, Exception):
+                pass  # Swallow all shutdown exceptions
 
         # Phase 9: Clean shutdown
         try:
@@ -269,8 +289,11 @@ async def run_attach(
                 method="Target.detachFromTarget",
                 params={"sessionId": session_id},
             )
-        except (ConnectionError, Exception):
-            pass
+        except Exception:
+            pass  # Connection may already be dead
 
     finally:
-        await cdp.close()
+        try:
+            await cdp.close()
+        except Exception:
+            pass  # Swallow websocket close noise

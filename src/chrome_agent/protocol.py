@@ -20,18 +20,22 @@ def _resolve_port(
     instance_name: str | None,
     port: int | None,
 ) -> int | None:
-    """Resolve a port from instance name, auto-selection, or explicit port.
+    """Resolve a port from instance name, explicit port, or auto-selection.
 
     Precedence:
     1. instance_name provided -> registry lookup
-    2. Auto-select single live instance (when instance_name is None)
-    3. Explicit port (when port is not None)
+    2. Explicit port provided -> use it directly
+    3. Auto-select single live instance (when neither is provided)
     4. None (caller falls back to static usage)
     """
     if instance_name is not None:
         from .registry import lookup
         info = lookup(instance_name=instance_name)
         return info.port
+
+    # Explicit port takes precedence over auto-selection
+    if port is not None:
+        return port
 
     # Auto-select: if exactly one live instance, use it
     try:
@@ -42,10 +46,6 @@ def _resolve_port(
             return live[0].port
     except Exception:
         pass  # Registry not available or empty
-
-    # Explicit port fallback
-    if port is not None:
-        return port
 
     return None
 
