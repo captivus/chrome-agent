@@ -309,9 +309,16 @@ Click through the UI, submit forms, trigger the bug. The agent sees every `conso
 
 ### Step 4: Agent investigates
 
-When the agent sees an error, it queries the page to understand the state:
+When the agent sees an error, it queries the page to understand the state. The Python API provides direct CDP access for multi-step investigations:
 
 ```python
+from chrome_agent.cdp_client import CDPClient, get_ws_url
+from chrome_agent.registry import lookup
+
+# Resolve instance name to WebSocket URL
+info = lookup(instance_name="myapp-01")
+ws_url = get_ws_url(port=info.port, target_type="page")
+
 async with CDPClient(ws_url=ws_url) as cdp:
     # Read the error message visible on the page
     error_msg = await cdp.send(method="Runtime.evaluate", params={
@@ -334,6 +341,7 @@ async with CDPClient(ws_url=ws_url) as cdp:
 You describe what you did. The agent reproduces it programmatically using locate/act/verify:
 
 ```python
+# Using the same CDPClient setup from Step 4
 async with CDPClient(ws_url=ws_url) as cdp:
     # Navigate to the signup page
     await cdp.send(method="Page.navigate", params={"url": "http://localhost:3000/signup"})
@@ -432,9 +440,16 @@ The default CDP events show consequences but not causes. If you need an agent to
 
 ### Setup
 
-The observing agent registers a binding and injects listeners:
+The observing agent registers a binding and injects listeners. This requires the Python API (`CDPClient`) for persistent connection management:
 
 ```python
+from chrome_agent.cdp_client import CDPClient, get_ws_url
+from chrome_agent.registry import lookup
+
+# Connect to the browser-level WebSocket for a named instance
+info = lookup(instance_name="myapp-01")
+ws_url = get_ws_url(port=info.port, target_type="page")
+
 async def setup_interaction_observer(cdp: CDPClient):
     """Inject DOM event listeners that report to CDP via binding."""
 
@@ -510,7 +525,15 @@ The `if (typeof reportInteraction === 'function')` guard prevents errors if the 
 
 ### The browser crashes
 
-All CDP connections receive a WebSocket close event. Pending `send()` calls raise `ConnectionError`. Attach sessions exit with code 1 and print "WebSocket disconnected" to stderr. Recovery: `chrome-agent status`, relaunch, reconnect.
+All CDP connections receive a WebSocket close event. Pending `send()` calls raise `ConnectionError`. Attach sessions exit with an error message (`{"error": "Browser disconnected"}`) and terminate. One-shot commands fail with a connection error on the next invocation.
+
+**Recovery:** Check `chrome-agent status` to confirm the instance is dead. Relaunch with `chrome-agent launch`. The new instance gets a new name (e.g., `myapp-02`). Restart any attach sessions against the new instance.
+
+### Attach session dies
+
+If the attach process is killed (by Monitor timeout, OOM, or manual intervention), the CDP session is destroyed and event subscriptions die with it. The browser is unaffected -- it continues running normally. Other participants' attach sessions and one-shot commands are also unaffected.
+
+**Recovery:** Restart the attach session with the same command. Event subscriptions start fresh -- there is no resume or replay of missed events. Any events that occurred between the old attach dying and the new one starting are lost.
 
 ### Navigation destroys execution context
 

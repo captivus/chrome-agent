@@ -326,3 +326,7 @@ To fully stop observing: use TaskStop with the monitor's task ID. Then the agent
 chrome-agent attach myapp +Page.loadEventFired --url localhost:3000
 chrome-agent attach myapp +Page.loadEventFired --target 1
 ```
+
+**Browser crashes while attached:** The attach process exits with `{"error": "Browser disconnected"}` on stdout and terminates. Monitor sees this as the process ending. Recovery: check `chrome-agent status` to confirm the instance is dead, relaunch with `chrome-agent launch`, and restart the attach session against the new instance. Events between the crash and the new attach are lost -- there is no replay.
+
+**Attach process killed by Monitor or OOM:** The CDP session is destroyed and subscriptions die with it. The browser continues running normally. Other participants are unaffected. Recovery: restart the attach session with the same command. Subscriptions start fresh.
