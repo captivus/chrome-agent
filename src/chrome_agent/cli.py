@@ -14,7 +14,7 @@ import sys
 
 
 # Operational commands -- checked first during routing
-OPERATIONAL_COMMANDS = {"launch", "status", "attach", "help", "cleanup"}
+OPERATIONAL_COMMANDS = {"launch", "status", "attach", "help", "cleanup", "stop"}
 
 
 def _extract_flags(argv: list[str]) -> tuple[list[str], str | None, str | None]:
@@ -54,6 +54,7 @@ def _print_static_usage() -> None:
     print("  status [<instance>]                                      List instances and targets")
     print("  attach <instance> [+Event ...] [--target SPEC] [--url SUB]  Attach for events")
     print("  help [<instance>] [Domain | Domain.method]               Protocol discovery")
+    print("  stop <instance>                                            Stop a browser gracefully")
     print("  cleanup                                                   Remove stale instances")
     print()
     print("CDP one-shot commands:")
@@ -220,6 +221,27 @@ def _run_help(args: list[str]) -> None:
         sys.exit(1)
 
 
+def _run_stop(args: list[str]) -> None:
+    """Stop a running browser instance gracefully."""
+    from .registry import InstanceNotFoundError, stop
+
+    if not args:
+        print("Error: stop requires an instance name", file=sys.stderr)
+        print("Usage: chrome-agent stop <instance>", file=sys.stderr)
+        sys.exit(1)
+
+    instance_name = args[0]
+    try:
+        was_running = stop(instance_name=instance_name)
+        if was_running:
+            print(f"Stopped {instance_name}")
+        else:
+            print(f"{instance_name} was already dead, cleaned up")
+    except InstanceNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _run_cleanup() -> None:
     """Clean up stale instances and session directories."""
     from .launcher import cleanup_sessions
@@ -362,6 +384,8 @@ def main() -> None:
             asyncio.run(_run_attach(args=rest, target_spec=target_spec, url_spec=url_spec))
         elif command == "help":
             _run_help(args=rest)
+        elif command == "stop":
+            _run_stop(args=rest)
         elif command == "cleanup":
             _run_cleanup()
         return

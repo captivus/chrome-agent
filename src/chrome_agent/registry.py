@@ -237,6 +237,73 @@ def enumerate_instances(
     return results
 
 
+def stop(
+    instance_name: str,
+    registry_path: str | None = None,
+) -> bool:
+    """Stop a running browser instance gracefully via CDP Browser.close.
+
+    Sends Browser.close to the browser, waits for the process to exit,
+    then removes the registry entry and cleans up the session directory.
+
+    Returns True if the browser was stopped, False if it was already dead.
+    Raises InstanceNotFoundError if the instance name is not in the registry.
+    """
+    import asyncio
+    import time
+
+    path = _resolve_path(registry_path)
+    info = lookup(instance_name=instance_name, registry_path=registry_path)
+
+    if not info.alive:
+        # Already dead -- just clean up the registry entry
+        registry = _load_registry(path)
+        entry = registry.pop(instance_name, None)
+        if entry:
+            session_dir = entry.get("user_data_dir")
+            if session_dir and os.path.exists(session_dir):
+                shutil.rmtree(session_dir, ignore_errors=True)
+        _save_registry(registry, path)
+        logger.info("Instance %s was already dead, cleaned up", instance_name)
+        return False
+
+    # Send Browser.close via CDP
+    async def _close_browser():
+        from .cdp_client import CDPClient, get_ws_url
+        try:
+            browser_ws = get_ws_url(port=info.port, target_type="browser")
+            async with CDPClient(ws_url=browser_ws) as cdp:
+                await cdp.send(method="Browser.close")
+        except Exception as exc:
+            logger.warning("Browser.close failed for %s: %s", instance_name, exc)
+            # Fall back to SIGTERM
+            try:
+                os.kill(info.pid, 15)  # SIGTERM
+            except ProcessLookupError:
+                pass
+
+    asyncio.run(_close_browser())
+
+    # Wait for process to exit (up to 5 seconds)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if not process_is_running(info.pid):
+            break
+        time.sleep(0.1)
+
+    # Clean up registry entry and session directory
+    registry = _load_registry(path)
+    entry = registry.pop(instance_name, None)
+    if entry:
+        session_dir = entry.get("user_data_dir")
+        if session_dir and os.path.exists(session_dir):
+            shutil.rmtree(session_dir, ignore_errors=True)
+    _save_registry(registry, path)
+
+    logger.info("Stopped instance %s", instance_name)
+    return True
+
+
 def cleanup(
     registry_path: str | None = None,
 ) -> list[str]:
