@@ -22,7 +22,6 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "playwright>=1.50.0",
     "websockets>=16.0",
 ]
 

@@ -1,23 +1,14 @@
 """CDP connection management.
 
-Handles connecting to and disconnecting from a Chrome browser via the
-Chrome DevTools Protocol. Also provides port status checking using only
-stdlib (no Playwright needed for status).
+Provides port status checking using stdlib only. The Playwright-based
+connect/disconnect functions were removed in iteration 2 -- all CDP
+connections now go through CDPClient (websockets-based).
 """
 
 import json
-import os
 import socket
 import urllib.request
 from dataclasses import dataclass
-
-from playwright.async_api import Playwright, async_playwright
-
-from .errors import BrowserConnectionError, NoPageError
-
-# Suppress Node.js deprecation warnings from Playwright internals.
-# This must be set before Playwright spawns its Node.js subprocess.
-os.environ.setdefault("NODE_OPTIONS", "--no-deprecation")
 
 
 @dataclass
@@ -33,7 +24,7 @@ class PortStatus:
 def check_cdp_port(*, port: int = 9222) -> PortStatus:
     """Check if a browser is listening on the CDP port.
 
-    Uses stdlib only (socket + urllib) -- no Playwright dependency.
+    Uses stdlib only (socket + urllib).
     This is a synchronous function since it only does simple HTTP.
     """
     # Quick socket check first
@@ -75,35 +66,3 @@ def check_cdp_port(*, port: int = 9222) -> PortStatus:
         page_url=page_url,
         page_title=page_title,
     )
-
-
-async def connect(*, port: int = 9222):
-    """Connect to a running browser via CDP.
-
-    Returns (playwright, browser, page) tuple. The caller is responsible
-    for calling disconnect() when done.
-
-    Raises BrowserConnectionError if no browser is listening.
-    Raises NoPageError if the browser has no open pages.
-    """
-    pw = await async_playwright().start()
-
-    cdp_url = f"http://localhost:{port}"
-    try:
-        browser = await pw.chromium.connect_over_cdp(cdp_url)
-    except Exception as exc:
-        await pw.stop()
-        raise BrowserConnectionError(port=port) from exc
-
-    contexts = browser.contexts
-    if not contexts or not contexts[0].pages:
-        await pw.stop()
-        raise NoPageError()
-
-    page = contexts[0].pages[0]
-    return pw, browser, page
-
-
-async def disconnect(*, pw: Playwright) -> None:
-    """Clean up a Playwright connection."""
-    await pw.stop()
