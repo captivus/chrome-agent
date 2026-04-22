@@ -438,8 +438,25 @@ def main() -> None:
             _run_cleanup()
         return
 
-    # Check if command contains a dot -- bare CDP method (auto-select instance)
-    if "." in command:
+    # Disambiguate "instance name" vs "bare Domain.method":
+    #   - Registered instance names (e.g. from a directory basename like
+    #     "aroundchicago.tech-01") may contain dots, so a naive "." check
+    #     misroutes them as CDP methods.
+    #   - Resolve by checking the registry first. If the first arg matches a
+    #     known instance, route as instance. Otherwise, apply the
+    #     Domain.method heuristic (PascalCase domain + dot + camelCase method).
+    from .registry import enumerate_instances
+
+    known_instances = {i.name for i in enumerate_instances()}
+    is_known_instance = command in known_instances
+    looks_like_method = (
+        "." in command
+        and command.count(".") == 1
+        and command.split(".")[0].isidentifier()
+        and command.split(".")[0][:1].isupper()
+    )
+
+    if not is_known_instance and looks_like_method:
         method = command
         params_str = rest[0] if rest else None
         asyncio.run(_run_cdp_one_shot(

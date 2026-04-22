@@ -126,3 +126,84 @@ def test_bare_cdp_method():
     if result.returncode == 0:
         data = json.loads(result.stdout)
         assert "result" in data
+
+
+# ---------------------------------------------------------------------------
+# Dotted instance name routing (regression: instance names with dots such as
+# "aroundchicago.tech-01" were being misrouted as bare CDP methods because the
+# old dispatch used `if "." in command`. Fix uses registry lookup + a stricter
+# Domain.method heuristic.)
+# ---------------------------------------------------------------------------
+
+
+def test_dotted_instance_name_routes_as_instance(monkeypatch):
+    """An instance name containing dots must route as an instance, not a method.
+
+    Regression: the old dispatch used `if "." in command` to detect bare CDP
+    methods, which misrouted directory-derived instance names like
+    "aroundchicago.tech-01" as methods.
+    """
+    from chrome_agent import cli
+    from chrome_agent.registry import InstanceInfo
+
+    # Fake registry: one dotted-name instance
+    fake_instances = [
+        InstanceInfo(name="aroundchicago.tech-01", port=9999,
+                     pid=1, browser_version="Chrome/test", alive=True),
+    ]
+    monkeypatch.setattr(
+        "chrome_agent.registry.enumerate_instances",
+        lambda *a, **kw: fake_instances,
+    )
+
+    # Capture what _run_cdp_one_shot receives
+    captured = {}
+
+    async def fake_one_shot(instance_name, method, params_str, target_spec, url_spec):
+        captured["instance_name"] = instance_name
+        captured["method"] = method
+        captured["params_str"] = params_str
+
+    monkeypatch.setattr(cli, "_run_cdp_one_shot", fake_one_shot)
+
+    # Invoke main() with the problematic argv
+    monkeypatch.setattr(sys, "argv", [
+        "chrome-agent",
+        "aroundchicago.tech-01",
+        "Runtime.evaluate",
+        '{"expression":"1+1","returnByValue":true}',
+    ])
+    cli.main()
+
+    assert captured["instance_name"] == "aroundchicago.tech-01"
+    assert captured["method"] == "Runtime.evaluate"
+
+
+def test_unregistered_dotted_first_arg_routes_as_method(monkeypatch):
+    """If the first arg isn't registered but matches Domain.method shape, route as bare method."""
+    from chrome_agent import cli
+
+    # Empty registry
+    monkeypatch.setattr(
+        "chrome_agent.registry.enumerate_instances",
+        lambda *a, **kw: [],
+    )
+
+    captured = {}
+
+    async def fake_one_shot(instance_name, method, params_str, target_spec, url_spec):
+        captured["instance_name"] = instance_name
+        captured["method"] = method
+
+    monkeypatch.setattr(cli, "_run_cdp_one_shot", fake_one_shot)
+
+    monkeypatch.setattr(sys, "argv", [
+        "chrome-agent",
+        "Runtime.evaluate",
+        '{"expression":"1+1","returnByValue":true}',
+    ])
+    cli.main()
+
+    # Auto-select path: instance_name is None, method is the dotted first arg
+    assert captured["instance_name"] is None
+    assert captured["method"] == "Runtime.evaluate"
