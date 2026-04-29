@@ -192,6 +192,10 @@ For real-time observation using Claude Code's Monitor tool, see [docs/monitor-in
 - Google Chrome or Chromium (system-installed)
 - Linux with xdotool (optional, for virtual desktop pinning)
 
+## Releasing (maintainer)
+
+Releases are cut from the project root with `release X.Y.Z` (or `release` for an interactive version prompt). The tool bumps `pyproject.toml`, commits, tags, pushes -- which triggers the PyPI publish workflow via GitHub Actions Trusted Publishing. Release notes auto-generate from commit messages between tags, so commits should read well as changelog entries.
+
 ## License
 
 MIT
