@@ -7,7 +7,7 @@ Install: `uv tool install chrome-agent` (or `pip install chrome-agent`). Require
 ## Quick Reference
 
 ```bash
-chrome-agent launch [--port PORT] [--headless] [--fingerprint profile.json]
+chrome-agent launch [--port PORT] [--headless] [--fingerprint profile.json] [--no-window-border]
 chrome-agent status [<instance>]
 chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
 chrome-agent stop <instance> [--target SPEC] [--url SUBSTRING]
@@ -41,7 +41,8 @@ chrome-agent launch
 
 chrome-agent launch --port 9500         # specific port
 chrome-agent launch --headless          # headless mode
-chrome-agent launch --fingerprint p.json  # anti-detection
+chrome-agent launch --fingerprint p.json  # anti-detection (launch-flag spoofs only; suppresses the window border)
+chrome-agent launch --no-window-border  # disable the colored border + badge + title prefix (on by default, headed only)
 
 chrome-agent status                     # list all instances with page targets
 chrome-agent status mysite-01           # one instance

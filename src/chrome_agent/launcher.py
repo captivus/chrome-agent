@@ -78,6 +78,7 @@ async def launch_browser(
     working_dir: str | None = None,
     registry_path: str | None = None,
     extra_args: list[str] | None = None,
+    window_border: bool = True,
 ) -> InstanceInfo:
     """Launch Chrome with CDP enabled and register as a named instance.
 
@@ -194,6 +195,23 @@ async def launch_browser(
         port_override=port,
         registry_path=registry_path,
     )
+
+    # Phase 8: Spawn the window-border guard -- a background process that
+    # holds a CDP connection alive, marking every tab (current and future)
+    # with a colored border + badge + title prefix so the agent's window is
+    # visually distinct from the user's other Chrome windows. Like the old
+    # fingerprint guard, it must be a separate process to survive the caller
+    # exiting (fire-and-forget launch model).
+    #
+    # Suppressed when:
+    #   - headless: there is no visible window to mark.
+    #   - a fingerprint profile is active: the in-page border/badge/title are
+    #     page-observable (a findable host element + a modified document.title),
+    #     and bot-defended sites -- exactly where fingerprinting is used -- are
+    #     where DOM/title-diffing detectors live. See the detection audit.
+    if window_border and not headless and fp_profile is None:
+        from .window_border import spawn_window_border_guard
+        spawn_window_border_guard(port=port, name=instance_info.name)
 
     return instance_info
 

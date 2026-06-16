@@ -95,7 +95,7 @@ Subscribe to exactly the events you need. Each attach session is isolated -- sub
 ## Operational Commands
 
 ```
-chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT]
+chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT] [--no-window-border]
 chrome-agent status [<instance>]
 chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
 chrome-agent stop <instance> [--target SPEC] [--url SUBSTRING]
@@ -147,6 +147,17 @@ async with CDPClient(ws_url=get_ws_url(port=9222)) as cdp:
 ```
 
 54 typed domain classes with snake_case methods generated from Chrome's protocol schema.
+
+## Window Border
+
+So you can tell an agent-driven window apart from your own Chrome windows, every launched browser is marked by default: a colored border + corner badge around each tab (a stable, per-instance color derived from the instance name), and a title prefix so the window reads as `🤖 <instance> — <the page's own title>` in the taskbar / Alt-Tab. The marker is drawn in a closed shadow DOM and adds no automation-detection signal (verified against bot.sannysoft.com and CreepJS).
+
+```bash
+chrome-agent launch                     # marked (default)
+chrome-agent launch --no-window-border  # no marker
+```
+
+The marker is suppressed automatically when running `--headless` (no visible window) or with `--fingerprint` (the in-page marker is page-observable, and stealth is the point on the sites where fingerprinting is used).
 
 ## Browser Fingerprinting
 

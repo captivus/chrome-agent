@@ -50,7 +50,7 @@ def _print_static_usage() -> None:
     print("chrome-agent -- CLI for AI agents to control Chrome via CDP\n")
     print("Usage: chrome-agent <command> [args...]\n")
     print("Operational commands:")
-    print("  launch [--port PORT] [--fingerprint PATH] [--headless] [-- CHROME_ARGS]  Launch Chrome")
+    print("  launch [--port PORT] [--fingerprint PATH] [--headless] [--no-window-border] [-- CHROME_ARGS]  Launch Chrome")
     print("  status [<instance>]                                      List instances and targets")
     print("  attach <instance> [+Event ...] [--target SPEC] [--url SUB]  Attach for events")
     print("  help [<instance>] [Domain | Domain.method]               Protocol discovery")
@@ -76,6 +76,7 @@ async def _run_launch(args: list[str]) -> None:
     fingerprint_path = None
     headless = False
     port_override = None
+    window_border = True
     extra_args = []
     i = 0
     while i < len(args):
@@ -88,6 +89,9 @@ async def _run_launch(args: list[str]) -> None:
             i += 2
         elif args[i] == "--headless":
             headless = True
+            i += 1
+        elif args[i] == "--no-window-border":
+            window_border = False
             i += 1
         elif args[i] == "--port" and i + 1 < len(args):
             try:
@@ -106,6 +110,7 @@ async def _run_launch(args: list[str]) -> None:
             fingerprint=fingerprint_path,
             headless=headless,
             extra_args=extra_args,
+            window_border=window_border,
         )
     except (RuntimeError, TimeoutError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
