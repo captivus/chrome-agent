@@ -178,21 +178,11 @@ async def launch_browser(
         process.kill()
         raise TimeoutError("Browser did not start within 30 seconds")
 
-    # Phase 6: Spawn fingerprint guard daemon if fingerprint is provided.
-    # The guard is a background process that holds a CDP connection alive
-    # with the init script registered. It must run as a separate process
-    # so it survives the caller exiting (fire-and-forget launch model).
-    fingerprint_guard = None
-    if fp_profile is not None:
-        from .fingerprint import spawn_fingerprint_guard
-        fingerprint_guard = spawn_fingerprint_guard(port=port, profile=fp_profile)
-        await asyncio.sleep(2)  # allow guard to connect and register init script
-
-    # Phase 7: Pin to desktop (Linux/X11, best-effort)
+    # Phase 6: Pin to desktop (Linux/X11, best-effort)
     if pin_to_desktop and not headless:
         await _move_to_launching_desktop(pid=process.pid)
 
-    # Phase 8: Register in the instance registry
+    # Phase 7: Register in the instance registry
     if working_dir is None:
         working_dir = os.getcwd()
 

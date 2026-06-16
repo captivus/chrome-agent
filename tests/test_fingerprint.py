@@ -1,7 +1,9 @@
 """Tests for BRW-03: Fingerprint Profiles.
 
-Tests apply_fingerprint() and load_fingerprint() against a real browser.
-Uses a dedicated browser on port 9556 launched with fingerprint flags.
+Tests load_fingerprint() and the launch-flag spoofs (user agent, viewport,
+language, timezone) against a real browser, plus anti-detection regressions
+ensuring no detectable JS navigator overrides are left behind. Uses a dedicated
+browser on port 9556 launched with fingerprint flags.
 """
 
 import asyncio
@@ -43,7 +45,7 @@ def profile_path():
 
 @pytest.fixture(scope="module")
 def fingerprinted_browser(profile_path):
-    """Launch a browser with fingerprint applied via Chrome flags + init script."""
+    """Launch a browser with fingerprint applied via Chrome launch flags."""
     loop = asyncio.new_event_loop()
     result = loop.run_until_complete(
         launch_browser(
@@ -56,7 +58,8 @@ def fingerprinted_browser(profile_path):
 
     yield result
 
-    # Note: fingerprint_guard is now internal to launch_browser, not on InstanceInfo
+    # Teardown: kill the browser process (fingerprint spoofs are launch flags,
+    # so there is no guard process to clean up).
     try:
         os.kill(result.pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -87,30 +90,43 @@ async def test_fingerprint_user_agent(fingerprinted_browser):
     assert ua == "TestAgent/1.0", f"userAgent: {ua}"
 
 
-@pytest.mark.asyncio
-async def test_fingerprint_platform(fingerprinted_browser):
-    """Platform is overridden."""
-    plat = await _eval_js(port=FP_PORT, expression="navigator.platform")
-    assert plat == "TestPlatform", f"platform: {plat}"
+# Anti-detection regression: the fingerprint must NOT leave the detectable
+# JS-override signatures an earlier implementation did. See
+# research/2026-06-16-detection-audit.md -- those overrides flipped
+# bot.sannysoft.com's WebDriver test from pass to fail and raised CreepJS's
+# headless score. platform/vendor are no longer spoofed (a profile's platform
+# should match the host OS), so they are not asserted here.
 
 
 @pytest.mark.asyncio
-async def test_fingerprint_vendor(fingerprinted_browser):
-    """Vendor is overridden."""
-    vend = await _eval_js(port=FP_PORT, expression="navigator.vendor")
-    assert vend == "TestVendor", f"vendor: {vend}"
-
-
-@pytest.mark.asyncio
-async def test_fingerprint_webdriver(fingerprinted_browser):
-    """Webdriver flag is false."""
+async def test_fingerprint_webdriver_not_tampered(fingerprinted_browser):
+    """navigator.webdriver is the native false, NOT an own-property override."""
     wd = await _eval_js(port=FP_PORT, expression="navigator.webdriver")
     assert wd is False, f"webdriver: {wd}"
+    own = await _eval_js(
+        port=FP_PORT,
+        expression="Object.prototype.hasOwnProperty.call(navigator, 'webdriver')",
+    )
+    assert own is False, "webdriver must stay on the prototype (native), not be an own property"
 
 
 @pytest.mark.asyncio
-async def test_fingerprint_chrome_object(fingerprinted_browser):
-    """window.chrome object exists."""
+async def test_fingerprint_navigator_getters_native(fingerprinted_browser):
+    """platform/vendor getters remain native -- not spoofed arrow functions."""
+    for prop in ("platform", "vendor"):
+        is_native = await _eval_js(
+            port=FP_PORT,
+            expression=(
+                "(() => { const d = Object.getOwnPropertyDescriptor(Navigator.prototype, '%s');"
+                " return d && d.get ? d.get.toString().includes('[native code]') : false; })()" % prop
+            ),
+        )
+        assert is_native is True, f"{prop} getter must be native, not a spoofed arrow function"
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_chrome_object_intact(fingerprinted_browser):
+    """window.chrome is the genuine object, not a replaced stub."""
     wc = await _eval_js(port=FP_PORT, expression="typeof window.chrome")
     assert wc == "object", f"window.chrome: {wc}"
 

@@ -5,7 +5,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/chrome-agent)](https://pypi.org/project/chrome-agent/)
 [![License](https://img.shields.io/pypi/l/chrome-agent)](https://github.com/captivus/chrome-agent/blob/main/LICENSE)
 
-A CLI tool that gives AI coding agents the ability to observe and interact with Chrome browsers via the Chrome DevTools Protocol.
+A CLI tool that gives AI coding agents the ability to observe and interact with Chrome browsers via the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/).
 
 Multiple agents and humans can share the same browser simultaneously, each with isolated event subscriptions. One agent drives while another observes network traffic. A human browses while an agent watches for errors. Four agents run a coordinated test suite against a single browser. Each participant sees only the events they subscribed to -- no interference.
 
@@ -167,7 +167,9 @@ chrome-agent launch --fingerprint profile.json
 }
 ```
 
-Overrides user agent (HTTP header and JavaScript), viewport, language, timezone, `navigator.webdriver`, `navigator.platform`, `navigator.vendor`, and `window.chrome`. Persists across page navigations.
+Spoofs the user agent (HTTP header and JavaScript), viewport, language, and timezone via Chrome launch flags -- persistent across navigations, with no JavaScript injection.
+
+It deliberately does **not** patch `navigator.webdriver`, `navigator.platform`, `navigator.vendor`, or `window.chrome`. An empirical detection audit found those JS overrides are each independently detectable and make the browser *more* detectable, not less: they flip bot.sannysoft.com's WebDriver test from pass to fail (the override makes `navigator.webdriver` an own property) and raise CreepJS's headless score. A plain CDP-attached Chrome already reports the native `navigator.webdriver === false` and keeps the genuine `window.chrome` shape, so the cleanest profile is one that leaves the JS environment untouched. A profile's `platform`/`vendor` should match the host OS (they are retained in the schema but not spoofed). Note that WebRTC can still leak the real IP regardless of profile.
 
 ## For AI Agents
 
