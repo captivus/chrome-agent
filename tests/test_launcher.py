@@ -157,7 +157,7 @@ def test_browser_not_found(monkeypatch):
         await launch_browser(port_override=LAUNCH_PORT)
 
     with pytest.raises(BrowserNotFoundError) as exc_info:
-        asyncio.get_event_loop().run_until_complete(do_launch())
+        asyncio.run(do_launch())
     assert len(exc_info.value.searched_paths) > 0
 
 
