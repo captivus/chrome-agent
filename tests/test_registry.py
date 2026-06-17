@@ -46,6 +46,80 @@ def test_register_and_lookup(tmp_path):
     assert looked_up.alive is True
 
 
+def _dead_pid() -> int:
+    """A PID guaranteed not to be running (spawned, then reaped)."""
+    import subprocess
+    p = subprocess.Popen(["true"])
+    p.wait()
+    return p.pid
+
+
+def _free_port() -> int:
+    """A port with nothing listening on it (bound then released).
+
+    Dead instances must use a free port: liveness is now pid-OR-port, so a
+    hardcoded low port (9222) reads as alive if a real browser happens to be
+    listening on it.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("localhost", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def test_alive_when_pid_dead_but_cdp_port_listening(tmp_path):
+    """Liveness holds if the CDP port responds even when the recorded PID is dead.
+
+    Regression: snap/wrapper-style Chrome forks the real browser into a
+    different process and the launched PID exits, so a PID-only liveness check
+    wrongly reported the (still-live) browser as dead.
+    """
+    reg_path = str(tmp_path / "registry.json")
+    # A listening socket stands in for the browser's live CDP port.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("localhost", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    try:
+        register(
+            working_dir="/home/user/wrapped",
+            pid=_dead_pid(),
+            browser_version="Chrome/149",
+            user_data_dir=str(tmp_path / "s"),
+            port_override=port,
+            registry_path=reg_path,
+        )
+        assert lookup("wrapped-01", registry_path=reg_path).alive is True
+        assert enumerate_instances(registry_path=reg_path)[0].alive is True
+    finally:
+        listener.close()
+
+    # PID dead AND port no longer listening -> genuinely dead.
+    assert lookup("wrapped-01", registry_path=reg_path).alive is False
+
+
+def test_cleanup_keeps_instance_with_live_port(tmp_path):
+    """cleanup() must not prune an instance whose CDP port is still live."""
+    reg_path = str(tmp_path / "registry.json")
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("localhost", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    try:
+        register(
+            working_dir="/home/user/wrapped",
+            pid=_dead_pid(),
+            browser_version="Chrome/149",
+            user_data_dir=str(tmp_path / "s"),
+            port_override=port,
+            registry_path=reg_path,
+        )
+        assert "wrapped-01" not in cleanup(registry_path=reg_path)
+    finally:
+        listener.close()
+
+
 def test_sequential_registration(tmp_path):
     """Second registration from same directory gets -02 suffix."""
     reg_path = str(tmp_path / "registry.json")
@@ -188,7 +262,7 @@ def test_enumerate_mixed_liveness(tmp_path):
             "user_data_dir": str(tmp_path / "s1"),
         },
         "proj-02": {
-            "port": 9223,
+            "port": _free_port(),
             "pid": 99999999,
             "browser_version": "Chrome/147",
             "user_data_dir": str(tmp_path / "s2"),
@@ -213,7 +287,7 @@ def test_cleanup_removes_stale(tmp_path):
 
     registry = {
         "proj-01": {
-            "port": 9222,
+            "port": _free_port(),
             "pid": 99999999,
             "browser_version": "Chrome/147",
             "user_data_dir": session_dir,

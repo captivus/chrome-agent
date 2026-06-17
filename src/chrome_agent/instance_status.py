@@ -16,7 +16,6 @@ from .registry import (
     enumerate_instances,
     lookup,
 )
-from .utils import process_is_running
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +87,6 @@ def get_instance_status(
     """
     if instance_name is not None:
         info = lookup(instance_name=instance_name, registry_path=registry_path)
-        info.alive = process_is_running(info.pid)
         instances = [info]
     else:
         instances = enumerate_instances(registry_path=registry_path)

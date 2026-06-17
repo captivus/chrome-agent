@@ -5,6 +5,7 @@ Uses tmp_path for registry isolation and mocks for HTTP responses.
 
 import json
 import os
+import socket
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,6 +19,20 @@ from chrome_agent.instance_status import (
     query_targets,
 )
 from chrome_agent.registry import InstanceNotFoundError
+
+
+def _free_port() -> int:
+    """A port with nothing listening on it (bound then released).
+
+    Dead instances must use a free port: liveness is now pid-OR-port, so a
+    hardcoded low port (9222) would read as alive if a real browser happens
+    to be listening on it.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("localhost", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
 def _write_registry(reg_path, entries):
@@ -64,7 +79,7 @@ def test_get_instance_status_all(tmp_path):
     reg_path = str(tmp_path / "registry.json")
     _write_registry(reg_path, {
         "proj-01": {"port": 9222, "pid": os.getpid(), "browser_version": "Chrome/147", "user_data_dir": ""},
-        "proj-02": {"port": 9223, "pid": 99999999, "browser_version": "Chrome/147", "user_data_dir": ""},
+        "proj-02": {"port": _free_port(), "pid": 99999999, "browser_version": "Chrome/147", "user_data_dir": ""},
     })
 
     with patch("chrome_agent.instance_status.query_targets", return_value=[]):
@@ -116,7 +131,7 @@ def test_dead_instance_no_targets(tmp_path):
     """Dead instances get empty target lists (no /json query)."""
     reg_path = str(tmp_path / "registry.json")
     _write_registry(reg_path, {
-        "proj-01": {"port": 9222, "pid": 99999999, "browser_version": "Chrome/147", "user_data_dir": ""},
+        "proj-01": {"port": _free_port(), "pid": 99999999, "browser_version": "Chrome/147", "user_data_dir": ""},
     })
 
     # query_targets should NOT be called for dead instances

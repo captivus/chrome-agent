@@ -85,11 +85,25 @@ def _save_registry(registry: dict, registry_path: str) -> None:
 def _port_is_listening(port: int) -> bool:
     """Quick socket check for an active listener on a port."""
     try:
-        sock = socket.create_connection(("localhost", port), timeout=0.1)
+        sock = socket.create_connection(("localhost", port), timeout=0.25)
         sock.close()
         return True
     except (ConnectionRefusedError, OSError):
         return False
+
+
+def _instance_is_alive(pid: int, port: int) -> bool:
+    """Whether a registered instance is still usable.
+
+    A PID check alone is unreliable: some Chrome installs (snap, the
+    ``chromium-browser`` wrapper, or Chrome's own self-relaunch) fork the real
+    browser into a different process and the launched PID exits immediately, so
+    the recorded PID is dead while the browser is alive on its CDP port. Treat
+    an instance as alive if EITHER the recorded process is running OR its CDP
+    port still accepts connections -- the latter is what actually determines
+    whether we can drive the browser.
+    """
+    return process_is_running(pid) or _port_is_listening(port)
 
 
 def _derive_base_name(working_dir: str) -> str:
@@ -204,7 +218,7 @@ def lookup(
         )
 
     entry = registry[instance_name]
-    alive = process_is_running(entry["pid"])
+    alive = _instance_is_alive(entry["pid"], entry["port"])
 
     return InstanceInfo(
         name=instance_name,
@@ -225,7 +239,7 @@ def enumerate_instances(
 
     results = []
     for name, entry in registry.items():
-        alive = process_is_running(entry["pid"])
+        alive = _instance_is_alive(entry["pid"], entry["port"])
         results.append(InstanceInfo(
             name=name,
             port=entry["port"],
@@ -338,7 +352,7 @@ def cleanup(
 
     removed = []
     for name, entry in list(registry.items()):
-        if not process_is_running(entry["pid"]):
+        if not _instance_is_alive(entry["pid"], entry["port"]):
             del registry[name]
             removed.append(name)
             session_dir = entry.get("user_data_dir")
