@@ -51,18 +51,3 @@ When agents land as "stopped", is there a way to restart them?  If not, then the
 ## Write AGENTS.md / SKILLS to enable agents to fully use chrome-agent
 
 
-## WebRTC leaks the real public IP (from detection audit, 2026-06-16)
-
-`research/2026-06-16-detection-audit.md` found that all launch configs leak the
-host's real public IP via WebRTC (CreepJS surfaced it directly), independent of
-`--fingerprint`. This is the largest deanonymization vector for stealth use and
-is not addressed today. Options to evaluate: a `--disable-features` flag, a
-WebRTC IP-handling policy, or documenting it as a known limitation.
-
-## fingerprint scope narrowed (done 2026-06-16)
-
-`fingerprint.py` no longer injects navigator JS overrides (they were
-net-negative for detection -- see the audit). It now spoofs UA / viewport /
-language / timezone via launch flags only. `platform`/`vendor` profile fields
-are retained for compatibility but no longer spoofed; revisit if a
-non-detectable mechanism (e.g. UA-Client-Hints metadata) is wanted.
