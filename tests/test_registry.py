@@ -16,6 +16,7 @@ from chrome_agent.registry import (
     InstanceNotFoundError,
     allocate_port,
     cleanup,
+    deregister,
     enumerate_instances,
     lookup,
     register,
@@ -97,6 +98,28 @@ def test_alive_when_pid_dead_but_cdp_port_listening(tmp_path):
 
     # PID dead AND port no longer listening -> genuinely dead.
     assert lookup("wrapped-01", registry_path=reg_path).alive is False
+
+
+def test_deregister_removes_entry_and_session_dir(tmp_path):
+    """deregister() removes the entry and session dir, idempotently, without the browser."""
+    reg_path = str(tmp_path / "registry.json")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    register(
+        working_dir="/home/user/proj",
+        pid=os.getpid(),
+        browser_version="Chrome/149",
+        user_data_dir=str(session_dir),
+        registry_path=reg_path,
+    )
+
+    assert deregister("proj-01", registry_path=reg_path) is True
+    assert not session_dir.exists()
+    with pytest.raises(InstanceNotFoundError):
+        lookup("proj-01", registry_path=reg_path)
+
+    # Idempotent: deregistering again (e.g. racing stop()) is a harmless no-op.
+    assert deregister("proj-01", registry_path=reg_path) is False
 
 
 def test_cleanup_keeps_instance_with_live_port(tmp_path):

@@ -1,22 +1,27 @@
-"""Window-border marker for chrome-agent.
+"""Per-instance supervisor for chrome-agent.
 
-Makes an agent-launched Chrome window visually distinct from the user's other
-Chrome windows: a colored border + corner badge around every tab, plus a title
-prefix so the window is identifiable in the taskbar / Alt-Tab / overview while
-still showing the page's own title.
+A detached process spawned per headed launch that holds a browser-level CDP
+connection open for the browser's lifetime. It does two jobs:
 
-Like the persistent parts of CDP, the marker only stays applied while a CDP
-connection holds it: ``Page.addScriptToEvaluateOnNewDocument`` re-runs the
-overlay script on every new document, but only for as long as the registering
-connection is alive. So the marker runs as a detached guard process (spawned by
-``launch_browser``) that auto-attaches to every current and future page target
-and holds the connection open until the browser dies.
+1. **Lifecycle** -- when the connection drops (the window/browser is closed,
+   crashes, or is shut down), it removes the instance from the registry and
+   deletes its session directory. This keeps the registry mirroring reality in
+   real time: close the window and the instance disappears, no command needed.
+   Because chrome-agent has no daemon, this long-lived connection is the only
+   thing that can observe a close as it happens.
 
-Detection note: the overlay is page-observable (a host element in the DOM and a
-modified ``document.title``), so ``launch_browser`` suppresses it when a
-fingerprint profile is active. To minimize the footprint for the normal case,
-the border/badge render inside a *closed* shadow DOM under a *randomized* host
-id, and the injected code is a side-effect-free IIFE that leaks no globals.
+2. **Window border** (optional) -- while the browser is alive, mark every tab
+   (current and future) with a colored border + corner badge and a title prefix
+   so an agent-driven window is easy to tell apart from the user's own Chrome.
+   ``Page.addScriptToEvaluateOnNewDocument`` re-runs the overlay on every new
+   document, but only while the registering connection is alive -- hence the
+   same long-lived process.
+
+The border is page-observable (a host element in the DOM + a modified
+``document.title``), so it is suppressed under a fingerprint profile; the
+lifecycle job still runs. To minimize the footprint when drawn, the border
+renders in a *closed* shadow DOM under a *randomized* host id, and the injected
+code is a side-effect-free IIFE that leaks no globals.
 See ``research/2026-06-16-detection-audit.md``.
 """
 
@@ -130,35 +135,43 @@ async def _setup_session(cdp: CDPClient, session_id: str, source: str) -> None:
         pass  # tab may close mid-setup; the guard keeps running for other tabs
 
 
-async def run_guard(*, port: int, name: str) -> None:
-    """Hold a CDP connection open, marking every page target until the browser dies."""
-    color = derive_color(name)
-    host_id = "_ca" + secrets.token_hex(8)
-    source = build_overlay_script(name=name, color=color, host_id=host_id)
+async def run_supervisor(
+    *, port: int, name: str, registry_path: str | None = None, draw_border: bool = True
+) -> None:
+    """Supervise a launched browser until it closes.
 
+    Holds a browser-level CDP connection. While alive and ``draw_border`` is set,
+    marks every page target with the window border. When the connection drops
+    (browser/window closed), deregisters the instance and removes its session
+    directory, then exits.
+    """
     browser_ws = get_ws_url(port=port, target_type="browser")
     cdp = CDPClient(ws_url=browser_ws)
     await cdp.connect()
 
-    loop = asyncio.get_event_loop()
-    handled: set[str] = set()
+    if draw_border:
+        host_id = "_ca" + secrets.token_hex(8)
+        source = build_overlay_script(name=name, color=derive_color(name), host_id=host_id)
 
-    def on_attached(params: dict) -> None:
-        info = params.get("targetInfo", {})
-        session_id = params.get("sessionId")
-        if info.get("type") != "page" or not session_id or session_id in handled:
-            return
-        handled.add(session_id)
-        loop.create_task(_setup_session(cdp, session_id, source))
+        loop = asyncio.get_event_loop()
+        handled: set[str] = set()
 
-    cdp.on(event="Target.attachedToTarget", callback=on_attached)
+        def on_attached(params: dict) -> None:
+            info = params.get("targetInfo", {})
+            session_id = params.get("sessionId")
+            if info.get("type") != "page" or not session_id or session_id in handled:
+                return
+            handled.add(session_id)
+            loop.create_task(_setup_session(cdp, session_id, source))
 
-    # autoAttach with flatten attaches to all current AND future page targets,
-    # firing Target.attachedToTarget (with a sessionId) for each.
-    await cdp.send(
-        method="Target.setAutoAttach",
-        params={"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True},
-    )
+        cdp.on(event="Target.attachedToTarget", callback=on_attached)
+
+        # autoAttach with flatten attaches to all current AND future page targets,
+        # firing Target.attachedToTarget (with a sessionId) for each.
+        await cdp.send(
+            method="Target.setAutoAttach",
+            params={"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True},
+        )
 
     try:
         while cdp._connected:
@@ -166,25 +179,43 @@ async def run_guard(*, port: int, name: str) -> None:
     finally:
         await cdp.close()
 
+    # Connection dropped -> the browser/window is closing. Wait for it to fully
+    # exit (its CDP port stops listening) so the session directory is released
+    # before removal, then retire the instance from the registry.
+    from .registry import _port_is_listening, deregister
+    deadline = asyncio.get_event_loop().time() + 5.0
+    while _port_is_listening(port) and asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.2)
+    deregister(instance_name=name, registry_path=registry_path)
 
-def spawn_window_border_guard(*, port: int, name: str) -> subprocess.Popen:
-    """Spawn the detached window-border guard process for a launched browser."""
+
+def spawn_supervisor(
+    *, port: int, name: str, registry_path: str, draw_border: bool
+) -> subprocess.Popen:
+    """Spawn the detached per-instance supervisor process for a launched browser."""
     return subprocess.Popen(
-        [sys.executable, "-m", "chrome_agent.window_border", str(port), name],
+        [
+            sys.executable, "-m", "chrome_agent.supervisor",
+            str(port), name, registry_path, "1" if draw_border else "0",
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
 
 
 def main() -> None:
-    """Entry point for the detached guard process: `python -m chrome_agent.window_border PORT NAME`."""
-    if len(sys.argv) < 3:
-        print("usage: python -m chrome_agent.window_border PORT NAME", file=sys.stderr)
+    """Entry point: `python -m chrome_agent.supervisor PORT NAME REGISTRY_PATH DRAW_BORDER`."""
+    if len(sys.argv) < 5:
+        print("usage: python -m chrome_agent.supervisor PORT NAME REGISTRY_PATH DRAW_BORDER", file=sys.stderr)
         sys.exit(2)
     port = int(sys.argv[1])
     name = sys.argv[2]
+    registry_path = sys.argv[3]
+    draw_border = sys.argv[4] == "1"
     try:
-        asyncio.run(run_guard(port=port, name=name))
+        asyncio.run(run_supervisor(
+            port=port, name=name, registry_path=registry_path, draw_border=draw_border,
+        ))
     except KeyboardInterrupt:
         pass
 

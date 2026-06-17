@@ -102,6 +102,14 @@ async def launch_browser(
     if binary is None:
         raise BrowserNotFoundError(searched_paths=_platform_candidates())
 
+    # Prune truly-dead instances first (fallback for browsers whose supervisor
+    # was killed, and for headless instances which have no supervisor), and
+    # sweep any orphaned session directories (e.g. a browser that held its
+    # profile files past the supervisor's removal window). With the pid-OR-port
+    # liveness check and the SingletonLock pid check, this only removes
+    # genuinely-gone browsers, and it frees their names/ports for reuse.
+    cleanup_sessions(registry_path=registry_path)
+
     # Phase 2: Allocate port
     if port_override is not None:
         port = port_override
@@ -196,22 +204,26 @@ async def launch_browser(
         registry_path=registry_path,
     )
 
-    # Phase 8: Spawn the window-border guard -- a background process that
-    # holds a CDP connection alive, marking every tab (current and future)
-    # with a colored border + badge + title prefix so the agent's window is
-    # visually distinct from the user's other Chrome windows. Like the old
-    # fingerprint guard, it must be a separate process to survive the caller
-    # exiting (fire-and-forget launch model).
-    #
-    # Suppressed when:
-    #   - headless: there is no visible window to mark.
+    # Phase 8: Spawn the per-instance supervisor (headed launches only). It is a
+    # detached process -- it must survive the caller exiting (fire-and-forget
+    # launch model) -- that holds a CDP connection and, when the browser/window
+    # closes, retires the instance from the registry (and removes its session
+    # dir). While the browser is alive it also draws the window border, unless:
+    #   - --no-window-border (window_border is False), or
     #   - a fingerprint profile is active: the in-page border/badge/title are
     #     page-observable (a findable host element + a modified document.title),
     #     and bot-defended sites -- exactly where fingerprinting is used -- are
     #     where DOM/title-diffing detectors live. See the detection audit.
-    if window_border and not headless and fp_profile is None:
-        from .window_border import spawn_window_border_guard
-        spawn_window_border_guard(port=port, name=instance_info.name)
+    # Headless launches get no supervisor (no window to close or mark); their
+    # registry entries are reclaimed by the launch-time prune above / cleanup.
+    if not headless:
+        from .supervisor import spawn_supervisor
+        spawn_supervisor(
+            port=port,
+            name=instance_info.name,
+            registry_path=_resolve_path(registry_path),
+            draw_border=window_border and fp_profile is None,
+        )
 
     return instance_info
 

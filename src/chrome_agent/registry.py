@@ -340,6 +340,52 @@ def stop(
     return f"Stopped {instance_name}"
 
 
+def _remove_session_dir(session_dir: str) -> None:
+    """Remove a session directory, retrying while Chrome releases its files.
+
+    Called right after a browser closes, where helper processes can briefly
+    outlive the listening socket and still hold profile files -- a single
+    ``rmtree(ignore_errors=True)`` would then leave the tree behind. Retry for
+    a few seconds until the directory is actually gone.
+    """
+    import time
+    for _ in range(20):
+        if not os.path.exists(session_dir):
+            return
+        shutil.rmtree(session_dir, ignore_errors=True)
+        if not os.path.exists(session_dir):
+            return
+        time.sleep(0.3)
+    # If Chrome is still releasing files after the retry window, leave the
+    # orphan -- the launch-time sweep (cleanup_sessions) reclaims it later.
+
+
+def deregister(
+    instance_name: str,
+    registry_path: str | None = None,
+) -> bool:
+    """Remove an instance from the registry and delete its session directory.
+
+    Unlike stop(), this does NOT contact the browser -- it is used by the
+    per-instance supervisor after the browser has already closed. Idempotent:
+    a no-op if the instance is not (or no longer) registered, so it is safe to
+    race with stop() / cleanup().
+
+    Returns True if an entry was removed.
+    """
+    path = _resolve_path(registry_path)
+    registry = _load_registry(path)
+    entry = registry.pop(instance_name, None)
+    if entry is None:
+        return False
+    _save_registry(registry, path)
+    session_dir = entry.get("user_data_dir")
+    if session_dir:
+        _remove_session_dir(session_dir)
+    logger.info("Deregistered instance %s (browser closed)", instance_name)
+    return True
+
+
 def cleanup(
     registry_path: str | None = None,
 ) -> list[str]:

@@ -1,15 +1,15 @@
-"""Tests for the window-border marker.
+"""Tests for the per-instance supervisor.
 
 Covers the pure functions: per-instance color derivation and overlay-script
-construction. The guard's live behavior (auto-attach to every tab, injection,
-title prefixing, lifecycle) requires a real visible window and is verified by
-driving a headed browser -- see research/2026-06-16-detection-audit.md and the
-window-border verification in that work.
+construction. The supervisor's live behavior (auto-attach to every tab,
+injection, title prefixing, and deregister-on-close lifecycle) requires a real
+visible window and is verified by driving a headed browser -- see
+research/2026-06-16-detection-audit.md and the supervisor verification.
 """
 
 import re
 
-from chrome_agent.window_border import (
+from chrome_agent.supervisor import (
     _PALETTE,
     build_overlay_script,
     derive_color,
