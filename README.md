@@ -101,6 +101,7 @@ chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
 chrome-agent stop <instance> [--target SPEC] [--url SUBSTRING]
 chrome-agent help [<instance>] [Domain | Domain.method]
 chrome-agent cleanup
+chrome-agent --version
 ```
 
 | Command | Description |
@@ -111,6 +112,7 @@ chrome-agent cleanup
 | `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Use `--target` or `--url` to close a single tab without affecting the browser. |
 | `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |
 | `cleanup` | Remove stale instances (dead browsers) and their session directories. |
+| `--version` | Print the installed chrome-agent version (`-V` alias) and exit. |
 
 ## Interacting with Elements
 

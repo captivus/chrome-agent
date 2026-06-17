@@ -38,11 +38,6 @@ The user's requirement is observable QA in a visible browser. A one-shot launche
 ```
 
 
-## Add --version flag to CLI
-
-There isn't one today, which is odd ... 
-
-
 ## Add auto-cleanup ... 
 
 When agents land as "stopped", is there a way to restart them?  If not, then they should be automatically cleaned up ... 

@@ -13,6 +13,7 @@ chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
 chrome-agent stop <instance> [--target SPEC] [--url SUBSTRING]
 chrome-agent help [<instance>] [Domain | Domain.method]
 chrome-agent cleanup
+chrome-agent --version
 chrome-agent <instance> Domain.method '{"param": "value"}'
 ```
 

@@ -5,6 +5,7 @@ Uses subprocess invocations for integration tests.
 """
 
 import json
+import re
 import subprocess
 import sys
 
@@ -38,6 +39,21 @@ def test_help_flag():
     result = _run_cli("--help")
     assert result.returncode == 0
     assert "chrome-agent" in result.stdout.lower()
+
+
+def test_version_flag():
+    """--version prints 'chrome-agent <version>' and exits 0."""
+    result = _run_cli("--version")
+    assert result.returncode == 0
+    assert result.stdout.lower().startswith("chrome-agent")
+    assert re.search(r"\d+\.\d+", result.stdout), f"no version number in: {result.stdout!r}"
+
+
+def test_version_short_flag():
+    """-V is an alias for --version."""
+    result = _run_cli("-V")
+    assert result.returncode == 0
+    assert re.search(r"\d+\.\d+", result.stdout), f"no version number in: {result.stdout!r}"
 
 
 def test_unknown_command():

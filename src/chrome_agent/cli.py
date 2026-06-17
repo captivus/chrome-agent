@@ -57,6 +57,8 @@ def _print_static_usage() -> None:
     print("  stop <instance>                                            Stop a browser gracefully")
     print("  cleanup                                                   Remove stale instances")
     print()
+    print("  --version, -V                                            Show version and exit")
+    print()
     print("CDP one-shot commands:")
     print("  <instance> Domain.method '{\"param\": \"value\"}'         Send a single CDP command")
     print("  Domain.method '{\"param\": \"value\"}'                    (auto-selects instance)")
@@ -419,6 +421,11 @@ def main() -> None:
     """CLI entry point."""
     # Phase 0: Extract --target and --url flags before routing
     args, target_spec, url_spec = _extract_flags(sys.argv[1:])
+
+    if args and args[0] in ("--version", "-V"):
+        from . import __version__
+        print(f"chrome-agent {__version__}")
+        sys.exit(0)
 
     if not args or args[0] in ("-h", "--help"):
         _print_static_usage()
