@@ -114,6 +114,8 @@ chrome-agent --version
 | `cleanup` | Remove stale instances (dead browsers) and their session directories. |
 | `--version` | Print the installed chrome-agent version (`-V` alias) and exit. |
 
+Instances are tracked in a registry at `/tmp/chrome-agent/registry.json`. A headed browser's instance is **automatically removed from the registry when its window is closed** (its session directory is cleaned up too), so `status` reflects what is actually running. Liveness is determined by whether the browser's CDP port is reachable -- not just the launched PID -- so browsers started via wrapper/snap launchers (which fork the real browser into another process) are reported correctly. `cleanup` removes any entries that remain (headless instances, or browsers that were killed abruptly).
+
 ## Interacting with Elements
 
 Agents interact with page elements using a three-step pattern: **locate, act, verify.**
