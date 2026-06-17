@@ -6,6 +6,7 @@ tests. Uses the subprocess-based launcher (no Playwright dependency).
 
 import asyncio
 import os
+import shutil
 import signal
 from pathlib import Path
 
@@ -26,25 +27,29 @@ def event_loop():
 
 
 @pytest.fixture(scope="session")
-def browser_session(event_loop):
+def browser_session(event_loop, tmp_path_factory):
     """Launch a headless browser with CDP for the entire test session.
 
-    Provides a browser running on CDP_PORT. Tests that need CDP access
-    use CDPClient or get_ws_url directly -- no Playwright objects.
+    Uses an isolated registry so test runs never touch the real registry at
+    /tmp/chrome-agent/registry.json. Provides a browser running on CDP_PORT;
+    tests that need CDP access use CDPClient or get_ws_url directly.
     """
+    reg_path = str(tmp_path_factory.mktemp("registry") / "registry.json")
     result = event_loop.run_until_complete(
         launch_browser(
             port_override=CDP_PORT,
             headless=True,
             pin_to_desktop=False,
+            registry_path=reg_path,
         )
     )
     yield result
-    # Teardown: kill the browser process
+    # Teardown: kill the browser and remove its session directory.
     try:
         os.kill(result.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
+    shutil.rmtree(result.user_data_dir, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")

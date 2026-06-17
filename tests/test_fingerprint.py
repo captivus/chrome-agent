@@ -9,6 +9,7 @@ browser on port 9556 launched with fingerprint flags.
 import asyncio
 import json
 import os
+import shutil
 import signal
 import tempfile
 
@@ -44,8 +45,12 @@ def profile_path():
 
 
 @pytest.fixture(scope="module")
-def fingerprinted_browser(profile_path):
-    """Launch a browser with fingerprint applied via Chrome launch flags."""
+def fingerprinted_browser(profile_path, tmp_path_factory):
+    """Launch a browser with fingerprint applied via Chrome launch flags.
+
+    Uses an isolated registry so the run never touches the real registry.
+    """
+    reg_path = str(tmp_path_factory.mktemp("fp_registry") / "registry.json")
     loop = asyncio.new_event_loop()
     result = loop.run_until_complete(
         launch_browser(
@@ -53,17 +58,19 @@ def fingerprinted_browser(profile_path):
             fingerprint=profile_path,
             headless=True,
             pin_to_desktop=False,
+            registry_path=reg_path,
         )
     )
 
     yield result
 
-    # Teardown: kill the browser process (fingerprint spoofs are launch flags,
-    # so there is no guard process to clean up).
+    # Teardown: kill the browser (fingerprint spoofs are launch flags, so there
+    # is no guard process), remove its session directory, close the loop.
     try:
         os.kill(result.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
+    shutil.rmtree(result.user_data_dir, ignore_errors=True)
     loop.close()
 
 
