@@ -114,7 +114,7 @@ chrome-agent --version
 | `cleanup` | Remove stale instances (dead browsers) and their session directories. |
 | `--version` | Print the installed chrome-agent version (`-V` alias) and exit. |
 
-Instances are tracked in a registry at `/tmp/chrome-agent/registry.json`. A headed browser's instance is **automatically removed from the registry when its window is closed** (its session directory is cleaned up too), so `status` reflects what is actually running. Liveness is determined by whether the browser's CDP port is reachable -- not just the launched PID -- so browsers started via wrapper/snap launchers (which fork the real browser into another process) are reported correctly. `cleanup` removes any entries that remain (headless instances, or browsers that were killed abruptly).
+Instances are tracked in a registry at `/tmp/chrome-agent/registry.json`. A headed browser's instance is **automatically removed from the registry when its window is closed** (its session directory is cleaned up too), so `status` reflects what is actually running. Liveness is determined by whether the browser's CDP port is reachable -- not just the launched PID -- so browsers started via wrapper/snap launchers (which fork the real browser into another process) are reported correctly. A **transient connection drop does not retire a live instance**: a host suspend/resume severs the supervisor's CDP connection while Chrome keeps running, so the supervisor reconnects and keeps supervising; retirement happens only once the CDP port stops listening. `cleanup` removes any entries that remain (headless instances, or browsers that were killed abruptly).
 
 ## Interacting with Elements
 

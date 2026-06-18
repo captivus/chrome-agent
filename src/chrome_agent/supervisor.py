@@ -135,24 +135,22 @@ async def _setup_session(cdp: CDPClient, session_id: str, source: str) -> None:
         pass  # tab may close mid-setup; the guard keeps running for other tabs
 
 
-async def run_supervisor(
-    *, port: int, name: str, registry_path: str | None = None, draw_border: bool = True
+async def _supervise_connection(
+    *, port: int, draw_border: bool, source: str | None
 ) -> None:
-    """Supervise a launched browser until it closes.
+    """Hold one browser-level CDP connection until it drops.
 
-    Holds a browser-level CDP connection. While alive and ``draw_border`` is set,
-    marks every page target with the window border. When the connection drops
-    (browser/window closed), deregisters the instance and removes its session
-    directory, then exits.
+    Connects, and (when ``draw_border`` and ``source`` are set) installs the
+    window border on every current and future page target, then blocks until the
+    connection drops. Returns when disconnected; raises if the connect itself
+    fails. Caller decides whether a drop means the browser closed (retire) or was
+    a transient blip (reconnect).
     """
     browser_ws = get_ws_url(port=port, target_type="browser")
     cdp = CDPClient(ws_url=browser_ws)
     await cdp.connect()
 
-    if draw_border:
-        host_id = "_ca" + secrets.token_hex(8)
-        source = build_overlay_script(name=name, color=derive_color(name), host_id=host_id)
-
+    if draw_border and source is not None:
         loop = asyncio.get_event_loop()
         handled: set[str] = set()
 
@@ -179,14 +177,76 @@ async def run_supervisor(
     finally:
         await cdp.close()
 
-    # Connection dropped -> the browser/window is closing. Wait for it to fully
-    # exit (its CDP port stops listening) so the session directory is released
-    # before removal, then retire the instance from the registry.
-    from .registry import _port_is_listening, deregister
-    deadline = asyncio.get_event_loop().time() + 5.0
-    while _port_is_listening(port) and asyncio.get_event_loop().time() < deadline:
+
+# Seconds to wait for a dropped browser's CDP port to stop listening before
+# concluding it really closed. A browser that is genuinely closing drops its
+# listener within a moment; a live one whose WebSocket merely dropped (host
+# suspend/resume, transient blip) keeps the port up across this window.
+_RETIRE_GRACE_SECONDS = 5.0
+
+
+async def _browser_gone(port: int) -> bool:
+    """Whether the browser is truly gone, vs. a transient CDP drop.
+
+    Polls the CDP port for up to ``_RETIRE_GRACE_SECONDS``. Returns True as soon
+    as the port stops listening (the browser closed), or False if it stays up
+    for the whole window (the drop was transient -- e.g. a host suspend/resume
+    severed the WebSocket while Chrome kept running and listening).
+    """
+    from .registry import _port_is_listening
+
+    deadline = asyncio.get_event_loop().time() + _RETIRE_GRACE_SECONDS
+    while asyncio.get_event_loop().time() < deadline:
+        if not _port_is_listening(port):
+            return True
         await asyncio.sleep(0.2)
-    deregister(instance_name=name, registry_path=registry_path)
+    return False
+
+
+async def run_supervisor(
+    *, port: int, name: str, registry_path: str | None = None, draw_border: bool = True
+) -> None:
+    """Supervise a launched browser until it actually closes.
+
+    Holds a browser-level CDP connection. While alive and ``draw_border`` is set,
+    marks every page target with the window border. The instance is retired from
+    the registry (and its session directory removed) ONLY when the browser is
+    truly gone -- detected by its CDP port no longer listening.
+
+    A dropped CDP connection is NOT taken as proof the browser closed: a host
+    suspend/resume (or any transient network blip) severs the long-lived
+    WebSocket while Chrome keeps running and listening on its CDP port. Retiring
+    on the dropped socket alone orphaned live instances from the registry across
+    a suspend. Instead, when the connection drops we consult the port via
+    ``_browser_gone`` -- the same signal ``_instance_is_alive`` trusts -- and
+    reconnect-and-resume if the browser is still up, retiring only once it is gone.
+    """
+    from .registry import deregister
+
+    # Compute the border host id / script ONCE so reconnects reuse the same
+    # randomized host id and the overlay's idempotent guard suppresses redraws.
+    source: str | None = None
+    if draw_border:
+        host_id = "_ca" + secrets.token_hex(8)
+        source = build_overlay_script(name=name, color=derive_color(name), host_id=host_id)
+
+    while True:
+        try:
+            await _supervise_connection(port=port, draw_border=draw_border, source=source)
+        except Exception:
+            # A failed (re)connect or a mid-stream CDP error lands here; fall
+            # through to the liveness check to decide retire-vs-reconnect.
+            pass
+
+        if await _browser_gone(port):
+            # Browser really closed -> retire from the registry and exit.
+            deregister(instance_name=name, registry_path=registry_path)
+            return
+
+        # Transient drop -- the browser is still alive. Reconnect and resume
+        # supervising (re-installs the border on the live tabs) rather than
+        # orphaning a live instance.
+        await asyncio.sleep(0.5)
 
 
 def spawn_supervisor(
