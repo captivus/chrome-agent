@@ -620,3 +620,17 @@ Exercise the full lifecycle: register two instances from different directories, 
 ### User Review Notes
 
 [To be filled by user]
+
+---
+
+## 12. Iteration 3 Update -- Port-Based Liveness and Deregistration
+
+**Status:** Complete (Iteration 3).
+
+**Port-based liveness.** Liveness is no longer a PID-only check. `_instance_is_alive(pid, port)` returns `process_is_running(pid) OR _port_is_listening(port)`, used by `lookup`, `enumerate_instances`, and `cleanup`. Rationale: some Chrome installs (snap, the `chromium-browser` wrapper, or Chrome's own self-relaunch) fork the real browser into a different process and the launched PID exits immediately. A PID-only check then reported the live browser as dead -- `launch` succeeded but `status` showed `alive: false` with no targets. The CDP port reachability is what actually determines whether the browser can be driven, so it is the authoritative signal. (Reproduced with a fork-exit wrapper and verified fixed.)
+
+**Deregistration.** New `deregister(instance_name, registry_path)`: removes the registry entry and deletes the session directory **without contacting the browser**, idempotently (a no-op if the instance is already gone, so it is safe to race with `stop()` / `cleanup()`). Session-dir removal retries (`_remove_session_dir`) because Chrome can briefly hold profile files after close. This is the mechanism the per-instance supervisor (BRW-07) uses to auto-retire an instance when its browser/window closes.
+
+**Tests added** (`tests/test_registry.py`): `test_alive_when_pid_dead_but_cdp_port_listening`, `test_cleanup_keeps_instance_with_live_port`, `test_deregister_removes_entry_and_session_dir`. Dead-instance tests now use a guaranteed-free port (liveness consults the port, so a hardcoded low port could collide with a real browser).
+
+**Related:** BRW-07 (Instance Supervisor) consumes `deregister`; BRW-05 (Instance Status) inherits the port-based liveness.

@@ -110,3 +110,12 @@ No circular dependencies detected. Confirmed algorithmically via `planning/04-an
 - 3 updates to existing features: BRW-01, CLI-01, CDP-03
 - 2 superseded features: CDP-02 (by CDP-04), BRW-02 (by BRW-05)
 - Features from iteration 1 that are unchanged: CDP-01, GEN-01, BRW-03
+
+---
+
+## Iteration 3 note (historical analysis not re-run)
+
+Iteration 3 added 2 features and updated 4; a full dependency re-analysis was not warranted for an increment this size. For the record:
+
+- **New:** BRW-06 (Window Border) depends on BRW-07, BRW-04, CDP-01. BRW-07 (Instance Supervisor) depends on BRW-04, BRW-01, CDP-01. Both are **leaves** -- nothing depends on them -- so they add no cycles and slot in after their dependencies (the existing DAG is unchanged upstream).
+- **Updated:** BRW-03 (fingerprint hardening -- note it is no longer "unchanged" from iteration 1), BRW-04 (port-based liveness + `deregister`), BRW-05 (inherits port-based liveness), CLI-01 (`--version`, `--no-window-border`).

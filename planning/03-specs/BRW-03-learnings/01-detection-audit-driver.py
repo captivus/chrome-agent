@@ -4,7 +4,7 @@ Drives three browser configurations against bot.sannysoft.com + CreepJS and a
 custom in-page probe, to measure what each leaks to a website's automation
 detection. Headed Chrome, isolated temp registry, dedicated ports.
 
-Run: uv run python research/detection_audit_driver.py
+Run: uv run python planning/03-specs/BRW-03-learnings/01-detection-audit-driver.py
 Writes structured results to stdout (JSON) and screenshots to /tmp/ca_audit_*.
 """
 

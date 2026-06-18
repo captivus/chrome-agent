@@ -606,3 +606,13 @@ Exercise the full workflow as an agent would: launch two browser instances using
 ### User Review Notes
 
 [To be filled by user]
+
+---
+
+## 12. Iteration 3 Update -- Port-Based Liveness
+
+**Status:** Complete (Iteration 3).
+
+`get_instance_status` no longer overrides liveness with a PID-only check; it uses the registry's port-OR-PID liveness (`_instance_is_alive`, see BRW-04 §12). Effect: `status` correctly reports a browser as alive when its CDP port is reachable even if the launched PID has exited -- the case for snap/wrapper Chrome installs that fork the real browser into another process. Previously such an instance showed `alive: false` with no targets immediately after a successful launch.
+
+**Tests updated** (`tests/test_instance_status.py`): dead-instance fixtures use a guaranteed-free port (since liveness now consults the port, a hardcoded low port like 9222 could read as alive if a real browser is listening on it).

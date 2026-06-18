@@ -2,6 +2,8 @@
 
 > *This document is the complete definition of a single atomic feature -- what to build, how to validate it, what to observe during implementation, what it depends on, and (once implementation begins) its implementation history.*
 
+> **Iteration 3 update (see §12):** The JavaScript navigator overrides described in §3 and §10 below (`navigator.webdriver`, `Navigator.prototype.platform`/`vendor`, `window.chrome`) and the init-script "guard" connection were **removed**. An empirical detection audit found those overrides are each independently detectable and make the browser *more* detectable, not less. Fingerprinting now applies **only** the launch-flag spoofs (user agent, viewport, language, timezone). Sections 3-10 describe the superseded v1 approach and are kept as implementation history; §12 is authoritative for current behavior.
+
 ## 1. Feature ID and Name
 
 BRW-03: Fingerprint Profiles
@@ -355,3 +357,43 @@ All 110 total tests passed (zero regressions).
 ### User Review Notes
 
 [To be filled by user]
+
+---
+
+## 12. Iteration 3 Update -- Fingerprint Hardening
+
+**Status:** Complete (Iteration 3). Authoritative for current behavior; supersedes the JavaScript-override design in §3 and §10.
+
+### What changed
+
+The init-script navigator overrides and their persistent "guard" connection were removed. Fingerprinting is now applied **entirely through Chrome launch flags and environment**, with **no JavaScript injection**:
+
+- `--user-agent=<profile.userAgent>` -- user agent (HTTP header + JS)
+- `--window-size=<w>,<h>` -- viewport
+- `--lang=<profile.language>` -- language
+- `TZ=<profile.timezone>` environment variable -- timezone
+
+Removed from the implementation: `_build_init_script`, `apply_fingerprint`, `spawn_fingerprint_guard`, and the `LaunchResult.fingerprint_guard`. `load_fingerprint` and the `BrowserFingerprint` dataclass are unchanged; `platform` and `vendor` remain in the profile schema for compatibility but are **no longer spoofed** -- a profile's platform should match the host OS (WebGL/font signals leak the real OS regardless).
+
+### Why (detection audit)
+
+See the learnings in [`BRW-03-learnings/`](BRW-03-learnings/) -- an empirical audit driving `bot.sannysoft.com` and CreepJS across vanilla / fingerprint / window-border configurations. Findings:
+
+- A plain CDP-attached Chrome already reports the native `navigator.webdriver === false` and the genuine `window.chrome` shape, and passes sannysoft -- the JS overrides were solving a problem that does not exist.
+- Each override is independently detectable and two were **net-negative**: the `navigator.webdriver` override made it an *own* property (a tamper signature) that **flipped sannysoft's WebDriver test from pass to fail**; the `platform`/`vendor` getters stringified to arrow-function source instead of `[native code]`; `window.chrome` became a wrong-shaped stub (lost `loadTimes`/`csi`). CreepJS's headless heuristic rose **0% -> 33%** with the overrides applied.
+- WebRTC still leaks the real public IP via STUN regardless of profile -- the largest residual deanonymization vector, only mitigable with an actual proxy (documented as a known limitation, not addressed here).
+
+### Validation contract (replaces §4's spoofed-value assertions)
+
+The launch-flag spoofs still hold (UA / viewport / language / timezone verified via `navigator.*` and `Intl`). The new **anti-tamper** assertions verify the JS environment is left native:
+
+- `navigator.webdriver` is `false` **and not an own property** (lives on the prototype).
+- `Navigator.prototype.platform`/`vendor` getters are native (`.toString()` contains `[native code]`).
+- `window.chrome` is the genuine object (not a replaced stub).
+- `bot.sannysoft.com` WebDriver test **passes** with `--fingerprint` (it failed under the v1 approach).
+
+Tests live in `tests/test_fingerprint.py` (the v1 spoofed-value tests for platform/vendor were removed; anti-tamper tests added).
+
+### Interaction with the window border (BRW-06 / BRW-07)
+
+The window-border marker is **suppressed when a fingerprint profile is active** -- the in-page border/badge/title are page-observable, and bot-defended sites (where fingerprinting is used) are exactly where DOM/title-diffing detectors live.

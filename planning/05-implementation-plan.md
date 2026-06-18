@@ -162,3 +162,20 @@ Follow the recommended implementation order within each phase. The order is advi
 ## 5. Companion Data File Reference
 
 The machine-readable companion file is at `planning/05-implementation-plan.json`. It contains the same phase structure, feature ordering, and progress tracking as this document, in JSON format consumed by the Implementation Loop for feature selection and progress updates.
+
+---
+
+## Iteration 3 note (historical plan not re-run)
+
+Iteration 3's features were implemented and shipped without a separate phased plan (the increment was small enough to sequence directly). For the record, all were completed with the full suite passing (114 tests):
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| BRW-03 Fingerprint Profiles (update) | **Complete** | JS overrides removed; launch-flag spoofs only; anti-tamper tests |
+| BRW-04 Instance Registry (update) | **Complete** | Port-based liveness + `deregister` |
+| BRW-05 Instance Status (update) | **Complete** | Inherits port-based liveness |
+| BRW-07 Instance Supervisor | **Complete** | Detached per-instance process; auto-retire on close |
+| BRW-06 Window Border | **Complete** | Hosted by the supervisor; depends on BRW-07 |
+| CLI-01 One-Shot Commands (update) | **Complete** | `--version`, `--no-window-border` |
+
+BRW-07 and BRW-06 are one process (the supervisor draws the border and handles lifecycle), so they were built together; BRW-04's `deregister`/liveness landed first as BRW-07 depends on it.

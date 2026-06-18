@@ -183,3 +183,65 @@ Additionally, the Python library (`CDPClient` and typed domain classes) remains 
 - Two participants navigate the same tab simultaneously -- CDP handles this (last navigation wins), but both participants' pending commands on the navigated-away page may receive context-destroyed errors.
 - A participant's attach process dies -- other participants are unaffected.
 - The browser crashes -- all participants receive disconnection errors.
+
+---
+
+# Iteration 3 Increment
+
+> *This section layers a third pass onto the vision above. Sections 1-5 describe the Iteration 2 scope (named instances + the two-channel pattern); this increment adds window distinction, instance lifecycle, and a fingerprint correction, driven by real-world use after Iteration 2 shipped.*
+
+## I3.1 Project Purpose (increment)
+
+Running agents against real sites alongside a human's own browsing surfaced three problems Iteration 2 didn't address:
+
+- **Window confusion.** On a shared desktop, an agent-driven Chrome window is indistinguishable from the user's own Chrome windows. The user cannot tell at a glance which window the agent is operating, and agent windows pop onto whatever virtual desktop the user is working on.
+- **Fingerprinting was counterproductive.** The Iteration 1 fingerprint feature (BRW-03) injected JavaScript navigator overrides to evade bot detection. An empirical detection audit found these overrides are each independently detectable and make the browser *more* detectable, not less -- they flip `bot.sannysoft.com`'s WebDriver test from pass to fail and raise CreepJS's headless score. A plain CDP-attached Chrome is already cleaner than the "hardened" one.
+- **The registry drifted from reality.** Stale instance entries lingered after a browser closed, requiring manual `cleanup`. Worse, Chrome installs that fork the real browser into a different process (snap, the `chromium-browser` wrapper, self-relaunch) were misreported as dead immediately after a successful launch, because liveness was a PID-only check.
+
+## I3.2 Essential Functionality (increment)
+
+**Workflow 5: Tell agent windows apart.** Every headed browser an agent launches is visually marked -- a colored border + a corner badge naming the instance, and a title prefix (`🤖 <instance> — <page title>`) so it stands out in the taskbar / Alt-Tab while still showing the page's own title. The color is stable per instance, so multiple agent windows are distinguishable from each other as well as from the user's Chrome. On by default for headed launches; disabled with `--no-window-border`; suppressed under `--fingerprint` (the marker is page-observable) and `--headless` (no window). Agent windows also pin to the launching terminal's virtual desktop, out of the user's way.
+
+**Workflow 6: The registry mirrors reality.** When an agent-launched window is closed (by the user, a crash, or shutdown), its instance is automatically removed from the registry and its session directory cleaned up -- no command to run. Liveness reflects whether the browser's CDP endpoint is actually reachable, not just whether the launched PID survives, so wrapper/snap-launched browsers are reported correctly. A *dropped CDP connection alone* does not retire an instance -- a host suspend/resume can sever the connection while the browser keeps running -- so the supervisor confirms the browser is truly gone (its CDP port stopped listening) before retiring, and reconnects to resume otherwise. `launch` also prunes any stale entries as a fallback.
+
+**Fingerprint correction.** Fingerprint profiles now spoof only what can be set cleanly at launch (user agent, viewport, language, timezone) via Chrome flags, with no JavaScript injection. The detectable navigator overrides were removed.
+
+## I3.3 Scope Boundaries (increment)
+
+### Now (Iteration 3)
+
+- Window border + badge + title prefix marking agent-launched windows, with a stable per-instance color (BRW-06)
+- Per-instance supervisor that auto-retires an instance from the registry when its browser closes (BRW-07)
+- Port-based instance liveness (fixes wrapper/snap "launched but reported dead")
+- Launch-time pruning of stale registry entries and orphaned session directories
+- Fingerprint hardening: launch-flag spoofs only, JS navigator overrides removed (BRW-03 update)
+- `--version` / `-V` flag (CLI-01 update)
+
+### Not (Out of Scope)
+
+- WebRTC real-IP-leak mitigation -- it requires proxy support to be meaningful (the IP-handling policy flag alone is a no-op without a proxy) and is documented as a known limitation, not addressed here.
+- Cross-OS platform spoofing -- WebGL/font signals leak the real OS regardless; a profile's platform should match the host.
+- An OS-level window frame (true window-manager border) -- the marker is in-page; on GNOME/Mutter there is no cheap per-window border, and an in-page marker is detection-safe and cross-platform.
+
+### Next (Future Iterations)
+
+- Proxy support, and with it WebRTC IP-handling so the real IP does not leak around a proxy.
+- An optional page-independent window marker (e.g. an external overlay) for marking `chrome://` / blank pages where in-page injection cannot reach.
+
+## I3.4 Key Workflow: Window marking and auto-retirement
+
+**Goal:** An agent's browser window is identifiable and the registry stays truthful with no manual upkeep.
+
+**Steps:**
+
+1. Agent launches a headed browser. chrome-agent spawns a detached per-instance supervisor that holds a CDP connection to the browser.
+2. The supervisor marks every tab (current and future) with the instance's border + badge and keeps the title prefixed -- unless suppressed by `--no-window-border`, `--fingerprint`, or `--headless`.
+3. The user visually identifies the agent window by its colored border and badge, on the launching terminal's desktop.
+4. When the supervisor's CDP connection drops, it checks whether the browser is truly gone -- the CDP port stops listening within a short grace window. If gone (the window was closed), it removes the instance from the registry and deletes the session directory, then exits. If the port is still up (a transient drop), it reconnects and resumes supervising (re-installing the border on the live tabs).
+5. A later `status` reflects only what is actually running; a later `launch` additionally prunes any stale entries left by abnormal exits.
+
+**Error paths:**
+
+- The CDP connection drops transiently (host suspend/resume, a network blip) while the browser keeps running -- the supervisor sees the port is still up and reconnects rather than retiring the live instance.
+- The supervisor process is killed while the browser lives -- the entry persists until the next launch-time prune or manual `cleanup`; port-based liveness ensures a live browser is never wrongly pruned.
+- A fingerprint profile is active -- the in-page marker is suppressed to avoid a page-observable footprint on bot-defended sites.

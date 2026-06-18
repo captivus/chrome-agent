@@ -10,13 +10,17 @@
 
 **Iteration 1 (v0.3.0):** 8 features across 4 categories (2 small, 2 medium, 4 large). Delivered the CDP-native foundation: WebSocket client, session mode, browser launch, protocol discovery, typed bindings, fingerprint profiles, browser status, and one-shot CLI commands. All implemented and released.
 
-**Iteration 2 (this iteration):** 3 new features across 2 existing categories (1 small, 1 medium, 1 large). Reshapes the CLI surface around named instances and a two-channel interaction pattern (attach for events, one-shot for commands) with event subscription isolation between participants.
+**Iteration 2 (v0.4.0):** 3 new features across 2 existing categories (1 small, 1 medium, 1 large). Reshapes the CLI surface around named instances and a two-channel interaction pattern (attach for events, one-shot for commands) with event subscription isolation between participants.
 
 **Cross-cutting change:** All existing commands that accept `--port` (launch, status, help, one-shot) adapt to address browsers by instance name. This is a behavioral update to each command driven by the Instance Registry feature, not a separate feature per command.
 
 **Superseded features:** CDP-02 (Session Mode) is superseded by Attach Mode. BRW-02 (Browser Status) is superseded by Instance Status.
 
-**Combined totals:** 11 features, 4 categories, 3 small, 3 medium, 5 large
+**Iteration 3 (this iteration):** 2 new features in Browser Management (both medium), plus updates to existing features. Adds window distinction (a per-instance colored border + badge + title prefix marking agent-launched windows) and instance lifecycle (auto-retirement from the registry when a browser closes), and corrects Fingerprint Profiles (BRW-03) to remove detectable JS navigator overrides -- an empirical detection audit found they made the browser *more* detectable, not less.
+
+**Cross-cutting change (Iteration 3):** Instance liveness becomes port-based (process PID OR CDP-port reachability), fixing snap/wrapper Chrome installs that fork the real browser and were misreported as dead -- this updates Instance Registry (BRW-04) and Instance Status (BRW-05). `launch` prunes stale entries and orphaned session directories as a fallback. A `--version`/`-V` flag is added (CLI-01).
+
+**Combined totals:** 13 features, 4 categories, 3 small, 5 medium, 5 large
 
 ## 3. Categories
 
@@ -59,13 +63,20 @@
 | BRW-03 | Fingerprint Profiles | Apply anti-detection configuration to launched browsers -- user agent, viewport, locale, timezone, platform spoofing via CDP and launch flags | Medium |
 | CLI-01 | One-Shot Commands | Parse Domain.method and JSON params from CLI arguments, connect, send, print response, disconnect. Also route operational commands (launch, status, session, help) | Medium |
 
-### Iteration 2 (this iteration) -- new features
+### Iteration 2 (v0.4.0) -- new features
 
 | Feature ID | Name | Description | Complexity |
 |------------|------|-------------|------------|
 | BRW-04 | Instance Registry | Manage named browser instances: auto-allocate ports, derive names from directory basenames, store name-to-port-to-PID mappings, support lookup by name, detect and clean up stale entries | Medium |
 | CDP-04 | Attach Mode | Persistent connection to a named browser instance for event observation with isolated subscriptions. Replaces Session Mode. Streams subscribed events to stdout as JSON lines. | Large |
 | BRW-05 | Instance Status | List all registered browser instances with their page targets. Enrich registry data with live browser state: liveness, target IDs, URLs, and titles. Replaces Browser Status. | Small |
+
+### Iteration 3 (this iteration) -- new features
+
+| Feature ID | Name | Description | Complexity |
+|------------|------|-------------|------------|
+| BRW-06 | Window Border | Visually mark an agent-launched window so it is distinct from the user's own Chrome -- a stable per-instance colored border + corner badge on every tab, plus a title prefix. On by default for headed launches; suppressed under `--fingerprint`/`--headless`; `--no-window-border` disables it. Adds no automation-detection signal. | Medium |
+| BRW-07 | Instance Supervisor | A detached per-instance process (one per headed launch) that auto-retires the instance from the registry when its browser closes, and hosts the window-border injection while the browser is alive. Pairs with port-based liveness and a launch-time prune. | Medium |
 
 ## 5. Feature Details
 
@@ -209,6 +220,7 @@
 - Sets viewport, user agent, locale, and timezone
 - Profile is defined as a JSON file with a documented schema
 - Applied after browser launch, before the browser is used for any navigation
+- **Iteration 3 update:** The JavaScript navigator overrides (webdriver, platform, vendor, window.chrome) and the init-script "guard" connection were **removed**. A detection audit found them net-negative -- they flip `bot.sannysoft.com`'s WebDriver test from pass to fail and raise CreepJS's headless score, while a plain CDP-attached Chrome is already clean. Fingerprinting now applies only the launch-flag spoofs (user agent, viewport, language, timezone); `platform`/`vendor` remain in the schema but are no longer spoofed. See BRW-03 spec §12 and `BRW-03-learnings/`.
 
 **Complexity:** Medium -- the individual overrides are straightforward, but the init script must run before any page loads, which requires careful sequencing with the browser launch.
 
@@ -235,7 +247,7 @@
 
 **Traceability:** Technical Context (user interaction model), Essential Functionality all workflows
 
-### Iteration 2 (this iteration) -- new features
+### Iteration 2 (v0.4.0) -- new features
 
 ### BRW-04: Instance Registry
 
@@ -302,3 +314,45 @@
 **Complexity:** Small -- reads the registry, checks PID/port liveness, makes HTTP requests to `/json`, and formats output. All operations are well-understood and synchronous. The logic is straightforward enumeration and formatting.
 
 **Traceability:** Essential Functionality Workflow 1 (Launch and Manage Browser Instances), Workflow 4 (Collaborate on a Shared Browser), Key Workflows Workflow 1 (step 5), Workflow 4 (step 2), Scope Boundaries Now ("status command showing all running instances with their page targets")
+
+### Iteration 3 (this iteration) -- new features
+
+### BRW-06: Window Border
+
+**What it does:** Marks an agent-launched Chrome window so the user can tell it apart from their own Chrome windows at a glance -- a colored border and a corner badge (showing the instance name) around every tab, plus a title prefix so the window reads as `🤖 <instance> — <page title>` in the taskbar / Alt-Tab while still showing the page's own title.
+
+**Inputs:** Instance name (for the badge text and color), instance port (to connect). The marker is on by default for headed launches; `--no-window-border` disables it.
+
+**Outputs:** Every page target in the browser shows the border + badge; `document.title` is kept prefixed.
+
+**Behavioral details:**
+- Color is stable per instance, drawn from a fixed curated palette (so two agent windows are distinguishable from each other, not just from the user's Chrome). Deterministic from the instance name.
+- The border/badge render inside a closed shadow DOM under a randomized host id; the injected code is a side-effect-free IIFE. Title prefixing is idempotent (re-applied on SPA/title changes, never doubled).
+- Injected via `Page.addScriptToEvaluateOnNewDocument` (isolated world) for new documents plus a one-time `Runtime.evaluate` for the current document; covers all current and future tabs via `Target.setAutoAttach`.
+- Hosted by the per-instance supervisor process (BRW-07) while the browser is alive.
+- Suppressed under `--headless` (no window) and `--fingerprint` (the marker is page-observable, and bot-defended sites are where DOM/title-diffing detectors live).
+- Adds no automation-detection signal -- verified byte-identical to a vanilla launch against `bot.sannysoft.com` and CreepJS.
+
+**Complexity:** Medium -- the rendering and color derivation are simple, but per-tab coverage via auto-attach, persistence across navigation, the closed-shadow-DOM/isolated-world hardening, and the suppression rules add up.
+
+**Traceability:** Iteration 3 Increment (Workflow 5: Tell agent windows apart), Scope Boundaries Now (Iteration 3)
+
+### BRW-07: Instance Supervisor
+
+**What it does:** Keeps the instance registry mirroring reality. A detached process spawned once per headed launch holds a CDP connection to the browser; when the browser/window closes, it automatically removes the instance from the registry and deletes its session directory. The same process hosts the window-border injection (BRW-06) while the browser is alive.
+
+**Inputs:** Instance name, port, registry path, and whether to draw the border. (Spawned by Browser Launch.)
+
+**Outputs:** On browser close: the registry entry and session directory are gone. While alive (if drawing): the window border on every tab.
+
+**Behavioral details:**
+- Detached subprocess (`python -m chrome_agent.supervisor`) so it survives the launching CLI exiting (fire-and-forget).
+- Holds a browser-level CDP connection. A dropped connection is **not** taken as proof the browser closed -- a host suspend/resume or transient blip can sever the WebSocket while Chrome keeps running. On a drop it polls the CDP port for up to a grace window (`_RETIRE_GRACE_SECONDS`, 5s): if the port stays up it reconnects and resumes supervising (re-installing the border); only once the port goes down (the browser is truly gone) does it retire the instance -- deregister + remove the session directory (with a retry, since Chrome can briefly hold files after close) -- and exit.
+- `registry.deregister()` is browser-free and idempotent -- safe to race with `stop()` / `cleanup()`.
+- Spawned only for headed launches; headless launches get no supervisor.
+- Port-based liveness (process PID OR CDP-port reachable) fixes snap/wrapper Chrome installs whose launched PID exits while the real browser runs in another process. `launch` also prunes stale entries / orphaned session dirs as a fallback.
+- Honest limitation: if the supervisor process itself is killed while the browser lives, the entry persists until the next launch-time prune or manual `cleanup`; port-based liveness ensures a live browser is never wrongly pruned.
+
+**Complexity:** Medium -- the process is small, but the close-detection timing, session-dir release race, idempotent deregistration, and the liveness fix across registry/status are subtle.
+
+**Traceability:** Iteration 3 Increment (Workflow 6: The registry mirrors reality), Scope Boundaries Now (Iteration 3)

@@ -806,3 +806,14 @@ Updated tactile workflow: `chrome-agent launch --port 9333`, `chrome-agent statu
 ### User Review Notes
 
 [To be filled by user]
+
+---
+
+## 12. Iteration 3 Update -- `--version` and `--no-window-border`
+
+**Status:** Complete (Iteration 3). Two flags were added to the CLI:
+
+- **`--version` / `-V`** -- prints `chrome-agent <version>` (read from installed package metadata via `chrome_agent.__version__`, not hardcoded) and exits 0, handled before any instance/registry logic. Tests: `test_version_flag`, `test_version_short_flag` in `tests/test_cli.py`.
+- **`--no-window-border`** -- a `launch` option that disables the window-border marker (BRW-06), which is on by default for headed launches. Parsed in `_run_launch` and passed as `window_border=False` to `launch_browser`.
+
+Documented in `README.md` and `AGENTS.md`.

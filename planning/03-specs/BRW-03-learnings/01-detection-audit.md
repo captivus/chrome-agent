@@ -15,7 +15,7 @@ driving real detection harnesses, not assertion.
 
 The custom probe directly measures the vectors hypothesized as detectable.
 
-Driver: `research/detection_audit_driver.py` (re-runnable).
+Driver: `01-detection-audit-driver.py` (re-runnable).
 
 ## Results
 
