@@ -252,7 +252,11 @@ def _run_stop(args: list[str], target_spec: str | None, url_spec: str | None) ->
         from .cdp_client import CDPClient, get_ws_url
         from .registry import lookup
 
-        info = lookup(instance_name=instance_name)
+        try:
+            info = lookup(instance_name=instance_name)
+        except InstanceNotFoundError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
 
         async def _get_targets():
             browser_ws = get_ws_url(port=info.port, target_type="browser")
@@ -320,8 +324,12 @@ async def _run_cdp_one_shot(
 
     # Resolve instance
     if instance_name is not None:
-        from .registry import lookup
-        info = lookup(instance_name=instance_name)
+        from .registry import InstanceNotFoundError, lookup
+        try:
+            info = lookup(instance_name=instance_name)
+        except InstanceNotFoundError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
         port = info.port
     else:
         # Default instance resolution: auto-select single live instance

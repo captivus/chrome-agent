@@ -129,6 +129,52 @@ def test_malformed_json():
     assert "error" in result.stderr.lower()
 
 
+def test_unknown_instance_one_shot_clean_error():
+    """An unknown instance name in a one-shot emits a clean Error:, not a traceback.
+
+    Regression: _run_cdp_one_shot resolved the instance with lookup() but did not
+    catch InstanceNotFoundError (unlike status/stop/help), so an unknown instance
+    name crashed with an uncaught Python traceback instead of the clean
+    `Error: Instance '<name>' not found. Available: ...` message every other
+    command path emits.
+
+    The discriminating signal is the ABSENCE of a traceback: the broken code
+    already exits 1 *and* the available-instances list already appears inside the
+    traceback, so asserting only on exit code or on "not found" would pass on the
+    bug. The traceback check is what makes this test able to fail on the defect.
+    """
+    result = _run_cli(
+        "definitely-not-a-real-instance-xyz",
+        "Runtime.evaluate",
+        '{"expression": "1+1", "returnByValue": true}',
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "Traceback" not in combined, f"uncaught traceback leaked:\n{combined}"
+    assert result.stderr.startswith("Error:"), (
+        f"expected clean 'Error:' prefix, got:\n{result.stderr!r}"
+    )
+    assert "not found" in result.stderr.lower()
+
+
+def test_unknown_instance_stop_target_clean_error():
+    """stop <unknown> --target N emits a clean Error:, not a traceback.
+
+    Same error class as the one-shot path: _run_stop's target-resolution branch
+    also called lookup() unguarded, so `stop <unknown> --target N` crashed with an
+    uncaught traceback. Swept and fixed alongside the one-shot path so the whole
+    error class -- not just the first reported instance -- is closed.
+    """
+    result = _run_cli("stop", "definitely-not-a-real-instance-xyz", "--target", "1")
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "Traceback" not in combined, f"uncaught traceback leaked:\n{combined}"
+    assert result.stderr.startswith("Error:"), (
+        f"expected clean 'Error:' prefix, got:\n{result.stderr!r}"
+    )
+    assert "not found" in result.stderr.lower()
+
+
 # ---------------------------------------------------------------------------
 # Bare CDP method (backward compat)
 # ---------------------------------------------------------------------------
