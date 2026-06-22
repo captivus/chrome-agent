@@ -175,6 +175,122 @@ def test_unknown_instance_stop_target_clean_error():
     assert "not found" in result.stderr.lower()
 
 
+def test_stop_target_dead_instance_clean_error(monkeypatch, capsys):
+    """stop <registered-but-unreachable> --target N emits a clean Error:, not a traceback.
+
+    The last member of the clean-error class: _run_stop's --target/--url branch
+    fetched page targets via get_ws_url() inside asyncio.run(_get_targets()) with no
+    guard -- so a registered instance whose browser had died (a stale registry entry,
+    which the README notes happens for headless / abruptly-killed instances) leaked a
+    ConnectionError traceback, even though the identical get_ws_url() call in the
+    one-shot path was already guarded. Run in-process so the registered-but-dead state
+    is deterministic without touching the real registry.
+    """
+    from chrome_agent import cli, registry
+    from chrome_agent.registry import InstanceInfo
+
+    # A registered instance whose browser is not listening (closed port).
+    monkeypatch.setattr(
+        registry,
+        "lookup",
+        lambda instance_name, registry_path=None: InstanceInfo(
+            name=instance_name, port=59999, pid=1, browser_version="x", alive=False
+        ),
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        cli._run_stop(args=["deadinst"], target_spec="1", url_spec=None)
+    assert exc_info.value.code == 1
+    out = capsys.readouterr()
+    assert "Traceback" not in (out.out + out.err), f"uncaught traceback leaked:\n{out.err}"
+    assert out.err.startswith("Error:"), f"expected clean 'Error:' prefix, got:\n{out.err!r}"
+
+
+def test_one_shot_ambiguous_target_clean_error(browser_session, monkeypatch, capsys):
+    """A one-shot against a multi-tab browser (no --target) emits a clean error, not a traceback.
+
+    Broader member of the same error class as the instance-not-found fix:
+    _run_cdp_one_shot caught CDPError and ConnectionError but not the
+    AmbiguousTargetError that resolve_target raises when multiple page targets exist
+    and no --target is given, so the one-shot crashed with an uncaught traceback
+    instead of the formatted "Multiple page targets found. Specify one: ..." message
+    the error type already carries.
+    """
+    import asyncio
+
+    from chrome_agent import cli
+    from chrome_agent.cdp_client import CDPClient, get_ws_url
+    from chrome_agent.registry import InstanceInfo
+
+    port = browser_session.port
+
+    async def _create_tabs():
+        ws = get_ws_url(port=port, target_type="browser")
+        async with CDPClient(ws_url=ws) as cdp:
+            ids = []
+            for _ in range(2):
+                r = await cdp.send(method="Target.createTarget", params={"url": "about:blank"})
+                ids.append(r["targetId"])
+            return ids
+
+    async def _close_tabs(ids):
+        ws = get_ws_url(port=port, target_type="browser")
+        async with CDPClient(ws_url=ws) as cdp:
+            for tid in ids:
+                try:
+                    await cdp.send(method="Target.closeTarget", params={"targetId": tid})
+                except Exception:
+                    pass
+
+    # Resolve the CLI's instance lookup to the fixture browser, whatever name is passed.
+    monkeypatch.setattr(
+        "chrome_agent.registry.lookup",
+        lambda instance_name, registry_path=None: InstanceInfo(
+            name=instance_name, port=port, pid=browser_session.pid,
+            browser_version="test", alive=True,
+        ),
+    )
+
+    tab_ids = asyncio.run(_create_tabs())
+    try:
+        with pytest.raises(SystemExit) as exc_info:
+            asyncio.run(cli._run_cdp_one_shot(
+                instance_name="anyname",
+                method="Page.captureScreenshot",
+                params_str='{"format": "png"}',
+                target_spec=None,
+                url_spec=None,
+            ))
+        assert exc_info.value.code == 1
+        out = capsys.readouterr()
+        combined = out.out + out.err
+        assert "Traceback" not in combined, f"uncaught traceback leaked:\n{combined}"
+        assert "Specify one" in out.err or "Multiple page targets" in out.err, (
+            f"expected the ambiguous-target listing, got:\n{out.err!r}"
+        )
+    finally:
+        asyncio.run(_close_tabs(tab_ids))
+
+
+def test_launch_chrome_not_found_clean_error(monkeypatch, capsys):
+    """launch with no Chrome binary emits a clean error, not a traceback (same error class).
+
+    _run_launch caught (RuntimeError, TimeoutError) but not BrowserNotFoundError, so a
+    machine without Chrome installed crashed with an uncaught traceback instead of the
+    "Chrome/Chromium not found. Searched: ..." message.
+    """
+    import asyncio
+
+    from chrome_agent import cli
+
+    monkeypatch.setattr("chrome_agent.launcher.find_chrome_binary", lambda: None)
+    with pytest.raises(SystemExit) as exc_info:
+        asyncio.run(cli._run_launch(args=[]))
+    assert exc_info.value.code == 1
+    out = capsys.readouterr()
+    assert "Traceback" not in (out.out + out.err)
+    assert "not found" in out.err.lower()
+
+
 # ---------------------------------------------------------------------------
 # Bare CDP method (backward compat)
 # ---------------------------------------------------------------------------

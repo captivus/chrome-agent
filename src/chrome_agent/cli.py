@@ -73,7 +73,7 @@ def _print_static_usage() -> None:
 
 async def _run_launch(args: list[str]) -> None:
     """Launch a browser with CDP enabled."""
-    from .launcher import launch_browser
+    from .launcher import BrowserNotFoundError, launch_browser
 
     fingerprint_path = None
     headless = False
@@ -114,7 +114,7 @@ async def _run_launch(args: list[str]) -> None:
             extra_args=extra_args,
             window_border=window_border,
         )
-    except (RuntimeError, TimeoutError) as exc:
+    except (BrowserNotFoundError, RuntimeError, TimeoutError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -268,7 +268,11 @@ def _run_stop(args: list[str], target_spec: str | None, url_spec: str | None) ->
                 )
 
         import asyncio
-        page_targets = asyncio.run(_get_targets())
+        try:
+            page_targets = asyncio.run(_get_targets())
+        except (ConnectionError, RuntimeError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
 
         target_by = None
         spec = None
@@ -319,6 +323,7 @@ async def _run_cdp_one_shot(
     url_spec: str | None,
 ) -> None:
     """Send a single CDP command via browser-level WS + Target.attachToTarget."""
+    from .attach import AmbiguousTargetError, TargetNotFoundError
     from .cdp_client import CDPClient, get_ws_url
     from .errors import CDPError
 
@@ -417,6 +422,9 @@ async def _run_cdp_one_shot(
                 except Exception:
                     pass
 
+    except (AmbiguousTargetError, TargetNotFoundError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     except CDPError as exc:
         print(f"CDP error {exc.code}: {exc.message}", file=sys.stderr)
         sys.exit(1)
