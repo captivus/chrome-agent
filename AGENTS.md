@@ -33,6 +33,12 @@ Each attach session has isolated subscriptions -- other participants don't see y
 
 Both channels address browsers by **instance name**, not port number.
 
+## The full protocol, tracked live
+
+chrome-agent sends your `Domain.method` and params straight to Chrome and streams back whatever events you subscribe to -- nothing is validated against a bundled schema. Any command, event, or domain your installed Chrome supports works, including protocol surface added *after* this version of chrome-agent. (Example: `CrashReportContext` and `WebMCP` are both absent from this build's bindings, yet `chrome-agent <instance> CrashReportContext.getEntries` returns a normal result over the CLI.)
+
+So `help <instance> [Domain[.method]]` -- read live from the running browser -- is the authoritative, version-correct reference; prefer it over any static list. The typed Python classes are a point-in-time snapshot, not a gate: for a method newer than them, call `CDPClient.send(method=..., params=...)` directly.
+
 ## Managing Browsers
 
 ```bash

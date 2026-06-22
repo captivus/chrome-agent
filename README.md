@@ -15,6 +15,19 @@ AI coding agents need to see and interact with browsers -- to test their code, d
 
 This means full CDP protocol access -- every command, every event, every domain Chrome exposes. Not a curated subset of capabilities, but the complete protocol. Agents compose interactions from CDP primitives the same way DevTools does.
 
+## Tracks the running browser, not its own version
+
+Because there is no abstraction layer, chrome-agent tracks your browser rather than its own release. The CLI sends the method name and parameters you give it straight to Chrome and streams back the events you subscribe to -- nothing is validated against a bundled schema. So **any command, event, or domain your installed Chrome supports just works**, including protocol surface added *after* the version of chrome-agent you installed. There is no curated subset to fall behind.
+
+For example, the `CrashReportContext` and `WebMCP` domains (added to CDP in later Chrome releases) are both absent from an older chrome-agent's typed bindings, yet a method on one returns a normal result through the CLI, with no change to chrome-agent:
+
+```bash
+chrome-agent myproject-01 CrashReportContext.getEntries
+# {"entries": []}
+```
+
+The one point-in-time artifact is the typed Python classes (see [Python API](#python-api)) -- an optional convenience layer that snapshots the schema at generation time. They never gate access: `CDPClient.send(method=..., params=...)` reaches any method regardless. And `help` reads the protocol schema live from the running browser, so its documentation is always as current as your Chrome.
+
 ## Installation
 
 ```bash
@@ -150,7 +163,7 @@ async with CDPClient(ws_url=get_ws_url(port=9222)) as cdp:
     print(result["result"]["value"])
 ```
 
-54 typed domain classes with snake_case methods generated from Chrome's protocol schema.
+54 typed domain classes with snake_case methods, generated from Chrome's protocol schema. They are an optional convenience layer -- a point-in-time snapshot, not a gate. For any method newer than the snapshot, call `CDPClient.send(method=..., params=...)` directly (see [Tracks the running browser, not its own version](#tracks-the-running-browser-not-its-own-version)).
 
 ## Window Border
 
