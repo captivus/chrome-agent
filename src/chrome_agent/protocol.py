@@ -25,7 +25,7 @@ def _resolve_port(
     Precedence:
     1. instance_name provided -> registry lookup
     2. Explicit port provided -> use it directly
-    3. Auto-select single live instance (when neither is provided)
+    3. Auto-select any live instance (when neither is provided)
     4. None (caller falls back to static usage)
     """
     if instance_name is not None:
@@ -37,12 +37,15 @@ def _resolve_port(
     if port is not None:
         return port
 
-    # Auto-select: if exactly one live instance, use it
+    # Auto-select any live instance. Protocol discovery is read-only and the
+    # schema is identical across instances of the same browser, so any live one
+    # answers a `help` query equally well. (A prior "exactly one live instance"
+    # rule made `help <Domain>` silently fall through to the usage banner
+    # whenever zero or two-plus instances were running.)
     try:
         from .registry import enumerate_instances
-        instances = enumerate_instances()
-        live = [i for i in instances if i.alive]
-        if len(live) == 1:
+        live = [i for i in enumerate_instances() if i.alive]
+        if live:
             return live[0].port
     except Exception:
         pass  # Registry not available or empty
@@ -82,8 +85,8 @@ def discover_protocol(
 
     Port resolution precedence:
     1. instance_name (registry lookup)
-    2. Auto-select single live instance
-    3. Explicit port parameter
+    2. Explicit port parameter
+    3. Auto-select any live instance
     4. None -> caller handles static usage fallback
 
     Synchronous. Uses stdlib urllib.

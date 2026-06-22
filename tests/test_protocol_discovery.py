@@ -6,9 +6,14 @@ Runs against a real browser on port 9333 (session fixture).
 
 import pytest
 
-from chrome_agent.protocol import discover_protocol, fetch_protocol_schema
+from chrome_agent.protocol import _resolve_port, discover_protocol, fetch_protocol_schema
+from chrome_agent.registry import InstanceInfo
 
 CDP_PORT = 9333
+
+
+def _inst(name: str, port: int, alive: bool) -> InstanceInfo:
+    return InstanceInfo(name=name, port=port, pid=1234, browser_version="test", alive=alive)
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +81,59 @@ def test_unknown_method(browser_session):
     """Raises ValueError with 'Unknown method' for nonexistent method."""
     with pytest.raises(ValueError, match="Unknown method"):
         discover_protocol(port=CDP_PORT, query="Page.fakeMethod")
+
+
+# ---------------------------------------------------------------------------
+# Port auto-selection (the `help <Domain>` dispatch fix)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_port_any_when_multiple_live(monkeypatch):
+    """With 2+ live instances and no name/port, auto-select picks a live one (not None).
+
+    Regression: the prior "exactly one live instance" rule returned None whenever
+    zero or two-plus instances were live, so `help <Domain>` with several browsers
+    running fell through to the static usage banner instead of showing the domain.
+    Protocol discovery is read-only and the schema is identical across instances,
+    so any live instance must be able to answer.
+    """
+    insts = [_inst("a-01", 9501, True), _inst("b-01", 9502, True), _inst("c-01", 9503, True)]
+    monkeypatch.setattr("chrome_agent.registry.enumerate_instances", lambda *a, **k: insts)
+    assert _resolve_port(instance_name=None, port=None) in {9501, 9502, 9503}
+
+
+def test_resolve_port_single_live(monkeypatch):
+    """Exactly one live instance still resolves to its port (behavior preserved)."""
+    monkeypatch.setattr(
+        "chrome_agent.registry.enumerate_instances",
+        lambda *a, **k: [_inst("only-01", 9555, True)],
+    )
+    assert _resolve_port(instance_name=None, port=None) == 9555
+
+
+def test_resolve_port_skips_dead(monkeypatch):
+    """Dead instances are skipped; a live one is chosen."""
+    insts = [_inst("dead-01", 9501, False), _inst("live-01", 9502, True), _inst("dead-02", 9503, False)]
+    monkeypatch.setattr("chrome_agent.registry.enumerate_instances", lambda *a, **k: insts)
+    assert _resolve_port(instance_name=None, port=None) == 9502
+
+
+def test_resolve_port_none_when_no_live(monkeypatch):
+    """Zero live instances -> None, so the caller emits a clean error / usage banner."""
+    monkeypatch.setattr(
+        "chrome_agent.registry.enumerate_instances",
+        lambda *a, **k: [_inst("dead-01", 9501, False)],
+    )
+    assert _resolve_port(instance_name=None, port=None) is None
+
+
+def test_resolve_port_explicit_port_beats_autoselect(monkeypatch):
+    """An explicit port takes precedence over auto-selection."""
+    monkeypatch.setattr(
+        "chrome_agent.registry.enumerate_instances",
+        lambda *a, **k: [_inst("a-01", 9501, True)],
+    )
+    assert _resolve_port(instance_name=None, port=9999) == 9999
 
 
 # ---------------------------------------------------------------------------

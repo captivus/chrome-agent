@@ -225,10 +225,18 @@ def _run_help(args: list[str]) -> None:
     try:
         discover_protocol(instance_name=instance_name, query=query)
     except ConnectionError:
+        # A query was given (a Domain/method to look up), but no browser could
+        # answer it. Emit a clear, actionable error instead of silently falling
+        # through to the generic usage banner.
         if instance_name:
             print(f"Error: browser for instance '{instance_name}' is not responding", file=sys.stderr)
         else:
-            _print_static_usage()
+            print(
+                "Error: no running browser to query for protocol help. "
+                "Start one with: chrome-agent launch",
+                file=sys.stderr,
+            )
+        sys.exit(1)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

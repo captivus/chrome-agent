@@ -93,16 +93,58 @@ def test_help_no_args():
 
 
 def test_help_domain_query():
-    """Help with domain name shows domain info."""
+    """help <Domain> (no instance named) shows real domain detail, never the usage banner.
+
+    The dispatch bug: `help Page` silently degraded to the static usage banner
+    whenever no single instance auto-resolved (zero, or two-plus, live browsers).
+    With a browser reachable, the output must be the Page domain itself -- not the
+    operational-usage text. With none reachable, it must be a clean actionable
+    error (exit 1, no traceback), not the banner. Asserting only returncode == 0
+    (the prior test) passed on the bug, since the banner also exits 0.
+    """
     result = _run_cli("help", "Page")
-    # May fail if no browser is accessible, which is OK
-    assert result.returncode == 0
+    if result.returncode == 0:
+        assert "Domain: Page" in result.stdout, f"expected Page domain detail, got:\n{result.stdout!r}"
+        assert "Operational commands:" not in result.stdout, "degraded to the usage banner"
+    else:
+        assert result.returncode == 1
+        assert "Traceback" not in (result.stdout + result.stderr)
+        assert "browser" in result.stderr.lower()
 
 
 def test_help_method_query():
-    """Help with Domain.method shows method details."""
+    """help <Domain.method> (no instance named) shows method detail, never the usage banner."""
     result = _run_cli("help", "Page.navigate")
-    assert result.returncode == 0
+    if result.returncode == 0:
+        assert "Page.navigate" in result.stdout
+        assert "Parameters:" in result.stdout
+        assert "Operational commands:" not in result.stdout, "degraded to the usage banner"
+    else:
+        assert result.returncode == 1
+        assert "Traceback" not in (result.stdout + result.stderr)
+        assert "browser" in result.stderr.lower()
+
+
+def test_help_query_no_browser_clean_error(monkeypatch, capsys):
+    """help <Domain> with no live browser emits a clean actionable error, not the usage banner.
+
+    The silent-swallow half of the dispatch bug: _run_help caught ConnectionError
+    on the no-instance path and printed the generic usage banner. A user who asked
+    for `help Page` should instead get a clear "no running browser ... launch"
+    error on stderr, exit 1, no traceback. Run in-process (not subprocess) so the
+    empty-registry state is deterministic regardless of what browsers are running.
+    """
+    from chrome_agent import cli
+
+    monkeypatch.setattr("chrome_agent.registry.enumerate_instances", lambda *a, **k: [])
+    with pytest.raises(SystemExit) as exc_info:
+        cli._run_help(args=["Page"])
+    assert exc_info.value.code == 1
+    out = capsys.readouterr()
+    assert "Operational commands:" not in out.out, "degraded to the usage banner"
+    assert "Traceback" not in (out.out + out.err)
+    assert "browser" in out.err.lower()
+    assert "launch" in out.err.lower()
 
 
 # ---------------------------------------------------------------------------
