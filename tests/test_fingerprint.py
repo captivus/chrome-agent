@@ -99,7 +99,7 @@ async def test_fingerprint_user_agent(fingerprinted_browser):
 
 # Anti-detection regression: the fingerprint must NOT leave the detectable
 # JS-override signatures an earlier implementation did. See
-# research/2026-06-16-detection-audit.md -- those overrides flipped
+# planning/03-specs/BRW-03-learnings/01-detection-audit.md -- those overrides flipped
 # bot.sannysoft.com's WebDriver test from pass to fail and raised CreepJS's
 # headless score. platform/vendor are no longer spoofed (a profile's platform
 # should match the host OS), so they are not asserted here.

@@ -4,7 +4,7 @@ Covers the pure functions: per-instance color derivation and overlay-script
 construction. The supervisor's live behavior (auto-attach to every tab,
 injection, title prefixing, and deregister-on-close lifecycle) requires a real
 visible window and is verified by driving a headed browser -- see
-research/2026-06-16-detection-audit.md and the supervisor verification.
+planning/03-specs/BRW-03-learnings/01-detection-audit.md and the supervisor verification.
 """
 
 import re

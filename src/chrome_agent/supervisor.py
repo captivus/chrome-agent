@@ -22,7 +22,7 @@ The border is page-observable (a host element in the DOM + a modified
 lifecycle job still runs. To minimize the footprint when drawn, the border
 renders in a *closed* shadow DOM under a *randomized* host id, and the injected
 code is a side-effect-free IIFE that leaks no globals.
-See ``research/2026-06-16-detection-audit.md``.
+See ``planning/03-specs/BRW-03-learnings/01-detection-audit.md``.
 """
 
 import asyncio

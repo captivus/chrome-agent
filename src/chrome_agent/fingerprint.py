@@ -6,7 +6,7 @@ user agent, viewport, language, and timezone.
 
 This module intentionally does NOT inject JavaScript to override navigator
 properties (``webdriver`` / ``platform`` / ``vendor`` / ``window.chrome``).
-An empirical detection audit (``research/2026-06-16-detection-audit.md``)
+An empirical detection audit (``planning/03-specs/BRW-03-learnings/01-detection-audit.md``)
 showed those overrides are each independently detectable and make the browser
 *more* detectable, not less: they flip bot.sannysoft.com's WebDriver test from
 pass to fail (the override makes ``navigator.webdriver`` an own property -- a
