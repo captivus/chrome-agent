@@ -1,7 +1,7 @@
 # chrome-agent
 
 [![PyPI version](https://img.shields.io/pypi/v/chrome-agent)](https://pypi.org/project/chrome-agent/)
-[![PyPI downloads](https://img.shields.io/pypi/dm/chrome-agent)](https://pypi.org/project/chrome-agent/)
+[![PyPI downloads](https://img.shields.io/pepy/dt/chrome-agent)](https://pepy.tech/projects/chrome-agent)
 [![Python versions](https://img.shields.io/pypi/pyversions/chrome-agent)](https://pypi.org/project/chrome-agent/)
 [![License](https://img.shields.io/pypi/l/chrome-agent)](https://github.com/captivus/chrome-agent/blob/main/LICENSE)
 
