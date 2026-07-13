@@ -12,3 +12,6 @@ build/
 .claude/skills/*
 # private operating manual -- lives in prompthub, never publish
 AGENTS-private.md
+
+# research directory
+research/
