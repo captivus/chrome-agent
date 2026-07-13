@@ -201,7 +201,9 @@ It deliberately does **not** patch `navigator.webdriver`, `navigator.platform`, 
 
 ## For AI Agents
 
-See [AGENTS.md](AGENTS.md) for concise agent instructions (the standard for AI agent tool documentation). Covers commands, the two-channel pattern, interaction patterns, and gotchas.
+See [AGENTS.md](AGENTS.md) for concise agent instructions (the standard for AI agent tool documentation). It covers the mental model (address an instance, send any CDP command), the sense ⇄ act loop, the two channels, the command reference, and gotchas.
+
+**`AGENTS.md` is a tailorable example, not gospel.** Its *mechanics* are exact, but the operating judgment in it is general -- adapt it to your own sites, tasks, and constraints. A good pattern is to keep a private, project-specific layer on top -- site-specific field notes, extraction playbooks, hard-won gotchas -- that *references* this public manual and extends it, rather than forking a separate set of instructions. Grow yours the same way.
 
 ## Collaboration
 
