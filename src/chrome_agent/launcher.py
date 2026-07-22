@@ -15,9 +15,9 @@ import sys
 import tempfile
 
 from .connection import check_cdp_port
-from .registry import InstanceInfo, allocate_port, register, cleanup
+from .registry import REGISTRY_PATH, InstanceInfo, allocate_port, register, cleanup
 from .registry import _load_registry, _resolve_path
-from .utils import process_is_running
+from .utils import process_is_ours, process_is_running, process_start_time
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +165,10 @@ async def launch_browser(
         stderr=subprocess.PIPE,
         env=env,
     )
+    # Capture the process's start-time identity token immediately, while the
+    # PID is guaranteed to still be this process (wrapper installs can exit
+    # fast). (pid, pid_start) lets liveness checks detect PID recycling.
+    pid_start = process_start_time(pid=process.pid)
     logger.info("Launched Chrome PID %d on port %d", process.pid, port)
 
     # Phase 5: Wait for CDP port to be ready
@@ -202,6 +206,7 @@ async def launch_browser(
         user_data_dir=session_dir,
         port_override=port,
         registry_path=registry_path,
+        pid_start=pid_start,
     )
 
     # Phase 8: Spawn the per-instance supervisor (headed launches only). It is a
@@ -242,6 +247,24 @@ def cleanup_sessions(registry_path: str | None = None) -> list[str]:
     # Registry cleanup (iteration 2)
     removed = cleanup(registry_path=registry_path)
 
+    # Session dirs still referenced by a registry entry (i.e. instances the
+    # cleanup above judged alive) are never orphans. Without this guard, the
+    # SingletonLock heuristic below can misjudge a LIVE sandbox-launched
+    # browser: its lock records a namespace-local PID, which on the host can
+    # alias to a dead or foreign process -- and the sweep would delete the
+    # profile out from under a running browser.
+    registry_data = _load_registry(_resolve_path(registry_path))
+    tracked_dirs = {e.get("user_data_dir") for e in registry_data.values()}
+    # The session root is shared by ALL registries: callers (tests, tools) can
+    # pass an isolated registry path, but their sweep still walks the global
+    # _SESSION_ROOT. Honor the default registry's instances too -- otherwise an
+    # isolated-registry invocation reads default-registry dirs as "untracked"
+    # and deletes profile dirs out from under live registered browsers (whose
+    # recreated-after-deletion dirs carry no SingletonLock to protect them).
+    if _resolve_path(registry_path) != REGISTRY_PATH:
+        default_data = _load_registry(REGISTRY_PATH)
+        tracked_dirs |= {e.get("user_data_dir") for e in default_data.values()}
+
     # Legacy cleanup: remove session dirs not tracked by the registry
     if os.path.isdir(_SESSION_ROOT):
         for entry in os.listdir(_SESSION_ROOT):
@@ -251,15 +274,22 @@ def cleanup_sessions(registry_path: str | None = None) -> list[str]:
             # Skip the registry file itself
             if entry == "registry.json" or entry.endswith(".tmp"):
                 continue
+            if session_dir in tracked_dirs:
+                continue
 
             lock_file = os.path.join(session_dir, "SingletonLock")
             if not os.path.exists(lock_file) and not os.path.islink(lock_file):
                 logger.info("Removing orphaned session directory: %s", session_dir)
                 shutil.rmtree(session_dir, ignore_errors=True)
             else:
+                # Identity check, not bare existence: the lock's PID is written
+                # by Chrome as it saw itself, so a sandboxed (PID-namespaced)
+                # ghost's lock aliases to a foreign host process. A PID that is
+                # not our own live process cannot be a browser holding this
+                # (untracked) profile.
                 pid = _read_lock_pid(lock_file=lock_file)
-                if pid is not None and not process_is_running(pid=pid):
-                    logger.info("Removing orphaned session directory (dead PID %d): %s", pid, session_dir)
+                if pid is not None and not process_is_ours(pid=pid):
+                    logger.info("Removing orphaned session directory (PID %d not ours): %s", pid, session_dir)
                     shutil.rmtree(session_dir, ignore_errors=True)
 
     return removed

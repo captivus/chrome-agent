@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .utils import process_is_running
+from .utils import process_is_ours
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ class InstanceInfo:
     browser_version: str
     user_data_dir: str = ""
     alive: bool = True
+    pid_start: str | None = None
 
 
 class InstanceNotFoundError(Exception):
@@ -92,18 +93,91 @@ def _port_is_listening(port: int) -> bool:
         return False
 
 
-def _instance_is_alive(pid: int, port: int) -> bool:
+def _cdp_port_claimants(port: int) -> set[str]:
+    """Profile dirs of every process claiming CDP ``port`` on its command line.
+
+    Scans ``/proc`` command lines for ``--remote-debugging-port=<port>``.
+    Chrome always carries that flag together with ``--user-data-dir``, and
+    browsers launched inside PID-namespaced sandboxes still appear here under
+    their real host PIDs -- so this attributes a listening port to profile
+    directories regardless of how the browser was launched.
+
+    Returns the SET of ``--user-data-dir`` values ("" for a claimant without
+    one). Multiple processes can claim the same port (observed in practice:
+    two browsers launched with the same ``--remote-debugging-port``; only one
+    won the bind) -- callers must ask "is OUR dir among the claimants", never
+    "who is THE owner". An empty set means nothing attributable was found
+    (non-Linux, or no claiming process).
+    """
+    needle = f"--remote-debugging-port={port}"
+    claimants: set[str] = set()
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return claimants
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        # Chrome REWRITES its argv into a single space-joined string (one
+        # trailing NUL), so a plain NUL split yields one giant element.
+        # Normalize NULs to spaces and tokenize on whitespace -- correct for
+        # both encodings. (A --user-data-dir path containing spaces would
+        # truncate at the first space; chrome-agent's own session dirs never
+        # contain spaces, and a truncated foreign path simply mismatches,
+        # which is the conservative direction.)
+        tokens = raw.replace(b"\0", b" ").decode(errors="replace").split()
+        if needle not in tokens:
+            continue
+        for token in tokens:
+            if token.startswith("--user-data-dir="):
+                claimants.add(token.split("=", 1)[1])
+                break
+        else:
+            claimants.add("")
+    return claimants
+
+
+def _instance_is_alive(
+    pid: int,
+    port: int,
+    pid_start: str | None = None,
+    user_data_dir: str = "",
+) -> bool:
     """Whether a registered instance is still usable.
 
-    A PID check alone is unreliable: some Chrome installs (snap, the
-    ``chromium-browser`` wrapper, or Chrome's own self-relaunch) fork the real
-    browser into a different process and the launched PID exits immediately, so
-    the recorded PID is dead while the browser is alive on its CDP port. Treat
-    an instance as alive if EITHER the recorded process is running OR its CDP
-    port still accepts connections -- the latter is what actually determines
-    whether we can drive the browser.
+    Liveness ladder, strongest evidence first:
+
+    1. **PID identity** -- the recorded PID is a live process of ours
+       (signalable, and matching the recorded start-time token when one
+       exists). PermissionError means *not ours*: chrome-agent launches
+       Chrome as the invoking user, and a PID recorded from inside a
+       PID-namespaced sandbox (e.g. an agent CLI's bwrap) aliases to an
+       unrelated host process -- often a root kernel thread -- that a bare
+       existence check misreads as our live browser forever.
+    2. **Port dead** -- nothing listening means nothing drivable: dead.
+    3. **Port attribution** -- a bare listener is not proof: the recorded
+       port can since have been claimed by a *different* instance's browser
+       (observed in practice) or an unrelated service. Attribute the
+       listener via ``_cdp_port_claimants``; alive only if *this* entry's
+       profile dir is among the claimants. This also keeps the snap/wrapper
+       fork case alive (recorded PID exits immediately, real browser claims
+       the port with our profile).
+    4. **Unattributable listener** -- no ``/proc`` evidence either way:
+       treat as alive (conservative; never destroy on ambiguity).
     """
-    return process_is_running(pid) or _port_is_listening(port)
+    if process_is_ours(pid=pid, expected_start=pid_start):
+        return True
+    if not _port_is_listening(port):
+        return False
+    claimants = _cdp_port_claimants(port=port)
+    if not claimants:
+        return True
+    return bool(user_data_dir) and user_data_dir in claimants
 
 
 def _derive_base_name(working_dir: str) -> str:
@@ -143,7 +217,11 @@ def allocate_port(registry: dict) -> int:
     """
     used_ports = set()
     for entry in registry.values():
-        if process_is_running(entry["pid"]):
+        # Identity check, not bare existence: a ghost entry whose namespace-local
+        # PID aliases to a foreign host process must not reserve a port forever.
+        # (Live browsers whose recorded PID died -- wrapper forks -- still hold
+        # their port via the active-listener check below.)
+        if process_is_ours(pid=entry["pid"], expected_start=entry.get("pid_start")):
             used_ports.add(entry["port"])
 
     port = BASE_PORT
@@ -162,6 +240,7 @@ def register(
     user_data_dir: str,
     port_override: int | None = None,
     registry_path: str | None = None,
+    pid_start: str | None = None,
 ) -> InstanceInfo:
     """Register a new browser instance in the registry.
 
@@ -185,6 +264,7 @@ def register(
         "browser_version": browser_version,
         "user_data_dir": user_data_dir,
         "launched": datetime.now(timezone.utc).isoformat(),
+        "pid_start": pid_start,
     }
     _save_registry(registry, path)
 
@@ -196,6 +276,7 @@ def register(
         pid=pid,
         browser_version=browser_version,
         user_data_dir=user_data_dir,
+        pid_start=pid_start,
     )
 
 
@@ -218,7 +299,12 @@ def lookup(
         )
 
     entry = registry[instance_name]
-    alive = _instance_is_alive(entry["pid"], entry["port"])
+    alive = _instance_is_alive(
+        entry["pid"],
+        entry["port"],
+        pid_start=entry.get("pid_start"),
+        user_data_dir=entry.get("user_data_dir", ""),
+    )
 
     return InstanceInfo(
         name=instance_name,
@@ -227,6 +313,7 @@ def lookup(
         browser_version=entry.get("browser_version", ""),
         user_data_dir=entry.get("user_data_dir", ""),
         alive=alive,
+        pid_start=entry.get("pid_start"),
     )
 
 
@@ -239,7 +326,12 @@ def enumerate_instances(
 
     results = []
     for name, entry in registry.items():
-        alive = _instance_is_alive(entry["pid"], entry["port"])
+        alive = _instance_is_alive(
+            entry["pid"],
+            entry["port"],
+            pid_start=entry.get("pid_start"),
+            user_data_dir=entry.get("user_data_dir", ""),
+        )
         results.append(InstanceInfo(
             name=name,
             port=entry["port"],
@@ -247,6 +339,7 @@ def enumerate_instances(
             browser_version=entry.get("browser_version", ""),
             user_data_dir=entry.get("user_data_dir", ""),
             alive=alive,
+            pid_start=entry.get("pid_start"),
         ))
     return results
 
@@ -304,6 +397,46 @@ def stop(
         else:
             return f"Failed to close tab {target_id[:8]} in {instance_name}"
 
+    # The entry reads alive, but before firing Browser.close at the recorded
+    # port, make sure the LISTENER is our browser. Two observed hazards: a
+    # ghost entry whose recorded port was since claimed by a different
+    # instance's browser, and a live-but-CDP-less browser that lost the bind
+    # race for its port (two launches given the same --remote-debugging-port).
+    # In both, Browser.close at the port would kill the WRONG browser.
+    claimants = _cdp_port_claimants(port=info.port)
+    port_is_ours = (not claimants) or (info.user_data_dir in claimants)
+    if not port_is_ours:
+        if process_is_ours(pid=info.pid, expected_start=info.pid_start):
+            # Our browser process is alive but does not own its recorded port:
+            # terminate it directly by (verified) PID instead of via CDP.
+            try:
+                os.kill(info.pid, 15)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if not process_is_ours(pid=info.pid, expected_start=info.pid_start):
+                    break
+                time.sleep(0.1)
+            outcome = (
+                f"Stopped {instance_name} (terminated by PID; port {info.port} "
+                f"was serving a different browser)"
+            )
+        else:
+            outcome = (
+                f"{instance_name} was stale (port {info.port} serves a different "
+                f"browser), cleaned up without touching it"
+            )
+        registry = _load_registry(path)
+        entry = registry.pop(instance_name, None)
+        if entry:
+            session_dir = entry.get("user_data_dir")
+            if session_dir and os.path.exists(session_dir):
+                shutil.rmtree(session_dir, ignore_errors=True)
+        _save_registry(registry, path)
+        logger.info("%s", outcome)
+        return outcome
+
     # Close the entire browser via Browser.close
     async def _close_browser():
         from .cdp_client import CDPClient, get_ws_url
@@ -313,17 +446,29 @@ def stop(
                 await cdp.send(method="Browser.close")
         except Exception as exc:
             logger.warning("Browser.close failed for %s: %s", instance_name, exc)
-            try:
-                os.kill(info.pid, 15)  # SIGTERM fallback
-            except ProcessLookupError:
-                pass
+            # Verify the target immediately before the destructive fallback:
+            # only SIGTERM a PID that is verifiably OUR browser process. A
+            # stale or namespace-local PID may alias to an unrelated process
+            # (even a root kernel thread) that must never be signalled.
+            if process_is_ours(pid=info.pid, expected_start=info.pid_start):
+                try:
+                    os.kill(info.pid, 15)  # SIGTERM fallback
+                except ProcessLookupError:
+                    pass
+            else:
+                logger.warning(
+                    "Skipping SIGTERM fallback for %s: pid %d is not our browser",
+                    instance_name, info.pid,
+                )
 
     asyncio.run(_close_browser())
 
-    # Wait for process to exit (up to 5 seconds)
+    # Wait for OUR process to exit (up to 5 seconds). The identity check also
+    # ends the wait immediately when the recorded PID was never ours (a foreign
+    # alias would otherwise read as "still running" for the whole window).
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
-        if not process_is_running(info.pid):
+        if not process_is_ours(pid=info.pid, expected_start=info.pid_start):
             break
         time.sleep(0.1)
 
@@ -398,7 +543,12 @@ def cleanup(
 
     removed = []
     for name, entry in list(registry.items()):
-        if not _instance_is_alive(entry["pid"], entry["port"]):
+        if not _instance_is_alive(
+            entry["pid"],
+            entry["port"],
+            pid_start=entry.get("pid_start"),
+            user_data_dir=entry.get("user_data_dir", ""),
+        ):
             del registry[name]
             removed.append(name)
             session_dir = entry.get("user_data_dir")

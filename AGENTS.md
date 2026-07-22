@@ -144,6 +144,7 @@ Headed launches are marked (colored border + `🤖 <instance>` title prefix) so 
 - **One-shot latency** ~70 ms (process startup). For tight loops or event capture, prefer `attach` / a Python driver.
 - **Event isolation.** Each `attach` session sees only its own subscriptions.
 - **Multiple live instances** disable name auto-selection for **bare one-shot methods** — they error, asking you to specify one. `help` is the exception: it auto-picks any live instance (the protocol schema is identical across them), so it never needs naming.
+- **Launching from inside a PID-namespaced sandbox** (a container, bubblewrap, some agent-CLI sandboxes) records the sandbox-local PID in the shared registry. Liveness copes — the identity check disowns the aliased host PID and falls back to attributing the CDP port — but the instance is only reachable from outside while the sandbox shares the host network, and it dies with the sandbox. Prefer launching on the host; always pick a fresh port (never reuse another instance's — two browsers given the same `--remote-debugging-port` leave the loser running CDP-less).
 
 ## Further reading
 
