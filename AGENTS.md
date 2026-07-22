@@ -132,6 +132,8 @@ chrome-agent stop mysite-01 [--target 2 | --url foo]   # whole browser, or one t
 chrome-agent cleanup                      # drop dead instances + stale session dirs
 ```
 
+**Instances outlive your task — stopping them is part of the workflow, not optional cleanup.** A launched instance is a full Chrome process that keeps running (and accumulating memory) until stopped. When you're done with an instance you launched: `chrome-agent stop <instance>`, then **verify with `chrome-agent status`** that the instances you started are gone — the stop's return is not the verification; the status read is. If dead instances or stale session dirs linger, `chrome-agent cleanup`. Keep an instance alive only deliberately (e.g. its login session is wanted for later work) — never by omission.
+
 Headed launches are marked (colored border + `🤖 <instance>` title prefix) so a human can tell an agent-driven window from their own; `--no-window-border` disables it. Closing a headed window **auto-retires** its instance from the registry in real time (a transient CDP drop does not); `status` is real-time truth (port-based liveness). On Linux/X11 the window is pinned to the launching terminal's desktop (needs `xdotool`).
 
 **Fingerprint** spoofs user agent, viewport, language, and timezone via Chrome launch flags (no JS injection). It deliberately does **not** patch `navigator.webdriver`/`window.chrome` — an empirical audit (bot.sannysoft.com / CreepJS) found those overrides make Chrome *more* detectable, not less. WebRTC can still leak the real public IP via STUN regardless. Schema + audit: see the README.
