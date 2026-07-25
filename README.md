@@ -220,7 +220,7 @@ See [docs/collaboration-guide.md](docs/collaboration-guide.md) for:
 - The observation gap (what CDP sees vs what it misses)
 - Full interaction observation via the binding bridge
 
-For real-time observation using Claude Code's Monitor tool, see [docs/monitor-integration.md](docs/monitor-integration.md).
+For real-time observation using Claude Code's Monitor tool, see [AGENTS.md](AGENTS.md#reacting-to-events-as-they-happen-monitor) for the practical usage path (subscribing, discovering events via `help`, the gotchas), and [docs/monitor-integration.md](docs/monitor-integration.md) for the architecture and usage patterns in depth.
 
 ## Requirements
 

@@ -89,6 +89,79 @@ The attach stream is one JSON object per line — a ready line, then one per eve
 
 Each attach session has **isolated subscriptions** (others don't see yours); add/remove mid-session via stdin (`+Event`/`-Event`). One-shots **can't intercept `Network`** (they detach immediately) — use `attach`, or the Python API, for anything needing a persistent session. CDP observes **consequences** (navigations, network), not **causes** (clicks, scroll, keystrokes). If only one instance is live, the name can be omitted.
 
+## Reacting to events as they happen (Monitor)
+
+Backgrounding `attach` into a file gives you a log you have to remember to read. Handing `attach` to **Claude Code's Monitor tool** instead turns the same stream into notifications that interject into your session as events occur — you keep working, and the page tells you when something happened. No polling, no `sleep`, no re-checking.
+
+```
+Monitor tool:
+  command:     "chrome-agent attach mysite-01 +Page.frameNavigated +Page.loadEventFired
+                +Runtime.exceptionThrown +Network.loadingFailed 2>&1"
+  description: "mysite-01 — navigation + errors"
+  persistent:  true
+```
+
+That is the whole mechanism. `TaskStop` on the returned task id ends it; so does ending the session.
+
+**Run both channels at once** — they use separate CDP sessions and don't interfere:
+
+| | channel | use it for |
+| :-- | :-- | :-- |
+| **push** | Monitor + `attach` | *when* something happens — navigation, errors, API calls, loads |
+| **pull** | one-shot `chrome-agent <inst> Domain.method` | *what* something is — DOM, screenshot, page state |
+
+Heuristic: need to know **when** → push; need to know **what** → pull. So a click verified by push looks like this — you dispatch the input, then the consequences arrive on their own:
+
+```
+you:      chrome-agent mysite-01 Input.dispatchMouseEvent   (click submit)
+monitor:  Network.requestWillBeSent  → POST /api/orders
+monitor:  Page.frameNavigated        → /order/12345
+monitor:  Page.loadEventFired
+          ⇒ the click landed, the order posted, the confirmation loaded
+```
+
+### Discovering what you can subscribe to
+
+Don't guess event names, and don't limit yourself to the ones named on this page. `help` reads the protocol **out of the running browser**, so it always describes the CDP *this* Chrome implements — including surface newer than any bundled binding. Three levels, narrowing as you go:
+
+```bash
+chrome-agent help mysite-01                          # every domain, with descriptions
+chrome-agent help mysite-01 Network                  # that domain, split into Methods / Events / Types
+chrome-agent help mysite-01 Network.responseReceived # one event: full parameter signature
+```
+
+The middle level prints an explicit **`Events:`** block — that is your menu of `+Event` subscriptions for the domain. The third tells you what each event will hand you, so you know what there is to react to before subscribing.
+
+On Chrome 150 the live protocol exposes **57 domains, 668 methods, and 237 events**. An agent reaching only for `Page`, `Network`, and `Runtime` is working from a fraction of the available surface — when you need to react to something and don't know whether CDP can see it, enumerate the domain instead of assuming it can't.
+
+### Choosing what to subscribe to
+
+Subscribe to the events you would *act* on. Common starting points:
+
+```bash
++Page.frameNavigated +Page.loadEventFired                                    # following along, quiet
++Page.frameNavigated +Page.loadEventFired +Runtime.exceptionThrown \
+  +Network.loadingFailed                                                     # watching for trouble (good default)
++Page.frameNavigated +Page.loadEventFired +Network.responseReceived          # watching what the app calls
++Runtime.consoleAPICalled +Runtime.exceptionThrown                           # console
+```
+
+**Always include the failure events.** A happy-path-only subscription stays silent through an exception or a failed request, and silence is indistinguishable from "nothing has happened yet." Ask: *if this page threw right now, would my monitor say anything?*
+
+### Five things that will bite you
+
+1. **Append `2>&1`.** Only stdout becomes notifications. A wrong instance name makes `attach` write to **stderr** and exit with empty stdout — the monitor dies instantly and reports nothing, looking exactly like a quiet page.
+2. **Launch the browser first.** `attach` needs a live instance; there is nothing to retry into.
+3. **Don't over-subscribe.** Too many events and the monitor is stopped automatically. `Network.requestWillBeSent` is the usual culprit — a busy page emits hundreds per load. Drop it first, or filter downstream.
+4. **Filtering needs unbuffered tools.** `jq` buffers by default, so events stall or vanish — use `jq --unbuffered`, `grep --line-buffered`, `awk` with `fflush()`. `head` cannot flush at all; never put it in a monitored pipeline.
+5. **A single "tell me when X" is not a Monitor job.** Monitor is for *repeated* events, and `attach` never exits — so a monitor armed for one event stays armed until timeout. For a one-shot wait, use a background Bash command that exits on the condition instead.
+
+### Don't point `ws` at CDP
+
+Monitor can also open a WebSocket directly, and CDP *is* a WebSocket protocol — so aiming its `ws` source at `ws://127.0.0.1:<port>/devtools/page/<id>` looks like it should skip `attach` entirely.
+
+**It doesn't work, and it fails silently.** Measured against a live instance: the watch connects — no denial, no error — and then receives **zero** events for its entire lifetime. CDP emits nothing until a client *sends* `Domain.enable`, and Monitor's WebSocket source is receive-only. A control on the same URL in the same minute: without `Page.enable`, 0 events; with it, 6. Use `attach` — it holds a bidirectional session and sends the handshake for you.
+
 ## Commands and what they return
 
 Output is JSON on stdout. A one-shot prints the CDP method's **raw result object**, pretty-printed (shapes differ by method — check, don't assume). `launch`/`status` print structured JSON when stdout isn't a TTY. Errors go to **stderr** and exit non-zero, and are self-describing (an unknown instance lists the available ones; a CDP protocol error prints `CDP error <code>: <message>`).
@@ -148,7 +221,9 @@ Headed launches are marked (colored border + `🤖 <instance>` title prefix) so 
 
 ## Further reading
 
-- [README](README.md) — fingerprint schema, window-border internals, full feature set
-- [docs/collaboration-guide.md](docs/collaboration-guide.md) — multi-agent + human-agent workflows, the binding bridge
-- [docs/monitor-integration.md](docs/monitor-integration.md) — Claude Code Monitor integration
+These paths are relative to the repository root. When this file is read through a symlink from another project, resolve them against the chrome-agent checkout, not against the symlink's directory.
+
+- `README.md` — fingerprint schema, window-border internals, full feature set
+- `docs/collaboration-guide.md` — multi-agent + human-agent workflows, the binding bridge
+- `docs/monitor-integration.md` — Claude Code Monitor integration in depth: dual-channel architecture, usage patterns, troubleshooting
 - **Python API:** `from chrome_agent.cdp_client import CDPClient, get_ws_url` + the generated typed domain classes (`chrome_agent.domains.*`), for driving CDP in-process; `CDPClient.send(method=..., params=...)` reaches any method, bindings or not.
