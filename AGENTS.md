@@ -162,6 +162,22 @@ Monitor can also open a WebSocket directly, and CDP *is* a WebSocket protocol �
 
 **It doesn't work, and it fails silently.** Measured against a live instance: the watch connects — no denial, no error — and then receives **zero** events for its entire lifetime. CDP emits nothing until a client *sends* `Domain.enable`, and Monitor's WebSocket source is receive-only. A control on the same URL in the same minute: without `Page.enable`, 0 events; with it, 6. Use `attach` — it holds a bidirectional session and sends the handshake for you.
 
+### No Monitor tool? You can still be event-driven
+
+Monitor is a Claude Code capability. If your harness doesn't have one, you don't fall back to `sleep` — background `attach` to a file once, then block on a small waiter that returns the instant a matching event lands:
+
+```bash
+chrome-agent attach mysite-01 +Page.loadEventFired +Runtime.exceptionThrown \
+  > /tmp/events.jsonl 2>&1 &                                    # once
+
+python3 scripts/cdp-wait.py --file /tmp/events.jsonl \
+  --method Page.loadEventFired --timeout 20                     # per event
+```
+
+Needs only a backgrounded shell command and a file read. You lose the ability to work *while* events arrive, but you keep the precise wake — measured at 82 ms from navigation, against ~4.9 s wasted by a conservative `sleep 5`. It also catches events that fired *before* the wait started, which a bare `tail -f` silently drops.
+
+Full technique, pitfalls, and the reproducible proof: **[docs/event-driven-without-monitor.md](docs/event-driven-without-monitor.md)**.
+
 ## Commands and what they return
 
 Output is JSON on stdout. A one-shot prints the CDP method's **raw result object**, pretty-printed (shapes differ by method — check, don't assume). `launch`/`status` print structured JSON when stdout isn't a TTY. Errors go to **stderr** and exit non-zero, and are self-describing (an unknown instance lists the available ones; a CDP protocol error prints `CDP error <code>: <message>`).
@@ -226,4 +242,5 @@ These paths are relative to the repository root. When this file is read through 
 - `README.md` — fingerprint schema, window-border internals, full feature set
 - `docs/collaboration-guide.md` — multi-agent + human-agent workflows, the binding bridge
 - `docs/monitor-integration.md` — Claude Code Monitor integration in depth: dual-channel architecture, usage patterns, troubleshooting
+- `docs/event-driven-without-monitor.md` — event-driven observation for harnesses with no Monitor tool; `scripts/cdp-wait.py` + `scripts/cdp-wait-prove.sh`
 - **Python API:** `from chrome_agent.cdp_client import CDPClient, get_ws_url` + the generated typed domain classes (`chrome_agent.domains.*`), for driving CDP in-process; `CDPClient.send(method=..., params=...)` reaches any method, bindings or not.
