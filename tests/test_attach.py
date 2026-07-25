@@ -219,3 +219,93 @@ async def test_event_isolation(tmp_path):
     await cdp_b.send(method="Target.detachFromTarget", params={"sessionId": sid_b})
     await cdp_a.close()
     await cdp_b.close()
+
+
+# ---------------------------------------------------------------------------
+# SIGTERM shutdown (issue #1): attach must exit on plain SIGTERM while idle
+# ---------------------------------------------------------------------------
+
+
+def test_attach_sigterm_exits_while_idle(tmp_path):
+    """A SIGTERM must terminate an idle attach session promptly.
+
+    Reproduces issue #1: with stdin held open (the state of any
+    backgrounded attach) and a live websocket, the process must still
+    exit on plain SIGTERM -- no SIGKILL required.
+
+    Runs the real run_attach code path in a subprocess so the signal
+    delivery, asyncio.run lifecycle, and stdin pipe are all real.
+    """
+    import select
+    import signal as signal_mod
+    import time
+
+    from chrome_agent.launcher import launch_browser
+
+    reg_path = str(tmp_path / "registry.json")
+
+    # Auto-allocate the port: a hardcoded one can collide with an existing
+    # Chrome, leaving this launch CDP-less and attaching to a foreign browser.
+    result = asyncio.run(
+        launch_browser(
+            headless=True,
+            pin_to_desktop=False,
+            registry_path=reg_path,
+            working_dir=str(tmp_path),
+        )
+    )
+
+    stub = (
+        "import asyncio, sys\n"
+        "from chrome_agent.attach import run_attach\n"
+        f"asyncio.run(run_attach(instance_name={result.name!r}, "
+        f"subscriptions=['Page.loadEventFired'], registry_path={reg_path!r}))\n"
+    )
+
+    proc = subprocess.Popen(
+        args=[sys.executable, "-c", stub],
+        stdin=subprocess.PIPE,   # held open: the issue's `sleep infinity |` state
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        # Wait for the ready line before signaling
+        readable, _, _ = select.select([proc.stdout], [], [], 15)
+        assert readable, "attach subprocess never produced its ready line"
+        first_line = proc.stdout.readline()
+        if not first_line:
+            proc.wait(timeout=5)
+            pytest.fail(
+                "attach subprocess died before its ready line "
+                f"(returncode {proc.returncode}): "
+                f"{proc.stderr.read().decode(errors='replace')[:1000]}"
+            )
+        ready = json.loads(first_line)
+        assert ready.get("status") == "ready"
+
+        proc.send_signal(signal_mod.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pytest.fail("attach ignored SIGTERM: still alive 5s after signal (issue #1)")
+        assert proc.returncode == 0, (
+            f"attach exited non-gracefully on SIGTERM (returncode {proc.returncode}): "
+            f"{proc.stderr.read().decode(errors='replace')[:500]}"
+        )
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        try:
+            os.kill(result.pid, signal_mod.SIGTERM)
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    os.kill(result.pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.2)
+        except ProcessLookupError:
+            pass
+        import shutil
+        shutil.rmtree(result.user_data_dir, ignore_errors=True)

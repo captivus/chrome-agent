@@ -222,7 +222,28 @@ async def run_attach(
         for event_name in subscriptions:
             await _subscribe(event_name)
 
-        # Phase 7: Signal readiness
+        # Phase 7: Install signal handlers, then signal readiness.
+        # Handlers must be registered BEFORE the ready line: a supervisor
+        # that reads "ready" and immediately sends SIGTERM must get the
+        # graceful shutdown path, not the default disposition.
+        #
+        # Register via the event loop so the signal actually wakes it.
+        # A plain signal.signal handler sets the event but nothing wakes
+        # asyncio.wait, leaving the process unkillable by SIGTERM while
+        # stdin is held open and the websocket is live (issue #1).
+        # SIGINT gets the same treatment: its default (KeyboardInterrupt)
+        # terminates but skips the clean detach and can spray a traceback
+        # into a redirected event stream.
+        shutdown_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, shutdown_event.set)
+            except (NotImplementedError, OSError):
+                # Windows or non-main thread -- fall back to the sync handler;
+                # shutdown_task below still makes the event a wake source.
+                signal.signal(sig, lambda signum, frame: shutdown_event.set())
+
         print(json.dumps({
             "status": "ready",
             "sessionId": session_id[:16],
@@ -230,12 +251,6 @@ async def run_attach(
         }), flush=True)
 
         # Phase 8: Run stdin loop and connection monitor concurrently
-        shutdown_event = asyncio.Event()
-
-        def _signal_handler(signum, frame):
-            shutdown_event.set()
-
-        signal.signal(signal.SIGTERM, _signal_handler)
 
         async def stdin_loop():
             loop = asyncio.get_event_loop()
@@ -262,19 +277,23 @@ async def run_attach(
 
         async def monitor_connection():
             """Wait for the WebSocket connection to drop."""
-            # Wait for the recv task to complete (more reliable than polling _connected)
+            # Wait for the recv task to complete (more reliable than polling
+            # _connected). Shielded: when this task is cancelled at shutdown,
+            # the cancellation must not propagate into the client's recv task,
+            # which cdp.close() still needs to await cleanly.
             if cdp._recv_task is not None:
                 try:
-                    await cdp._recv_task
+                    await asyncio.shield(cdp._recv_task)
                 except Exception:
                     pass
             print(json.dumps({"error": "Browser disconnected"}), flush=True)
 
         stdin_task = asyncio.create_task(stdin_loop())
         monitor_task = asyncio.create_task(monitor_connection())
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
 
         done, pending = await asyncio.wait(
-            [stdin_task, monitor_task],
+            [stdin_task, monitor_task, shutdown_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
         for task in pending:
@@ -284,14 +303,19 @@ async def run_attach(
             except (asyncio.CancelledError, Exception):
                 pass  # Swallow all shutdown exceptions
 
-        # Phase 9: Clean shutdown
+        # Phase 9: Clean shutdown. Bounded: cdp.send has no timeout of its
+        # own, and an unbounded await here on a half-open connection would
+        # make the process unkillable by SIGTERM again (issue #1).
         try:
-            await cdp.send(
-                method="Target.detachFromTarget",
-                params={"sessionId": session_id},
+            await asyncio.wait_for(
+                cdp.send(
+                    method="Target.detachFromTarget",
+                    params={"sessionId": session_id},
+                ),
+                timeout=2.0,
             )
         except Exception:
-            pass  # Connection may already be dead
+            pass  # Connection may already be dead or unresponsive
 
     finally:
         try:
