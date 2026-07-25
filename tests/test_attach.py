@@ -112,71 +112,67 @@ async def test_attach_instance_not_found(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_attach_receives_events(tmp_path):
-    """Attach session receives events caused by a separate CDP connection."""
-    reg_path = str(tmp_path / "registry.json")
+async def test_attach_receives_events(browser_session):
+    """Attach session receives events caused by a separate CDP connection.
 
-    # Register the conftest browser (port 9333)
-    register(
-        working_dir="/home/user/testproject",
-        pid=os.getpid(),  # use our PID so it shows as alive
-        browser_version="Chrome/147",
-        user_data_dir=str(tmp_path / "session"),
-        port_override=9222,
-        registry_path=reg_path,
-    )
-
-    # Get the browser-level WebSocket URL and find the page target
-    browser_ws = get_ws_url(port=9222, target_type="browser")
+    Runs against the isolated session-scoped fixture browser (its own port and
+    registry), NOT the default debug port -- an earlier version hardcoded 9222
+    and drove whatever Chrome happened to be running there. Operates on a tab
+    it creates and closes, so a failure cannot leak state into the shared
+    fixture browser or the next test.
+    """
+    browser_ws = get_ws_url(port=browser_session.port, target_type="browser")
     cdp_navigator = CDPClient(ws_url=browser_ws)
     await cdp_navigator.connect()
-
-    targets_result = await cdp_navigator.send(method="Target.getTargets")
-    page_targets = [t for t in targets_result["targetInfos"] if t["type"] == "page"]
-    target_id = page_targets[0]["targetId"]
-
-    # Create a navigator session
-    nav_session = await cdp_navigator.send(
-        method="Target.attachToTarget",
-        params={"targetId": target_id, "flatten": True},
-    )
-    nav_sid = nav_session["sessionId"]
-
-    # Create an observer session (simulating what attach does)
     cdp_observer = CDPClient(ws_url=browser_ws)
     await cdp_observer.connect()
 
-    obs_session = await cdp_observer.send(
-        method="Target.attachToTarget",
-        params={"targetId": target_id, "flatten": True},
+    # A dedicated tab for this test -- never a pre-existing shared one.
+    created = await cdp_navigator.send(
+        method="Target.createTarget", params={"url": "about:blank"}
     )
-    obs_sid = obs_session["sessionId"]
+    target_id = created["targetId"]
 
-    # Subscribe to Page events on observer session
-    await cdp_observer.send(method="Page.enable", session_id=obs_sid)
-    events_received = []
-    cdp_observer.on(
-        event="Page.loadEventFired",
-        callback=lambda params: events_received.append(params),
-        session_id=obs_sid,
-    )
+    try:
+        # Navigator session (drives the page)
+        nav_session = await cdp_navigator.send(
+            method="Target.attachToTarget",
+            params={"targetId": target_id, "flatten": True},
+        )
+        nav_sid = nav_session["sessionId"]
 
-    # Navigate via the navigator session (different session)
-    await cdp_navigator.send(
-        method="Page.navigate",
-        params={"url": "https://example.com"},
-        session_id=nav_sid,
-    )
-    await asyncio.sleep(3)
+        # Observer session (simulating what attach does), subscribed to Page events
+        obs_session = await cdp_observer.send(
+            method="Target.attachToTarget",
+            params={"targetId": target_id, "flatten": True},
+        )
+        obs_sid = obs_session["sessionId"]
+        await cdp_observer.send(method="Page.enable", session_id=obs_sid)
+        events_received = []
+        cdp_observer.on(
+            event="Page.loadEventFired",
+            callback=lambda params: events_received.append(params),
+            session_id=obs_sid,
+        )
 
-    # Observer should have received the Page.loadEventFired event
-    assert len(events_received) > 0, "Observer should receive events from navigator's action"
+        # Navigate via the navigator session (a different session)
+        await cdp_navigator.send(
+            method="Page.navigate",
+            params={"url": "https://example.com"},
+            session_id=nav_sid,
+        )
+        await asyncio.sleep(3)
 
-    # Cleanup
-    await cdp_navigator.send(method="Target.detachFromTarget", params={"sessionId": nav_sid})
-    await cdp_observer.send(method="Target.detachFromTarget", params={"sessionId": obs_sid})
-    await cdp_navigator.close()
-    await cdp_observer.close()
+        assert len(events_received) > 0, "Observer should receive events from navigator's action"
+    finally:
+        try:
+            await cdp_navigator.send(
+                method="Target.closeTarget", params={"targetId": target_id}
+            )
+        except Exception:
+            pass
+        await cdp_navigator.close()
+        await cdp_observer.close()
 
 
 # ---------------------------------------------------------------------------
@@ -185,47 +181,52 @@ async def test_attach_receives_events(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_event_isolation(tmp_path):
-    """Two sessions on the same target have isolated event subscriptions."""
-    browser_ws = get_ws_url(port=9222, target_type="browser")
+async def test_event_isolation(browser_session):
+    """Two sessions on the same target have isolated event subscriptions.
 
-    targets_result_raw = CDPClient(ws_url=browser_ws)
-    await targets_result_raw.connect()
-    targets_result = await targets_result_raw.send(method="Target.getTargets")
-    page_targets = [t for t in targets_result["targetInfos"] if t["type"] == "page"]
-    target_id = page_targets[0]["targetId"]
-    await targets_result_raw.close()
+    Runs against the isolated fixture browser on its own tab (created and
+    closed here), not the default debug port.
+    """
+    browser_ws = get_ws_url(port=browser_session.port, target_type="browser")
 
-    # Session A: subscribes to Network
     cdp_a = CDPClient(ws_url=browser_ws)
     await cdp_a.connect()
-    sa = await cdp_a.send(method="Target.attachToTarget", params={"targetId": target_id, "flatten": True})
-    sid_a = sa["sessionId"]
-    await cdp_a.send(method="Network.enable", session_id=sid_a)
-    a_network = []
-    cdp_a.on(event="Network.requestWillBeSent", callback=lambda p: a_network.append(p), session_id=sid_a)
-
-    # Session B: does NOT subscribe to Network
     cdp_b = CDPClient(ws_url=browser_ws)
     await cdp_b.connect()
-    sb = await cdp_b.send(method="Target.attachToTarget", params={"targetId": target_id, "flatten": True})
-    sid_b = sb["sessionId"]
-    b_network = []
-    cdp_b.on(event="Network.requestWillBeSent", callback=lambda p: b_network.append(p), session_id=sid_b)
 
-    # Navigate via session B
-    await cdp_b.send(method="Page.navigate", params={"url": "https://example.com"}, session_id=sid_b)
-    await asyncio.sleep(3)
+    created = await cdp_a.send(
+        method="Target.createTarget", params={"url": "about:blank"}
+    )
+    target_id = created["targetId"]
 
-    # Session A should have Network events, Session B should not
-    assert len(a_network) > 0, "Session A (Network enabled) should receive network events"
-    assert len(b_network) == 0, "Session B (Network NOT enabled) should NOT receive network events"
+    try:
+        # Session A: subscribes to Network
+        sa = await cdp_a.send(method="Target.attachToTarget", params={"targetId": target_id, "flatten": True})
+        sid_a = sa["sessionId"]
+        await cdp_a.send(method="Network.enable", session_id=sid_a)
+        a_network = []
+        cdp_a.on(event="Network.requestWillBeSent", callback=lambda p: a_network.append(p), session_id=sid_a)
 
-    # Cleanup
-    await cdp_a.send(method="Target.detachFromTarget", params={"sessionId": sid_a})
-    await cdp_b.send(method="Target.detachFromTarget", params={"sessionId": sid_b})
-    await cdp_a.close()
-    await cdp_b.close()
+        # Session B: does NOT subscribe to Network
+        sb = await cdp_b.send(method="Target.attachToTarget", params={"targetId": target_id, "flatten": True})
+        sid_b = sb["sessionId"]
+        b_network = []
+        cdp_b.on(event="Network.requestWillBeSent", callback=lambda p: b_network.append(p), session_id=sid_b)
+
+        # Navigate via session B
+        await cdp_b.send(method="Page.navigate", params={"url": "https://example.com"}, session_id=sid_b)
+        await asyncio.sleep(3)
+
+        # Session A should have Network events, Session B should not
+        assert len(a_network) > 0, "Session A (Network enabled) should receive network events"
+        assert len(b_network) == 0, "Session B (Network NOT enabled) should NOT receive network events"
+    finally:
+        try:
+            await cdp_a.send(method="Target.closeTarget", params={"targetId": target_id})
+        except Exception:
+            pass
+        await cdp_a.close()
+        await cdp_b.close()
 
 
 # ---------------------------------------------------------------------------
