@@ -18,8 +18,10 @@ from chrome_agent.registry import (
     cleanup,
     deregister,
     enumerate_instances,
+    instance_is_alive,
     lookup,
     register,
+    registration_status,
 )
 
 
@@ -371,3 +373,96 @@ def test_corrupted_registry_recovery(tmp_path):
         registry_path=reg_path,
     )
     assert info.name == "myproject-01"
+
+
+# ---------------------------------------------------------------------------
+# registration_status: three-way registered/retired/unknown verdict
+# ---------------------------------------------------------------------------
+
+
+def test_registration_status_present(tmp_path):
+    """A registered name reads as present."""
+    reg_path = str(tmp_path / "registry.json")
+    info = register(
+        working_dir="/home/user/myproject",
+        pid=os.getpid(),
+        browser_version="Chrome/147",
+        user_data_dir=str(tmp_path / "session"),
+        registry_path=reg_path,
+    )
+    assert registration_status(info.name, registry_path=reg_path) == "present"
+
+
+def test_registration_status_retired_when_absent_among_others(tmp_path):
+    """A name absent from a non-empty registry reads as retired (genuine)."""
+    reg_path = str(tmp_path / "registry.json")
+    # Two instances registered, then one deregistered. The survivor proves the
+    # file is healthy, so the removed name's absence is a real deregister.
+    a = register(
+        working_dir="/home/user/proj-a",
+        pid=os.getpid(),
+        browser_version="Chrome/147",
+        user_data_dir=str(tmp_path / "a"),
+        registry_path=reg_path,
+    )
+    register(
+        working_dir="/home/user/proj-b",
+        pid=os.getpid(),
+        browser_version="Chrome/147",
+        user_data_dir=str(tmp_path / "b"),
+        registry_path=reg_path,
+    )
+    deregister(instance_name=a.name, registry_path=reg_path)
+    assert registration_status(a.name, registry_path=reg_path) == "retired"
+
+
+def test_registration_status_unknown_when_empty(tmp_path):
+    """An empty registry ({}) is ambiguous, not retired."""
+    reg_path = str(tmp_path / "registry.json")
+    with open(reg_path, "w") as f:
+        f.write("{}")
+    assert registration_status("anything", registry_path=reg_path) == "unknown"
+
+
+def test_registration_status_unknown_when_missing(tmp_path):
+    """A missing registry file is ambiguous, not retired."""
+    reg_path = str(tmp_path / "does-not-exist.json")
+    assert registration_status("anything", registry_path=reg_path) == "unknown"
+
+
+def test_registration_status_unknown_when_corrupt(tmp_path):
+    """A corrupt registry reads as unknown -- NEVER as retired.
+
+    This is the guard against the corrupt-{} false positive: a torn read must
+    not signal every attach observer that its instance vanished.
+    """
+    reg_path = str(tmp_path / "registry.json")
+    with open(reg_path, "w") as f:
+        f.write("{invalid json content")
+    assert registration_status("anything", registry_path=reg_path) == "unknown"
+
+
+def test_instance_is_alive_true_for_live_pid(tmp_path):
+    """instance_is_alive is True when the recorded PID is a live process of ours."""
+    reg_path = str(tmp_path / "registry.json")
+    info = register(
+        working_dir="/home/user/myproject",
+        pid=os.getpid(),  # our own PID -- live and ours
+        browser_version="Chrome/147",
+        user_data_dir=str(tmp_path / "session"),
+        registry_path=reg_path,
+    )
+    assert instance_is_alive(info) is True
+
+
+def test_instance_is_alive_false_for_dead_pid_and_dead_port(tmp_path):
+    """instance_is_alive is False when the PID is gone and nothing listens."""
+    info = InstanceInfo(
+        name="ghost-01",
+        port=59999,  # nothing listening here
+        pid=2147483646,  # a PID that does not exist
+        browser_version="Chrome/147",
+        user_data_dir="/tmp/nonexistent-profile",
+        pid_start=None,
+    )
+    assert instance_is_alive(info) is False

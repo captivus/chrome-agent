@@ -16,9 +16,50 @@ import warnings
 
 from .cdp_client import CDPClient, get_ws_url
 from .errors import CDPError, NoPageError
-from .registry import InstanceNotFoundError, lookup
+from .registry import (
+    InstanceInfo,
+    InstanceNotFoundError,
+    instance_is_alive,
+    lookup,
+    registration_status,
+)
 
 logger = logging.getLogger(__name__)
+
+# How often the attach observer re-checks that its instance still exists and
+# its browser is still alive, and how many consecutive adverse checks it
+# requires before exiting. The strike window absorbs a transient CDP-port blip
+# (host suspend/resume) or a torn registry read without killing a healthy
+# observer; a genuine retire or a truly-dead browser persists across it.
+# Module-level so tests can shrink them for a fast, faithful subprocess run.
+_LIVENESS_POLL_SECONDS = 15.0
+_LIVENESS_STRIKES = 2
+
+
+def _liveness_verdict(info: InstanceInfo, registry_path: str | None) -> str | None:
+    """Whether an attach observer should shut down, and why.
+
+    Returns a human-readable reason string when the observer has outlived its
+    purpose, or None when it should keep running. Two exit conditions:
+
+    - The instance was retired from the registry (``registration_status`` is
+      "retired" -- a genuine deregister, distinguished from a corrupt/empty
+      read which reads as "unknown" and does NOT trigger exit). This is the
+      orphan case that a dropped-socket check alone never catches: the browser
+      can stay alive and listening while its registry entry is removed.
+    - The browser is gone or is no longer ours (``instance_is_alive`` False):
+      the port is dead, or has been reclaimed by a different instance. This
+      catches a wedged half-open socket that the passive connection monitor
+      never sees drop.
+
+    Pure given its two registry calls, so every branch is unit-testable
+    without a live browser.
+    """
+    if registration_status(info.name, registry_path=registry_path) == "retired":
+        return "instance retired from registry"
+    if not instance_is_alive(info):
+        return "browser no longer running"
+    return None
 
 
 def _suppress_shutdown_noise() -> None:
@@ -275,6 +316,31 @@ async def run_attach(
             except (EOFError, asyncio.CancelledError):
                 pass
 
+        async def liveness_loop():
+            """Exit when the instance is retired or its browser is gone.
+
+            The passive connection monitor only fires on a cleanly-dropped
+            websocket, so an observer can outlive its purpose indefinitely --
+            the browser deregistered out from under it, or a half-open socket
+            that never signals a drop. This active poll bounds that lifetime.
+            The blocking registry/port/proc work runs in the default executor
+            so it never stalls the event loop that is streaming events.
+            """
+            loop = asyncio.get_running_loop()
+            strikes = 0
+            while not shutdown_event.is_set():
+                await asyncio.sleep(_LIVENESS_POLL_SECONDS)
+                reason = await loop.run_in_executor(
+                    None, _liveness_verdict, info, registry_path
+                )
+                if reason is None:
+                    strikes = 0
+                    continue
+                strikes += 1
+                if strikes >= _LIVENESS_STRIKES:
+                    print(json.dumps({"status": "shutdown", "reason": reason}), flush=True)
+                    return
+
         async def monitor_connection():
             """Wait for the WebSocket connection to drop."""
             # Wait for the recv task to complete (more reliable than polling
@@ -291,9 +357,10 @@ async def run_attach(
         stdin_task = asyncio.create_task(stdin_loop())
         monitor_task = asyncio.create_task(monitor_connection())
         shutdown_task = asyncio.create_task(shutdown_event.wait())
+        liveness_task = asyncio.create_task(liveness_loop())
 
         done, pending = await asyncio.wait(
-            [stdin_task, monitor_task, shutdown_task],
+            [stdin_task, monitor_task, shutdown_task, liveness_task],
             return_when=asyncio.FIRST_COMPLETED,
         )
         for task in pending:

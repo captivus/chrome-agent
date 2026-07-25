@@ -105,6 +105,8 @@ chrome-agent myproject-01 Page.navigate '{"url": "https://example.com"}'
 
 Subscribe to exactly the events you need. Each attach session is isolated -- subscribing to Network events in one session does not affect other sessions.
 
+An attach session **exits on its own once it has outlived its purpose** -- when its instance is retired from the registry, or its browser is gone or no longer reachable -- so a backgrounded observer never lingers indefinitely after the thing it was watching is gone. It also shuts down cleanly (detaching its CDP session) on `SIGTERM`/`SIGINT`, even while idle with no events arriving. A transient registry read or CDP-port blip is ridden out rather than acted on.
+
 ## Operational Commands
 
 ```

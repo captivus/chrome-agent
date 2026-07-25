@@ -344,6 +344,57 @@ def enumerate_instances(
     return results
 
 
+def instance_is_alive(info: InstanceInfo) -> bool:
+    """Whether the browser behind a resolved instance is still usable and ours.
+
+    Public wrapper over the ``_instance_is_alive`` liveness ladder for callers
+    that hold an ``InstanceInfo`` captured earlier (e.g. an attach observer
+    re-checking its own instance on a timer). A browser's pid/port/profile do
+    not change for its lifetime, so the fields captured at startup stay valid.
+    """
+    return _instance_is_alive(
+        info.pid,
+        info.port,
+        pid_start=info.pid_start,
+        user_data_dir=info.user_data_dir,
+    )
+
+
+def registration_status(
+    instance_name: str,
+    registry_path: str | None = None,
+) -> str:
+    """Whether an instance name is still registered -- a three-way verdict.
+
+    Distinguishes a genuine deregister from a transient/corrupt registry read,
+    which matters for any consumer that exits when its instance is retired: a
+    corrupt file must not be misread as "everyone is gone".
+
+    Returns:
+      "present"  -- the name is a key in a readable, parseable registry.
+      "retired"  -- the registry parsed to a NON-EMPTY dict and the name is
+                    absent. The other entries prove the file is healthy, so the
+                    absence is a real deregister, not a torn/empty read.
+      "unknown"  -- the registry is missing, empty ({}), or unparseable.
+                    Absence here is ambiguous and must NOT be read as retired.
+
+    Reads and parses the file directly rather than via ``_load_registry``,
+    which collapses a corrupt file to {} and would erase the corrupt-vs-empty
+    distinction this function exists to preserve.
+    """
+    path = _resolve_path(registry_path)
+    if not os.path.exists(path):
+        return "unknown"
+    try:
+        with open(path) as f:
+            registry = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return "unknown"
+    if not isinstance(registry, dict) or not registry:
+        return "unknown"
+    return "present" if instance_name in registry else "retired"
+
+
 def stop(
     instance_name: str,
     target_id: str | None = None,
