@@ -42,11 +42,11 @@ flowchart TB
 
 Both channels connect to the same browser simultaneously. Chrome multiplexes CDP connections -- they don't interfere. Each attach session's event subscriptions are isolated: subscribing to Network events in one session does not flood another session with Network events.
 
-### Why attach instead of session mode?
+### Why attach?
 
 `chrome-agent attach` is purpose-built for Monitor. It subscribes to events on startup, streams them to stdout as JSON lines, and requires no stdin interaction for its primary use case (event observation). The agent sends commands in parallel via one-shot calls on the action channel.
 
-`chrome-agent session` reads commands from stdin and writes events to stdout. Monitor can't write to stdin, so session mode through Monitor would give event observation but no way to send commands. The dual-channel architecture avoids this limitation entirely: `attach` for observation, one-shot for action.
+The alternative that looks appealing -- pointing Monitor's WebSocket source straight at Chrome's CDP endpoint, skipping `attach` -- does not work, and fails in the worst way: it connects without error and then receives nothing at all. CDP emits no events until a client *sends* a `Domain.enable`, and Monitor's WebSocket source is receive-only. Measured on one target within a single minute: with no `Page.enable` sent, 0 events; with it, 6. A watch that looks healthy and reports nothing is indistinguishable from a quiet page, so prefer `attach`, which holds a bidirectional session and performs the handshake itself.
 
 ## The Attach Command
 
@@ -124,12 +124,12 @@ On startup, attach emits a ready line:
 
 ### Filtering Downstream
 
-Attach passes events through without filtering. If you need to reduce noise, filter downstream with standard tools:
+Attach passes events through without filtering. If you need to reduce noise, filter downstream with standard tools -- but **every stage of the pipeline must flush per line**, or events stall in a buffer until enough accumulate. `jq` buffers by default (`--unbuffered`), `grep` needs `--line-buffered`, `awk` needs `fflush()`, and `head` cannot flush at all, so never put it in a monitored pipeline.
 
 ```bash
 # Only show navigation events
 chrome-agent attach myapp +Page.frameNavigated +Page.loadEventFired \
-  +Network.requestWillBeSent | jq 'select(.method | startswith("Page."))'
+  +Network.requestWillBeSent | jq --unbuffered 'select(.method | startswith("Page."))'
 
 # Save all events to a file while also watching for errors
 chrome-agent attach myapp +Page.frameNavigated +Page.loadEventFired \
@@ -315,6 +315,12 @@ To fully stop observing: use TaskStop with the monitor's task ID. Then the agent
 **Monitor auto-stops:** The page is generating too many events. Subscribe to fewer events -- remove `Network.requestWillBeSent` first (high-traffic pages can produce hundreds of network events per load). If you need network visibility on noisy pages, filter downstream with `jq` and pipe only matched lines to a secondary script that prints to stdout.
 
 **No events appearing:** Check that the browser is running (`chrome-agent status`). The attach command prints a `{"status": "ready", ...}` line on startup -- if you don't see this, it failed to connect. Most common cause: the browser wasn't launched yet. Launch first, then start the attach session.
+
+Note that a startup failure is **invisible through Monitor by default**: `attach` writes its error to stderr and exits with empty stdout, and only stdout becomes notifications. A wrong or not-yet-registered instance name therefore produces a monitor that dies within milliseconds and reports nothing -- indistinguishable from a page that simply hasn't done anything. Append `2>&1` to the monitored command so the error surfaces as an event:
+
+```bash
+chrome-agent attach myapp +Page.frameNavigated +Page.loadEventFired 2>&1
+```
 
 **Events appear delayed:** This should not happen with the `attach` command, which flushes every line. If you are writing a custom observation script, ensure all `print()` calls use `flush=True`.
 
