@@ -14,7 +14,7 @@ import sys
 
 
 # Operational commands -- checked first during routing
-OPERATIONAL_COMMANDS = {"launch", "status", "attach", "help", "cleanup", "stop"}
+OPERATIONAL_COMMANDS = {"launch", "status", "attach", "help", "cleanup", "stop", "guide"}
 
 
 def _extract_flags(argv: list[str]) -> tuple[list[str], str | None, str | None]:
@@ -45,6 +45,23 @@ def _extract_flags(argv: list[str]) -> tuple[list[str], str | None, str | None]:
     return remaining, target_spec, url_spec
 
 
+def _print_guide(args: list[str]) -> None:
+    """Print the bundled agent guide (AGENTS.md), or just its path.
+
+    The guide ships inside the package, so it is available from any install
+    without a checkout. `--path` prints the file location instead of its
+    contents, which is usually what an agent wants: reading the file with its
+    own tools beats paging 20+ KB through stdout.
+    """
+    from importlib.resources import files
+
+    guide = files("chrome_agent").joinpath("AGENTS.md")
+    if "--path" in args:
+        print(guide)
+    else:
+        print(guide.read_text(encoding="utf-8"), end="")
+
+
 def _print_static_usage() -> None:
     """Print static usage when no browser is available for protocol listing."""
     print("chrome-agent -- CLI for AI agents to control Chrome via CDP\n")
@@ -56,6 +73,7 @@ def _print_static_usage() -> None:
     print("  help [<instance>] [Domain | Domain.method]               Protocol discovery")
     print("  stop <instance>                                            Stop a browser gracefully")
     print("  cleanup                                                   Remove stale instances")
+    print("  guide [--path]                                            Print this tool's agent guide")
     print()
     print("  --version, -V                                            Show version and exit")
     print()
@@ -472,6 +490,8 @@ def main() -> None:
             _run_stop(args=rest, target_spec=target_spec, url_spec=url_spec)
         elif command == "cleanup":
             _run_cleanup()
+        elif command == "guide":
+            _print_guide(args=rest)
         return
 
     # Disambiguate "instance name" vs "bare Domain.method":

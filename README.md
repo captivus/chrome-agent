@@ -207,6 +207,21 @@ It deliberately does **not** patch `navigator.webdriver`, `navigator.platform`, 
 
 See [AGENTS.md](AGENTS.md) for concise agent instructions (the standard for AI agent tool documentation). It covers the mental model (address an instance, send any CDP command), the sense ⇄ act loop, the two channels, the command reference, and gotchas.
 
+**The guide ships with the package**, so an agent can reach it from any install without a checkout:
+
+```bash
+chrome-agent guide          # print the guide
+chrome-agent guide --path   # print its path, to read with your own file tools
+```
+
+`--path` is usually what you want: reading the file directly beats paging 20+ KB through stdout. The command is listed in `chrome-agent --help`, which is how an agent meeting this tool for the first time finds it.
+
+The bundled copy is captured when the release is built, so it always matches the version installed. To make it load automatically -- most agent harnesses read an `AGENTS.md` from the *project* root, not from site-packages -- link it into your project:
+
+```bash
+ln -s "$(chrome-agent guide --path)" AGENTS-chrome-agent.md
+```
+
 **`AGENTS.md` is a tailorable example, not gospel.** Its *mechanics* are exact, but the operating judgment in it is general -- adapt it to your own sites, tasks, and constraints. A good pattern is to keep a private, project-specific layer on top -- site-specific field notes, extraction playbooks, hard-won gotchas -- that *references* this public manual and extends it, rather than forking a separate set of instructions. Grow yours the same way.
 
 ## Collaboration
