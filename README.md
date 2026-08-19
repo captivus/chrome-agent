@@ -42,6 +42,15 @@ uv add chrome-agent
 
 Requires Google Chrome or Chromium installed on the system. Single runtime dependency (`websockets`). No Playwright, no browser downloads.
 
+The browser is found by checking the platform's well-known install paths first, then `$PATH`. For anything else -- Chrome for Testing, a user-local install, a second channel you want to pin -- name it explicitly:
+
+```bash
+chrome-agent launch --binary /opt/chrome-for-testing/chrome
+CHROME_AGENT_BINARY=/opt/chrome-for-testing/chrome chrome-agent launch
+```
+
+An override is authoritative: if the path is not executable the launch fails and names it, rather than silently falling back to a different browser than the one you asked for.
+
 ## Quick Start
 
 ```bash
@@ -110,13 +119,18 @@ An attach session **exits on its own once it has outlived its purpose** -- when 
 ## Operational Commands
 
 ```
-chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT] [--no-window-border]
+chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT] [--binary PATH] [--no-window-border]
 chrome-agent status [<instance>]
 chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
 chrome-agent stop <instance> [--target SPEC] [--url SUBSTRING]
 chrome-agent help [<instance>] [Domain | Domain.method]
 chrome-agent cleanup
 chrome-agent --version
+
+chrome-agent eval [<instance>] <expr | --file PATH | -> [--json]
+chrome-agent screenshot [<instance>] [-o FILE] [--full-page] [--selector CSS] [--format png|jpeg] [--quality N]
+chrome-agent wait [<instance>] <Domain.event ...> [--timeout SECS] [--contains SUBSTRING]
+chrome-agent navigate [<instance>] <URL> [--wait load|domcontentloaded|none] [--timeout SECS]
 ```
 
 | Command | Description |
@@ -128,10 +142,50 @@ chrome-agent --version
 | `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |
 | `cleanup` | Remove stale instances (dead browsers) and their session directories. |
 | `--version` | Print the installed chrome-agent version (`-V` alias) and exit. |
+| `eval` | Run JavaScript and print the resulting value. Source comes from an argument, `--file`, or stdin (`-`), which sidesteps JSON-inside-shell quoting. Promises are awaited; a page exception exits 1. |
+| `screenshot` | Capture the page to a file -- base64 decoding included. `--full-page` captures beyond the viewport, `--selector` captures one element. |
+| `wait` | Block until a CDP event fires, then print it. Exits 1 on timeout. Replaces fixed `sleep`s in scripted flows. |
+| `navigate` | Navigate, wait for the document to load, and report the main document's HTTP status -- which raw `Page.navigate` never returns. |
 
 Instances are tracked in a registry at `/tmp/chrome-agent/registry.json`. A headed browser's instance is **automatically removed from the registry when its window is closed** (its session directory is cleaned up too), so `status` reflects what is actually running. Liveness is determined by **process identity plus port attribution**, not a bare PID-existence check: the recorded PID counts only if it is a live process of the launching user whose start time matches what was recorded at launch (so a recycled or namespace-local PID never masquerades as the browser), and a listening CDP port counts only if a process claiming that port with this instance's profile directory can be found -- so browsers started via wrapper/snap launchers (which fork the real browser into another process) are still reported correctly, while a port since claimed by a *different* browser is not mistaken for this one. A **transient connection drop does not retire a live instance**: a host suspend/resume severs the supervisor's CDP connection while Chrome keeps running, so the supervisor reconnects and keeps supervising; retirement happens only once the CDP port stops listening. `cleanup` removes any entries that remain (headless instances, or browsers that were killed abruptly).
 
 Two consequences worth knowing. **Launching from inside a PID-namespaced sandbox** (a container, bubblewrap, some agent-CLI sandboxes) records the sandbox's local PID in the shared registry; the identity check recognizes such an entry as stale once its browser is gone, instead of treating the aliased host PID as a live browser forever. **`stop` verifies its target before acting**: it never sends `Browser.close` to a port that is serving a different browser (it terminates the instance's own verified process instead, or just cleans up the stale entry), and its SIGTERM fallback only ever fires at a PID verified to be the instance's own browser process.
+
+## Convenience Verbs
+
+Three operations dominate agent use and are awkward as raw CDP calls, so each has a verb. They are wrappers, not a layer: the raw form still reaches every method, and nothing is validated against a bundled schema.
+
+```bash
+# JavaScript without the JSON-inside-shell quoting fight
+chrome-agent eval 'document.title'
+chrome-agent eval --file scrape.js          # multi-line JS, no escaping
+echo 'document.readyState' | chrome-agent eval -
+```
+
+`eval` prints the **value** -- a string as itself, anything else as JSON -- because `Runtime.evaluate`'s envelope (`result.result.value`) is almost never what the caller wants. Promises are awaited. `--json` returns the full response. A thrown page exception goes to stderr and exits 1, so an error can never be mistaken for a result.
+
+```bash
+# Screenshots land on disk, already decoded
+chrome-agent screenshot -o page.png
+chrome-agent screenshot -o full.png --full-page
+chrome-agent screenshot -o button.png --selector '#submit'
+```
+
+```bash
+# Wait for an event instead of guessing with sleep
+chrome-agent wait Page.loadEventFired --timeout 15
+chrome-agent wait Network.responseReceived --contains example.com
+```
+
+```bash
+# Navigate with a load barrier and a real status code
+chrome-agent navigate https://example.com
+# {"url":"https://example.com/","status":200,...,"loaded":true,"elapsedMs":93}
+```
+
+`Page.navigate` returns at commit time and its result carries no status, so a 404 or a bot-block page is indistinguishable from content until you inspect the DOM. `navigate` closes both gaps: it waits for `load` (or `domcontentloaded`, or nothing) and reports `status`. A navigation Chrome refuses outright -- DNS failure, bad scheme -- exits 1 rather than returning a result that looks fine.
+
+`wait` opens its own isolated session, so it matches only events that fire **after** it subscribes -- start it in the background before the action that triggers the event. To catch events that may fire first, background `attach` to a file and use [`scripts/cdp-wait.py`](scripts/cdp-wait.py) instead.
 
 ## Interacting with Elements
 

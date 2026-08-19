@@ -14,7 +14,10 @@ import sys
 
 
 # Operational commands -- checked first during routing
-OPERATIONAL_COMMANDS = {"launch", "status", "attach", "help", "cleanup", "stop", "guide"}
+OPERATIONAL_COMMANDS = {
+    "launch", "status", "attach", "help", "cleanup", "stop", "guide",
+    "eval", "screenshot", "wait", "navigate",
+}
 
 
 def _extract_flags(argv: list[str]) -> tuple[list[str], str | None, str | None]:
@@ -67,13 +70,19 @@ def _print_static_usage() -> None:
     print("chrome-agent -- CLI for AI agents to control Chrome via CDP\n")
     print("Usage: chrome-agent <command> [args...]\n")
     print("Operational commands:")
-    print("  launch [--port PORT] [--fingerprint PATH] [--headless] [--no-window-border] [-- CHROME_ARGS]  Launch Chrome")
+    print("  launch [--port PORT] [--fingerprint PATH] [--headless] [--binary PATH] [--no-window-border] [-- CHROME_ARGS]  Launch Chrome")
     print("  status [<instance>]                                      List instances and targets")
     print("  attach <instance> [+Event ...] [--target SPEC] [--url SUB]  Attach for events")
     print("  help [<instance>] [Domain | Domain.method]               Protocol discovery")
     print("  stop <instance>                                            Stop a browser gracefully")
     print("  cleanup                                                   Remove stale instances")
     print("  guide [--path]                                            Print this tool's agent guide")
+    print()
+    print("Page convenience commands (thin wrappers over CDP):")
+    print("  eval [<instance>] <expr | --file PATH | -> [--json]      Run JS, print the value")
+    print("  screenshot [<instance>] [-o FILE] [--full-page] [--selector CSS] [--format png|jpeg] [--quality N]  Save an image")
+    print("  wait [<instance>] <Event ...> [--timeout SECS] [--contains SUB]  Block until an event fires")
+    print("  navigate [<instance>] <URL> [--wait load|domcontentloaded|none] [--timeout SECS]  Go, wait, report status")
     print()
     print("  --version, -V                                            Show version and exit")
     print()
@@ -87,6 +96,10 @@ def _print_static_usage() -> None:
     print("  chrome-agent attach mysite-01 +Page.loadEventFired")
     print("  chrome-agent mysite-01 Page.navigate '{\"url\": \"https://example.com\"}'")
     print("  chrome-agent help Page.navigate")
+    print("  chrome-agent eval --file probe.js")
+    print("  chrome-agent screenshot -o page.png --full-page")
+    print("  chrome-agent wait Page.loadEventFired --timeout 15")
+    print("  chrome-agent navigate https://example.com")
 
 
 async def _run_launch(args: list[str]) -> None:
@@ -97,6 +110,7 @@ async def _run_launch(args: list[str]) -> None:
     headless = False
     port_override = None
     window_border = True
+    binary = None
     extra_args = []
     i = 0
     while i < len(args):
@@ -110,6 +124,9 @@ async def _run_launch(args: list[str]) -> None:
         elif args[i] == "--headless":
             headless = True
             i += 1
+        elif args[i] == "--binary" and i + 1 < len(args):
+            binary = args[i + 1]
+            i += 2
         elif args[i] == "--no-window-border":
             window_border = False
             i += 1
@@ -131,6 +148,7 @@ async def _run_launch(args: list[str]) -> None:
             headless=headless,
             extra_args=extra_args,
             window_border=window_border,
+            binary=binary,
         )
     except (BrowserNotFoundError, RuntimeError, TimeoutError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -350,31 +368,10 @@ async def _run_cdp_one_shot(
 ) -> None:
     """Send a single CDP command via browser-level WS + Target.attachToTarget."""
     from .attach import AmbiguousTargetError, TargetNotFoundError
-    from .cdp_client import CDPClient, get_ws_url
-    from .errors import CDPError
+    from .errors import CDPError, NoPageError
+    from .page_ops import attached_page_session
 
-    # Resolve instance
-    if instance_name is not None:
-        from .registry import InstanceNotFoundError, lookup
-        try:
-            info = lookup(instance_name=instance_name)
-        except InstanceNotFoundError as exc:
-            print(f"Error: {exc}", file=sys.stderr)
-            sys.exit(1)
-        port = info.port
-    else:
-        # Default instance resolution: auto-select single live instance
-        from .registry import enumerate_instances
-        instances = enumerate_instances()
-        live = [i for i in instances if i.alive]
-        if len(live) == 0:
-            print("Error: no instances registered. Launch one with: chrome-agent launch", file=sys.stderr)
-            sys.exit(1)
-        elif len(live) > 1:
-            names = ", ".join(i.name for i in live)
-            print(f"Error: multiple instances running. Specify one: {names}", file=sys.stderr)
-            sys.exit(1)
-        port = live[0].port
+    port = _resolve_port_or_exit(instance_name=instance_name)
 
     # Parse params
     params = None
@@ -388,74 +385,355 @@ async def _run_cdp_one_shot(
             print("Error: parameters must be a JSON object", file=sys.stderr)
             sys.exit(1)
 
-    # Connect to browser-level WebSocket
     try:
-        browser_ws_url = get_ws_url(port=port, target_type="browser")
-    except (ConnectionError, RuntimeError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        async with CDPClient(ws_url=browser_ws_url) as cdp:
-            # Resolve target
-            targets_result = await cdp.send(method="Target.getTargets")
-            page_targets = sorted(
-                (t for t in targets_result.get("targetInfos", [])
-                 if t.get("type") == "page"),
-                key=lambda t: t.get("targetId", ""),
+        async with attached_page_session(
+            port=port, target_spec=target_spec, url_spec=url_spec
+        ) as (cdp, session_id):
+            result = await cdp.send(
+                method=method,
+                params=params,
+                session_id=session_id,
             )
-
-            if not page_targets:
-                print("Error: no page targets in browser", file=sys.stderr)
-                sys.exit(1)
-
-            from .attach import resolve_target
-            target_by = None
-            spec = None
-            if target_spec is not None:
-                spec = target_spec
-                target_by = "index" if target_spec.isdigit() else "id"
-            elif url_spec is not None:
-                spec = url_spec
-                target_by = "url"
-
-            target_id = resolve_target(
-                page_targets=page_targets,
-                target_spec=spec,
-                target_by=target_by,
-            )
-
-            # Create isolated session
-            session_result = await cdp.send(
-                method="Target.attachToTarget",
-                params={"targetId": target_id, "flatten": True},
-            )
-            session_id = session_result["sessionId"]
-
-            try:
-                result = await cdp.send(
-                    method=method,
-                    params=params,
-                    session_id=session_id,
-                )
-                print(json.dumps(result, indent=2))
-            finally:
-                try:
-                    await cdp.send(
-                        method="Target.detachFromTarget",
-                        params={"sessionId": session_id},
-                    )
-                except Exception:
-                    pass
-
-    except (AmbiguousTargetError, TargetNotFoundError) as exc:
+            print(json.dumps(result, indent=2))
+    except (AmbiguousTargetError, TargetNotFoundError, NoPageError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     except CDPError as exc:
         print(f"CDP error {exc.code}: {exc.message}", file=sys.stderr)
         sys.exit(1)
-    except ConnectionError as exc:
+    except (ConnectionError, RuntimeError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _reject_extra_positional(verb: str, first: str | None, extra: str) -> None:
+    """Fail a verb given a second positional, naming the likely cause.
+
+    The usual cause is a mistyped or already-stopped instance name: it is not
+    in the registry, so _split_instance leaves it in place and it is consumed
+    as the verb's own argument. Reporting only "unknown option" would point at
+    the wrong token entirely.
+    """
+    if first is not None and not first.startswith("-"):
+        print(
+            f"Error: unexpected argument: {extra}\n"
+            f"       '{first}' was read as the argument to {verb}; "
+            f"if it is an instance name, it is not registered "
+            f"(check: chrome-agent status)",
+            file=sys.stderr,
+        )
+    else:
+        print(f"Error: unknown {verb} option: {extra}", file=sys.stderr)
+    sys.exit(1)
+
+
+def _resolve_port_or_exit(instance_name: str | None) -> int:
+    """Resolve an instance to a port, or exit 1 with the reason."""
+    from .page_ops import (
+        AmbiguousInstanceError,
+        InstanceNotFoundError,
+        NoLiveInstanceError,
+        resolve_port,
+    )
+
+    try:
+        return resolve_port(instance_name=instance_name)
+    except (InstanceNotFoundError, NoLiveInstanceError, AmbiguousInstanceError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _split_instance(args: list[str]) -> tuple[str | None, list[str]]:
+    """Peel an optional leading instance name off a verb's arguments.
+
+    A leading token only counts as an instance when the registry knows it, so
+    `eval document.title` and `eval mysite-01 document.title` both work and a
+    typo'd instance name surfaces as a bad expression rather than silently
+    running against the wrong browser.
+    """
+    if not args or args[0].startswith("-"):
+        return None, args
+
+    from .registry import enumerate_instances
+
+    if args[0] in {i.name for i in enumerate_instances()}:
+        return args[0], args[1:]
+    return None, args
+
+
+async def _run_eval(args: list[str], target_spec: str | None, url_spec: str | None) -> None:
+    """Evaluate JavaScript in a page and print the resulting value."""
+    from .errors import CDPError, NoPageError
+    from .page_ops import EvaluationError, run_eval
+
+    instance_name, rest = _split_instance(args=args)
+
+    raw_json = False
+    source_path = None
+    expression = None
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--json":
+            raw_json = True
+            i += 1
+        elif rest[i] == "--file" and i + 1 < len(rest):
+            source_path = rest[i + 1]
+            i += 2
+        elif rest[i] == "-":
+            source_path = "-"
+            i += 1
+        elif expression is None and not rest[i].startswith("--"):
+            expression = rest[i]
+            i += 1
+        else:
+            _reject_extra_positional(
+                verb="eval", first=expression, extra=rest[i]
+            )
+
+    if source_path is not None:
+        if expression is not None:
+            print("Error: give an expression or --file, not both", file=sys.stderr)
+            sys.exit(1)
+        if source_path == "-":
+            expression = sys.stdin.read()
+        else:
+            try:
+                with open(source_path, encoding="utf-8") as handle:
+                    expression = handle.read()
+            except OSError as exc:
+                print(f"Error: cannot read {source_path}: {exc}", file=sys.stderr)
+                sys.exit(1)
+
+    if not expression or not expression.strip():
+        print("Error: nothing to evaluate", file=sys.stderr)
+        print("Usage: chrome-agent eval [<instance>] <expr | --file PATH | ->", file=sys.stderr)
+        sys.exit(1)
+
+    port = _resolve_port_or_exit(instance_name=instance_name)
+
+    from .attach import AmbiguousTargetError, TargetNotFoundError
+    try:
+        print(await run_eval(
+            expression=expression,
+            port=port,
+            target_spec=target_spec,
+            url_spec=url_spec,
+            raw_json=raw_json,
+        ))
+    except EvaluationError as exc:
+        print(f"Page error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except CDPError as exc:
+        print(f"CDP error {exc.code}: {exc.message}", file=sys.stderr)
+        sys.exit(1)
+    except (AmbiguousTargetError, TargetNotFoundError, NoPageError, ConnectionError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+async def _run_screenshot(args: list[str], target_spec: str | None, url_spec: str | None) -> None:
+    """Capture a page (or one element) to an image file."""
+    from .errors import CDPError, NoPageError
+    from .page_ops import EvaluationError, run_screenshot
+
+    instance_name, rest = _split_instance(args=args)
+
+    output_path = None
+    image_format = "png"
+    quality = None
+    full_page = False
+    selector = None
+    i = 0
+    while i < len(rest):
+        if rest[i] in ("-o", "--output") and i + 1 < len(rest):
+            output_path = rest[i + 1]
+            i += 2
+        elif rest[i] == "--full-page":
+            full_page = True
+            i += 1
+        elif rest[i] == "--selector" and i + 1 < len(rest):
+            selector = rest[i + 1]
+            i += 2
+        elif rest[i] == "--format" and i + 1 < len(rest):
+            image_format = rest[i + 1]
+            i += 2
+        elif rest[i] == "--quality" and i + 1 < len(rest):
+            try:
+                quality = int(rest[i + 1])
+            except ValueError:
+                print(f"Error: invalid quality: {rest[i + 1]}", file=sys.stderr)
+                sys.exit(1)
+            i += 2
+        else:
+            print(f"Error: unknown screenshot option: {rest[i]}", file=sys.stderr)
+            sys.exit(1)
+
+    if image_format not in ("png", "jpeg", "webp"):
+        print(f"Error: unsupported format: {image_format}", file=sys.stderr)
+        sys.exit(1)
+    if full_page and selector is not None:
+        print("Error: --full-page and --selector are mutually exclusive", file=sys.stderr)
+        sys.exit(1)
+    if output_path is None:
+        output_path = f"screenshot.{image_format}"
+
+    port = _resolve_port_or_exit(instance_name=instance_name)
+
+    from .attach import AmbiguousTargetError, TargetNotFoundError
+    try:
+        path, size = await run_screenshot(
+            port=port,
+            output_path=output_path,
+            image_format=image_format,
+            quality=quality,
+            full_page=full_page,
+            selector=selector,
+            target_spec=target_spec,
+            url_spec=url_spec,
+        )
+    except EvaluationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except CDPError as exc:
+        print(f"CDP error {exc.code}: {exc.message}", file=sys.stderr)
+        sys.exit(1)
+    except (AmbiguousTargetError, TargetNotFoundError, NoPageError, ConnectionError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except OSError as exc:
+        print(f"Error: cannot write {output_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if sys.stdout.isatty():
+        print(f"Saved {size} bytes to {path}")
+    else:
+        print(path)
+
+
+async def _run_wait(args: list[str], target_spec: str | None, url_spec: str | None) -> None:
+    """Block until a CDP event fires. Exits 1 on timeout."""
+    from .errors import CDPError, NoPageError
+    from .page_ops import run_wait
+
+    instance_name, rest = _split_instance(args=args)
+
+    events: list[str] = []
+    contains: list[str] = []
+    timeout = 30.0
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--timeout" and i + 1 < len(rest):
+            try:
+                timeout = float(rest[i + 1])
+            except ValueError:
+                print(f"Error: invalid timeout: {rest[i + 1]}", file=sys.stderr)
+                sys.exit(1)
+            i += 2
+        elif rest[i] == "--contains" and i + 1 < len(rest):
+            contains.append(rest[i + 1])
+            i += 2
+        elif rest[i].startswith("--"):
+            print(f"Error: unknown wait option: {rest[i]}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            # A leading '+' is accepted so attach and wait subscribe alike.
+            events.append(rest[i].lstrip("+"))
+            i += 1
+
+    if not events:
+        print("Error: no event named", file=sys.stderr)
+        print("Usage: chrome-agent wait [<instance>] <Domain.event ...> [--timeout SECS]", file=sys.stderr)
+        sys.exit(1)
+
+    port = _resolve_port_or_exit(instance_name=instance_name)
+
+    from .attach import AmbiguousTargetError, TargetNotFoundError
+    try:
+        event = await run_wait(
+            events=events,
+            port=port,
+            timeout=timeout,
+            contains=contains,
+            target_spec=target_spec,
+            url_spec=url_spec,
+        )
+    except CDPError as exc:
+        print(f"CDP error {exc.code}: {exc.message}", file=sys.stderr)
+        sys.exit(1)
+    except (AmbiguousTargetError, TargetNotFoundError, NoPageError, ConnectionError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if event is None:
+        print(
+            f"Timed out after {timeout:g}s waiting for: {', '.join(events)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(json.dumps(event))
+
+
+async def _run_navigate(args: list[str], target_spec: str | None, url_spec: str | None) -> None:
+    """Navigate a page, wait for the load, and report the HTTP status."""
+    from .errors import CDPError, NoPageError
+    from .page_ops import NavigationError, run_navigate
+
+    instance_name, rest = _split_instance(args=args)
+
+    url = None
+    wait_for = "load"
+    timeout = 30.0
+    i = 0
+    while i < len(rest):
+        if rest[i] == "--wait" and i + 1 < len(rest):
+            wait_for = rest[i + 1]
+            i += 2
+        elif rest[i] == "--timeout" and i + 1 < len(rest):
+            try:
+                timeout = float(rest[i + 1])
+            except ValueError:
+                print(f"Error: invalid timeout: {rest[i + 1]}", file=sys.stderr)
+                sys.exit(1)
+            i += 2
+        elif url is None and not rest[i].startswith("--"):
+            url = rest[i]
+            i += 1
+        else:
+            _reject_extra_positional(verb="navigate", first=url, extra=rest[i])
+
+    if url is None:
+        print("Error: no URL given", file=sys.stderr)
+        print("Usage: chrome-agent navigate [<instance>] <URL> [--wait load|domcontentloaded|none]", file=sys.stderr)
+        sys.exit(1)
+    if wait_for not in ("load", "domcontentloaded", "none"):
+        print(f"Error: unknown --wait value: {wait_for}", file=sys.stderr)
+        sys.exit(1)
+
+    port = _resolve_port_or_exit(instance_name=instance_name)
+
+    from .attach import AmbiguousTargetError, TargetNotFoundError
+    try:
+        result = await run_navigate(
+            url=url,
+            port=port,
+            wait_for=wait_for,
+            timeout=timeout,
+            target_spec=target_spec,
+            url_spec=url_spec,
+        )
+    except NavigationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except CDPError as exc:
+        print(f"CDP error {exc.code}: {exc.message}", file=sys.stderr)
+        sys.exit(1)
+    except (AmbiguousTargetError, TargetNotFoundError, NoPageError, ConnectionError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(json.dumps(result))
+    if result["loaded"] is False:
+        print(f"Warning: load did not finish within {timeout:g}s", file=sys.stderr)
         sys.exit(1)
 
 
@@ -492,6 +770,14 @@ def main() -> None:
             _run_cleanup()
         elif command == "guide":
             _print_guide(args=rest)
+        elif command == "eval":
+            asyncio.run(_run_eval(args=rest, target_spec=target_spec, url_spec=url_spec))
+        elif command == "screenshot":
+            asyncio.run(_run_screenshot(args=rest, target_spec=target_spec, url_spec=url_spec))
+        elif command == "wait":
+            asyncio.run(_run_wait(args=rest, target_spec=target_spec, url_spec=url_spec))
+        elif command == "navigate":
+            asyncio.run(_run_navigate(args=rest, target_spec=target_spec, url_spec=url_spec))
         return
 
     # Disambiguate "instance name" vs "bare Domain.method":

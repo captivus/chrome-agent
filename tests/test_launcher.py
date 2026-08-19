@@ -18,8 +18,10 @@ import pytest
 
 from chrome_agent.connection import check_cdp_port
 from chrome_agent.launcher import (
+    BINARY_ENV_VAR,
     BrowserNotFoundError,
     _SESSION_ROOT,
+    _candidate_paths,
     cleanup_sessions,
     find_chrome_binary,
     launch_browser,
@@ -150,7 +152,7 @@ def test_browser_not_found(monkeypatch):
     """Raises BrowserNotFoundError when no Chrome binary exists."""
     monkeypatch.setattr(
         "chrome_agent.launcher.find_chrome_binary",
-        lambda: None,
+        lambda binary=None: None,
     )
 
     async def do_launch():
@@ -251,3 +253,79 @@ async def test_cleanup_preserves_active_dirs(tmp_path):
     finally:
         os.kill(result.pid, signal.SIGTERM)
         await asyncio.sleep(0.5)
+
+
+# ---------------------------------------------------------------------------
+# Binary discovery overrides (explicit path, env var, $PATH)
+# ---------------------------------------------------------------------------
+
+
+def _fake_binary(tmp_path, name="my-chrome"):
+    """Create an executable stub standing in for a Chrome install."""
+    path = tmp_path / name
+    path.write_text("#!/bin/sh\nexit 0\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_explicit_binary_wins_over_system_paths(tmp_path, monkeypatch):
+    """An explicit binary is used even when a system Chrome exists."""
+    binary = _fake_binary(tmp_path)
+    monkeypatch.setattr(
+        "chrome_agent.launcher._platform_candidates", lambda: ["/usr/bin/google-chrome"]
+    )
+    assert find_chrome_binary(binary=binary) == binary
+
+
+def test_env_var_overrides_system_paths(tmp_path, monkeypatch):
+    """$CHROME_AGENT_BINARY reaches installs outside the known paths."""
+    binary = _fake_binary(tmp_path)
+    monkeypatch.setenv(BINARY_ENV_VAR, binary)
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [])
+    assert find_chrome_binary() == binary
+
+
+def test_bad_override_does_not_fall_back(tmp_path, monkeypatch):
+    """A bad override is an error, not a silent switch to another browser.
+
+    Falling back would launch a browser the caller did not ask for, which is
+    worse than failing: fingerprint and profile expectations silently differ.
+    """
+    monkeypatch.setattr(
+        "chrome_agent.launcher._platform_candidates", lambda: ["/usr/bin/google-chrome"]
+    )
+    missing = str(tmp_path / "nope")
+    assert find_chrome_binary(binary=missing) is None
+    assert _candidate_paths(binary=missing) == [missing]
+
+
+def test_path_lookup_finds_binary_outside_known_paths(tmp_path, monkeypatch):
+    """A Chrome only on $PATH is found once the absolute paths miss."""
+    binary = _fake_binary(tmp_path, name="google-chrome")
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [])
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.delenv(BINARY_ENV_VAR, raising=False)
+    assert find_chrome_binary() == binary
+
+
+def test_system_paths_take_precedence_over_path_lookup(tmp_path, monkeypatch):
+    """The $PATH fallback never displaces an existing system install."""
+    system = _fake_binary(tmp_path, name="system-chrome")
+    shadow = _fake_binary(tmp_path, name="google-chrome")
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [system])
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.delenv(BINARY_ENV_VAR, raising=False)
+    assert find_chrome_binary() == system
+    assert _candidate_paths() == [system, shadow]
+
+
+def test_not_found_error_lists_path_candidates(monkeypatch):
+    """The error names every location tried, including $PATH resolutions."""
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: ["/nope/chrome"])
+    monkeypatch.setattr("chrome_agent.launcher.shutil.which", lambda name: "/usr/local/bin/" + name)
+    monkeypatch.delenv(BINARY_ENV_VAR, raising=False)
+    candidates = _candidate_paths()
+    assert "/nope/chrome" in candidates
+    assert any(c.startswith("/usr/local/bin/") for c in candidates)
+    message = str(BrowserNotFoundError(searched_paths=candidates))
+    assert "/nope/chrome" in message

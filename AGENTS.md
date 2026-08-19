@@ -174,6 +174,8 @@ python3 scripts/cdp-wait.py --file /tmp/events.jsonl \
   --method Page.loadEventFired --timeout 20                     # per event
 ```
 
+For a single event you expect *after* you act, `chrome-agent wait <Domain.event> --timeout N` needs no background stream at all — but it cannot match an event that fired before it subscribed, which is exactly what the file technique buys you.
+
 Needs only a backgrounded shell command and a file read. You lose the ability to work *while* events arrive, but you keep the precise wake — measured at 82 ms from navigation, against ~4.9 s wasted by a conservative `sleep 5`. It also catches events that fired *before* the wait started, which a bare `tail -f` silently drops.
 
 Full technique, pitfalls, and the reproducible proof: **[docs/event-driven-without-monitor.md](docs/event-driven-without-monitor.md)**.
@@ -183,7 +185,7 @@ Full technique, pitfalls, and the reproducible proof: **[docs/event-driven-witho
 Output is JSON on stdout. A one-shot prints the CDP method's **raw result object**, pretty-printed (shapes differ by method — check, don't assume). `launch`/`status` print structured JSON when stdout isn't a TTY. Errors go to **stderr** and exit non-zero, and are self-describing (an unknown instance lists the available ones; a CDP protocol error prints `CDP error <code>: <message>`).
 
 ```bash
-chrome-agent launch [--port PORT] [--headless] [--fingerprint profile.json] [--no-window-border]
+chrome-agent launch [--port PORT] [--headless] [--fingerprint profile.json] [--binary PATH] [--no-window-border]
 chrome-agent status [<instance>]
 chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
 chrome-agent stop <instance> [--target SPEC] [--url SUBSTRING]
@@ -191,13 +193,50 @@ chrome-agent help [<instance>] [Domain | Domain.method]
 chrome-agent cleanup
 chrome-agent --version
 chrome-agent <instance> Domain.method '{"param": "value"}'
+
+chrome-agent eval [<instance>] <expr | --file PATH | -> [--json]
+chrome-agent screenshot [<instance>] [-o FILE] [--full-page] [--selector CSS] [--format png|jpeg] [--quality N]
+chrome-agent wait [<instance>] <Domain.event ...> [--timeout SECS] [--contains SUBSTRING]
+chrome-agent navigate [<instance>] <URL> [--wait load|domcontentloaded|none] [--timeout SECS]
 ```
 
 - `launch` → `{"name","port","pid","browser_version"}`
 - `status` → `[{"name","port","alive","targets":[{"id","full_id","index","url","title"}]}]` — `index` is what `--target N` selects
 - `Page.navigate` → `{"frameId","loaderId","isDownload"}`
 - `Runtime.evaluate` (`returnByValue:true`) → `{"result":{"type":"string","value":"..."}}` — read **`result.value`** (the value sits under the `result` key)
-- `Page.captureScreenshot` → `{"data":"<base64 png>"}` — bytes are at `data`, **not** `result.data`; decode with `… | python3 -c "import sys,json,base64; open('/tmp/s.png','wb').write(base64.b64decode(json.load(sys.stdin)['data']))"` — then view `/tmp/s.png` to actually see the render.
+- `Page.captureScreenshot` → `{"data":"<base64 png>"}` — bytes are at `data`, **not** `result.data`. Prefer `chrome-agent screenshot -o /tmp/s.png`, which decodes and writes the file for you and prints its path; then view the file to actually see the render.
+
+## Four verbs that save you the plumbing
+
+`eval`, `screenshot`, `wait`, and `navigate` are thin wrappers over `Runtime.evaluate`, `Page.captureScreenshot`, event subscription, and `Page.navigate`. They exist because those four, expressed raw, cost you a quoting fight, a base64 decode, a `sleep`, and a blind guess about whether the page loaded. The raw forms still work and still reach everything.
+
+```bash
+# eval -- JS from a file or stdin, so no JSON-inside-shell quoting. Prints the
+# VALUE (string as-is, anything else as JSON); promises are awaited.
+chrome-agent eval 'document.title'
+chrome-agent eval --file probe.js                 # multi-line JS, no escaping
+echo 'document.readyState' | chrome-agent eval -
+chrome-agent eval 'bad(' --json                   # --json keeps the CDP envelope
+
+# screenshot -- decodes and writes the file, prints the path
+chrome-agent screenshot -o /tmp/page.png
+chrome-agent screenshot -o /tmp/all.png --full-page       # beyond the viewport
+chrome-agent screenshot -o /tmp/el.png --selector '#submit'  # one element
+
+# wait -- returns the instant the event lands; exits 1 on timeout
+chrome-agent wait Page.loadEventFired --timeout 15
+chrome-agent wait Network.responseReceived --contains example.com --timeout 20
+
+# navigate -- go, wait for the load, report the real HTTP status
+chrome-agent navigate https://example.com
+# {"url":"https://example.com/","status":200,"frameId":"...","loaderId":"...","loaded":true,"elapsedMs":93}
+```
+
+**`Page.navigate` alone cannot tell you a 404 from a 200** — its result is `{frameId, loaderId, isDownload}` either way, so a soft error page reads as success until you inspect the DOM. `navigate` waits for the document to finish and reports `status`, which is the check to make before you start scraping. `--wait none` returns at commit and reports `"loaded": null` (nothing was waited on); a load that never finishes exits 1 with `"loaded": false`. Chrome refusing the navigation outright (DNS failure, bad scheme) is an error, not a result.
+
+A page exception is an **error**, not a value: `eval` prints `Page error: ...` to stderr and exits 1, so a thrown error can't be mistaken for a result.
+
+**`wait` only sees events that fire after it subscribes.** It opens its own session, so anything that already happened is invisible to it — start it in the background *before* the action that triggers the event, or use the `attach`-to-a-file technique above when you need to catch events that may fire first.
 
 ## Targeting tabs
 
@@ -215,6 +254,7 @@ A one-shot against multiple tabs without a specifier is an error that lists them
 chrome-agent launch                       # auto port + name (from cwd); isolated profile under /tmp/chrome-agent
 chrome-agent launch --headless            # no window (no border, no desktop pinning)
 chrome-agent launch --fingerprint p.json  # spoof UA/viewport/lang/TZ via launch flags (also suppresses the marker)
+chrome-agent launch --binary /path/chrome  # explicit browser (also $CHROME_AGENT_BINARY)
 chrome-agent launch -- --some-chrome-flag # everything after -- passes through to Chrome
 chrome-agent status                       # all instances + their tabs
 chrome-agent stop mysite-01 [--target 2 | --url foo]   # whole browser, or one tab
@@ -229,6 +269,7 @@ Headed launches are marked (colored border + `🤖 <instance>` title prefix) so 
 
 ## Gotchas
 
+- **Browser discovery** checks the platform's well-known install paths first, then `$PATH`. If Chrome lives somewhere else (Chrome for Testing, a user-local install), point at it with `--binary PATH` or `$CHROME_AGENT_BINARY` — an override is authoritative, so a bad path errors rather than silently launching some other browser.
 - **Navigation kills context.** A pending `Runtime.evaluate` errors with "context destroyed" when the page navigates. Retry on the new page.
 - **One-shot latency** ~70 ms (process startup). For tight loops or event capture, prefer `attach` / a Python driver.
 - **Event isolation.** Each `attach` session sees only its own subscriptions.

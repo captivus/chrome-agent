@@ -324,7 +324,7 @@ def test_launch_chrome_not_found_clean_error(monkeypatch, capsys):
 
     from chrome_agent import cli
 
-    monkeypatch.setattr("chrome_agent.launcher.find_chrome_binary", lambda: None)
+    monkeypatch.setattr("chrome_agent.launcher.find_chrome_binary", lambda binary=None: None)
     with pytest.raises(SystemExit) as exc_info:
         asyncio.run(cli._run_launch(args=[]))
     assert exc_info.value.code == 1
@@ -427,3 +427,21 @@ def test_unregistered_dotted_first_arg_routes_as_method(monkeypatch):
     # Auto-select path: instance_name is None, method is the dotted first arg
     assert captured["instance_name"] is None
     assert captured["method"] == "Runtime.evaluate"
+
+
+def test_eval_unregistered_instance_names_the_cause(browser_session):
+    """A stale instance name must not be reported as a bad expression.
+
+    An unregistered leading token stays in the verb's arguments, so the
+    expression lands in the option slot; the error has to point at the real
+    cause instead of the last token it happened to choke on.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "chrome_agent", "eval", "gone-01", "document.title"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 1
+    assert "not registered" in result.stderr
+    assert "gone-01" in result.stderr

@@ -35,16 +35,68 @@ class BrowserNotFoundError(Exception):
         )
 
 
-def find_chrome_binary() -> str | None:
-    """Search platform-specific paths for Chrome/Chromium.
+BINARY_ENV_VAR = "CHROME_AGENT_BINARY"
 
-    Returns the path to the first found executable, or None.
+
+def find_chrome_binary(binary: str | None = None) -> str | None:
+    """Locate a Chrome/Chromium executable.
+
+    Resolution order:
+
+      1. An explicit binary (``--binary``), or ``$CHROME_AGENT_BINARY``. When
+         either is set it is authoritative: a bad path is an error, not a
+         silent fallback to some other browser the caller did not ask for.
+      2. The platform's well-known absolute install paths.
+      3. A ``$PATH`` lookup of the usual executable names, which is what
+         reaches non-root installs, Chrome for Testing, ``/usr/local/bin``,
+         Homebrew, and Nix.
+
+    Returns the path to the first executable found, or None.
     """
-    candidates = _platform_candidates()
-    for path in candidates:
-        if os.path.isfile(path) and os.access(path, os.X_OK):
+    override = binary or os.environ.get(BINARY_ENV_VAR)
+    if override:
+        return override if _is_executable(path=override) else None
+
+    for path in _candidate_paths():
+        if _is_executable(path=path):
             return path
     return None
+
+
+def _is_executable(path: str) -> bool:
+    """Whether path is a file this process may execute."""
+    return os.path.isfile(path) and os.access(path, os.X_OK)
+
+
+def _candidate_paths(binary: str | None = None) -> list[str]:
+    """Every path find_chrome_binary would consider, in resolution order.
+
+    Doubles as the "searched" listing on BrowserNotFoundError, so the error
+    always names exactly what was tried -- including a bad override.
+    """
+    override = binary or os.environ.get(BINARY_ENV_VAR)
+    if override:
+        return [override]
+
+    candidates = list(_platform_candidates())
+    for name in _platform_binary_names():
+        resolved = shutil.which(name)
+        if resolved and resolved not in candidates:
+            candidates.append(resolved)
+    return candidates
+
+
+def _platform_binary_names() -> list[str]:
+    """Executable names to look for on $PATH."""
+    if sys.platform == "win32":
+        return ["chrome.exe", "chromium.exe"]
+    return [
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium-browser",
+        "chromium",
+        "chrome",
+    ]
 
 
 def _platform_candidates() -> list[str]:
@@ -79,6 +131,7 @@ async def launch_browser(
     registry_path: str | None = None,
     extra_args: list[str] | None = None,
     window_border: bool = True,
+    binary: str | None = None,
 ) -> InstanceInfo:
     """Launch Chrome with CDP enabled and register as a named instance.
 
@@ -92,15 +145,17 @@ async def launch_browser(
 
     Returns InstanceInfo with name, port, pid, browser_version, user_data_dir.
 
+    binary overrides browser discovery (see find_chrome_binary).
+
     Raises BrowserNotFoundError if Chrome is not installed.
     Raises RuntimeError if no ports are available.
     Raises TimeoutError if the browser doesn't start within 30 seconds.
     """
 
     # Phase 1: Find Chrome binary
-    binary = find_chrome_binary()
-    if binary is None:
-        raise BrowserNotFoundError(searched_paths=_platform_candidates())
+    resolved_binary = find_chrome_binary(binary=binary)
+    if resolved_binary is None:
+        raise BrowserNotFoundError(searched_paths=_candidate_paths(binary=binary))
 
     # Prune truly-dead instances first (fallback for browsers whose supervisor
     # was killed, and for headless instances which have no supervisor), and
@@ -135,7 +190,7 @@ async def launch_browser(
         json.dump(prefs, f)
 
     args = [
-        binary,
+        resolved_binary,
         f"--remote-debugging-port={port}",
         f"--user-data-dir={session_dir}",
         "--no-first-run",
