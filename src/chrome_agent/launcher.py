@@ -17,7 +17,7 @@ import tempfile
 from .connection import check_cdp_port
 from .registry import REGISTRY_PATH, InstanceInfo, allocate_port, register, cleanup
 from .registry import _load_registry, _resolve_path
-from .utils import process_is_ours, process_is_running, process_start_time
+from .utils import process_is_ours, process_is_running, process_start_time, windows_hidden_popen_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +164,7 @@ async def launch_browser(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         env=env,
+        **windows_hidden_popen_kwargs(),
     )
     # Capture the process's start-time identity token immediately, while the
     # PID is guaranteed to still be this process (wrapper installs can exit

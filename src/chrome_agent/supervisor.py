@@ -33,6 +33,7 @@ import subprocess
 import sys
 
 from .cdp_client import CDPClient, get_ws_url
+from .utils import no_console_python, windows_hidden_popen_kwargs
 
 ISOLATED_WORLD = "__chrome_agent_marker__"
 
@@ -255,11 +256,12 @@ def spawn_supervisor(
     """Spawn the detached per-instance supervisor process for a launched browser."""
     return subprocess.Popen(
         [
-            sys.executable, "-m", "chrome_agent.supervisor",
+            no_console_python(), "-m", "chrome_agent.supervisor",
             str(port), name, registry_path, "1" if draw_border else "0",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        **windows_hidden_popen_kwargs(),
     )
 
 

@@ -6,6 +6,41 @@ not have dependencies on other chrome-agent modules to avoid circular imports.
 
 import os
 import subprocess
+import sys
+
+
+def no_console_python() -> str:
+    """Interpreter for background helpers.
+
+    On Windows, ``python.exe`` is a console app. Combined with
+    ``DETACHED_PROCESS`` it gets a *new visible cmd window*. ``pythonw.exe``
+    is the windowless twin and is what long-lived helpers should use.
+    """
+    if sys.platform == "win32":
+        candidate = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        if os.path.isfile(candidate):
+            return candidate
+    return sys.executable
+
+
+def windows_hidden_popen_kwargs() -> dict:
+    """Popen kwargs so a child has no console window of its own.
+
+    ``DETACHED_PROCESS`` is the wrong flag here: for console apps it
+    *creates* a new console (and makes ``CREATE_NO_WINDOW`` a no-op).
+    ``CREATE_NO_WINDOW`` hides console children; GUI apps ignore it.
+    Empty dict on non-Windows so callers can splat it unconditionally.
+    """
+    if sys.platform != "win32":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0  # SW_HIDE
+    return {
+        "stdin": subprocess.DEVNULL,
+        "startupinfo": startupinfo,
+        "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
+    }
 
 
 def process_is_running(pid: int) -> bool:
