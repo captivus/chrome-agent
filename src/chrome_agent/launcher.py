@@ -21,7 +21,10 @@ from .utils import process_is_ours, process_is_running, process_start_time
 
 logger = logging.getLogger(__name__)
 
-_SESSION_ROOT = "/tmp/chrome-agent"
+if sys.platform == "win32":
+    _SESSION_ROOT = os.path.join(tempfile.gettempdir(), "chrome-agent")
+else:
+    _SESSION_ROOT = "/tmp/chrome-agent"
 
 
 class BrowserNotFoundError(Exception):
