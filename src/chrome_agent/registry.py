@@ -80,7 +80,7 @@ def _save_registry(registry: dict, registry_path: str) -> None:
     tmp_path = registry_path + ".tmp"
     with open(tmp_path, "w") as f:
         json.dump(registry, f, indent=2)
-    os.rename(tmp_path, registry_path)
+    os.replace(tmp_path, registry_path)
 
 
 def _port_is_listening(port: int) -> bool:
