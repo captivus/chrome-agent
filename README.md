@@ -205,7 +205,7 @@ It deliberately does **not** patch `navigator.webdriver`, `navigator.platform`, 
 
 ## For AI Agents
 
-See [AGENTS.md](AGENTS.md) for concise agent instructions (the standard for AI agent tool documentation). It covers the mental model (address an instance, send any CDP command), the sense ⇄ act loop, the two channels, the command reference, and gotchas.
+See `chrome-agent guide` for concise agent instructions (the standard for AI agent tool documentation). It covers the mental model (address an instance, send any CDP command), the sense ⇄ act loop, the two channels, the command reference, and gotchas.
 
 **The guide ships with the package**, so an agent can reach it from any install without a checkout:
 
@@ -228,16 +228,15 @@ ln -s "$(chrome-agent guide --path)" AGENTS-chrome-agent.md
 
 Multiple participants -- humans, AI agents, or both -- can share a browser simultaneously. Each participant creates an independent CDP session with isolated event subscriptions. One agent enabling Network observation does not flood another agent's event stream.
 
-See [docs/collaboration-guide.md](docs/collaboration-guide.md) for:
 - Human-agent collaboration patterns (you browse, agent watches)
 - Agent-driven workflows (agent drives, you supervise)
 - Multi-agent setups with isolated event subscriptions
 - The observation gap (what CDP sees vs what it misses)
 - Full interaction observation via the binding bridge
 
-For real-time observation using Claude Code's Monitor tool, see [AGENTS.md](AGENTS.md#reacting-to-events-as-they-happen-monitor) for the practical usage path (subscribing, discovering events via `help`, the gotchas), and [docs/monitor-integration.md](docs/monitor-integration.md) for the architecture and usage patterns in depth.
+For real-time observation using Claude Code's Monitor tool, subscribe with `chrome-agent attach` (discover events via `help`).
 
-Monitor is specific to Claude Code. Agents on other harnesses can still be event-driven rather than falling back to fixed sleeps -- background `attach` to a file once, then block on [`scripts/cdp-wait.py`](scripts/cdp-wait.py), which returns the instant a matching event lands and also catches events that fired before the wait began. See [docs/event-driven-without-monitor.md](docs/event-driven-without-monitor.md).
+Monitor is specific to Claude Code. Agents on other harnesses can still be event-driven rather than falling back to fixed sleeps -- background `attach` to a file once, then wait on a matching event in that file, including events that fired before the wait began.
 
 ## Requirements
 
