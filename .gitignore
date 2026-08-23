@@ -15,3 +15,12 @@ AGENTS-private.md
 
 # research directory
 research/
+
+# Factory stays on this machine; not on GitHub
+/adws/
+/specs/
+/requests/
+/app_docs/
+
+# Public-repo extras moved off GitHub
+/archive/
