@@ -15,6 +15,8 @@ import os
 import re
 import shutil
 import socket
+import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +25,14 @@ from .utils import process_is_ours
 
 logger = logging.getLogger(__name__)
 
-REGISTRY_PATH = "/tmp/chrome-agent/registry.json"
+if sys.platform == "win32":
+    # "/tmp" is drive-relative on Windows (it resolves against the current
+    # drive), so instances registered from one drive are invisible from
+    # another and every command reports "No instances registered". Use the
+    # absolute per-user temp directory instead.
+    REGISTRY_PATH = os.path.join(tempfile.gettempdir(), "chrome-agent", "registry.json")
+else:
+    REGISTRY_PATH = "/tmp/chrome-agent/registry.json"
 BASE_PORT = 9222
 MAX_PORT = BASE_PORT + 100
 
@@ -80,7 +89,7 @@ def _save_registry(registry: dict, registry_path: str) -> None:
     tmp_path = registry_path + ".tmp"
     with open(tmp_path, "w") as f:
         json.dump(registry, f, indent=2)
-    os.rename(tmp_path, registry_path)
+    os.replace(tmp_path, registry_path)
 
 
 def _port_is_listening(port: int) -> bool:
