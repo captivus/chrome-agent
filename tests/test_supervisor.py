@@ -8,18 +8,22 @@ planning/03-specs/BRW-03-learnings/01-detection-audit.md and the supervisor veri
 """
 
 import re
+import subprocess
 
 import pytest
 
 import chrome_agent.registry as registry_mod
 import chrome_agent.supervisor as supervisor_mod
+import chrome_agent.utils as utils_mod
 from chrome_agent.supervisor import (
     _PALETTE,
     _browser_gone,
     build_overlay_script,
     derive_color,
     run_supervisor,
+    spawn_supervisor,
 )
+from chrome_agent.utils import no_console_python, windows_hidden_popen_kwargs
 
 _HEX = re.compile(r"^#[0-9a-f]{6}$")
 
@@ -134,3 +138,84 @@ async def test_supervisor_reconnects_on_transient_drop_not_retire(monkeypatch):
     # only after the second drop revealed the browser was truly gone.
     assert supervise_calls["n"] == 2
     assert deregistered.get("name") == "answerai-01"
+
+
+# --- Windows: supervisor must not allocate a visible console -----------------
+#
+# DETACHED_PROCESS gives console apps (python.exe) a *new* cmd window and
+# makes CREATE_NO_WINDOW a no-op. Spawn through pythonw + CREATE_NO_WINDOW.
+
+
+def test_hidden_popen_kwargs_empty_off_windows(monkeypatch):
+    """Non-Windows callers get an empty dict so they can splat unconditionally."""
+    monkeypatch.setattr(utils_mod.sys, "platform", "linux")
+    assert windows_hidden_popen_kwargs() == {}
+
+
+@pytest.mark.skipif(
+    not hasattr(subprocess, "STARTUPINFO") or not hasattr(subprocess, "CREATE_NO_WINDOW"),
+    reason="Windows subprocess flags not available",
+)
+def test_hidden_popen_kwargs_hides_console_without_detached_process(monkeypatch):
+    """Windows spawn hides the console and does not set DETACHED_PROCESS."""
+    monkeypatch.setattr(utils_mod.sys, "platform", "win32")
+    kwargs = windows_hidden_popen_kwargs()
+    flags = kwargs["creationflags"]
+    assert flags & subprocess.CREATE_NO_WINDOW
+    assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+    assert not (flags & subprocess.DETACHED_PROCESS)
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["startupinfo"].wShowWindow == 0
+
+
+def test_no_console_python_passthrough_off_windows(monkeypatch):
+    monkeypatch.setattr(utils_mod.sys, "platform", "linux")
+    monkeypatch.setattr(utils_mod.sys, "executable", "/usr/bin/python3")
+    assert no_console_python() == "/usr/bin/python3"
+
+
+def test_no_console_python_prefers_pythonw_on_windows(monkeypatch, tmp_path):
+    monkeypatch.setattr(utils_mod.sys, "platform", "win32")
+    python = tmp_path / "python.exe"
+    pythonw = tmp_path / "pythonw.exe"
+    python.write_bytes(b"")
+    pythonw.write_bytes(b"")
+    monkeypatch.setattr(utils_mod.sys, "executable", str(python))
+    assert no_console_python() == str(pythonw)
+
+
+def test_no_console_python_falls_back_when_pythonw_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(utils_mod.sys, "platform", "win32")
+    python = tmp_path / "python.exe"
+    python.write_bytes(b"")
+    monkeypatch.setattr(utils_mod.sys, "executable", str(python))
+    assert no_console_python() == str(python)
+
+
+def test_spawn_supervisor_uses_hidden_interpreter_and_flags(monkeypatch):
+    """spawn_supervisor wires the hidden interpreter + Windows Popen kwargs."""
+    captured: dict = {}
+
+    class FakePopen:
+        def __init__(self, args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(supervisor_mod.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(supervisor_mod, "no_console_python", lambda: "pythonw")
+    monkeypatch.setattr(
+        supervisor_mod,
+        "windows_hidden_popen_kwargs",
+        lambda: {"creationflags": 0x08000200},
+    )
+
+    spawn_supervisor(
+        port=9222, name="myproject-01", registry_path="/tmp/reg", draw_border=False,
+    )
+
+    assert captured["args"][0] == "pythonw"
+    assert captured["args"][1:3] == ["-m", "chrome_agent.supervisor"]
+    assert captured["args"][3:] == ["9222", "myproject-01", "/tmp/reg", "0"]
+    assert captured["kwargs"]["stdout"] is subprocess.DEVNULL
+    assert captured["kwargs"]["stderr"] is subprocess.DEVNULL
+    assert captured["kwargs"]["creationflags"] == 0x08000200
