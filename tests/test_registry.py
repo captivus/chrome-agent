@@ -18,10 +18,12 @@ from chrome_agent.registry import (
     cleanup,
     deregister,
     enumerate_instances,
+    find_live_by_user_data_dir,
     instance_is_alive,
     lookup,
     register,
     registration_status,
+    stop,
 )
 
 
@@ -122,6 +124,91 @@ def test_deregister_removes_entry_and_session_dir(tmp_path):
 
     # Idempotent: deregistering again (e.g. racing stop()) is a harmless no-op.
     assert deregister("proj-01", registry_path=reg_path) is False
+
+
+def test_deregister_keeps_persistent_profile(tmp_path):
+    """A persistent profile is not deleted when the instance is retired."""
+    reg_path = str(tmp_path / "registry.json")
+    session_dir = tmp_path / "keep-me"
+    session_dir.mkdir()
+    marker = session_dir / "Default"
+    marker.mkdir()
+    register(
+        working_dir="/home/user/proj",
+        pid=os.getpid(),
+        browser_version="Chrome/149",
+        user_data_dir=str(session_dir),
+        registry_path=reg_path,
+        persistent=True,
+    )
+
+    assert deregister("proj-01", registry_path=reg_path) is True
+    assert session_dir.exists()
+    assert marker.exists()
+
+
+def test_cleanup_keeps_persistent_profile(tmp_path):
+    """Stale persistent instances leave their profile on disk."""
+    reg_path = str(tmp_path / "registry.json")
+    session_dir = tmp_path / "keep-me"
+    session_dir.mkdir()
+    register(
+        working_dir="/home/user/proj",
+        pid=2147483646,
+        browser_version="Chrome/149",
+        user_data_dir=str(session_dir),
+        port_override=59998,
+        registry_path=reg_path,
+        persistent=True,
+    )
+
+    removed = cleanup(registry_path=reg_path)
+    assert removed == ["proj-01"]
+    assert session_dir.exists()
+
+
+def test_stop_dead_keeps_persistent_profile(tmp_path):
+    """stop() on a dead persistent instance does not delete the profile."""
+    reg_path = str(tmp_path / "registry.json")
+    session_dir = tmp_path / "keep-me"
+    session_dir.mkdir()
+    register(
+        working_dir="/home/user/proj",
+        pid=2147483646,
+        browser_version="Chrome/149",
+        user_data_dir=str(session_dir),
+        port_override=59997,
+        registry_path=reg_path,
+        persistent=True,
+    )
+
+    result = stop(instance_name="proj-01", registry_path=reg_path)
+    assert "cleaned up" in result.lower()
+    assert session_dir.exists()
+
+
+def test_find_live_by_user_data_dir(tmp_path):
+    """Finds the live instance already using a given profile path."""
+    reg_path = str(tmp_path / "registry.json")
+    session_dir = tmp_path / "profile"
+    session_dir.mkdir()
+    info = register(
+        working_dir="/home/user/proj",
+        pid=os.getpid(),
+        browser_version="Chrome/149",
+        user_data_dir=str(session_dir),
+        registry_path=reg_path,
+        persistent=True,
+    )
+
+    found = find_live_by_user_data_dir(str(session_dir), registry_path=reg_path)
+    assert found is not None
+    assert found.name == info.name
+
+    missing = find_live_by_user_data_dir(
+        str(tmp_path / "other"), registry_path=reg_path,
+    )
+    assert missing is None
 
 
 def test_cleanup_keeps_instance_with_live_port(tmp_path):

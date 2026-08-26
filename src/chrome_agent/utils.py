@@ -22,6 +22,9 @@ def process_is_running(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    except OSError:
+        # Windows: os.kill(missing_pid, 0) raises OSError, not ProcessLookupError.
+        return False
 
 
 def process_is_ours(pid: int, expected_start: str | None = None) -> bool:
@@ -40,7 +43,7 @@ def process_is_ours(pid: int, expected_start: str | None = None) -> bool:
     """
     try:
         os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    except (ProcessLookupError, PermissionError, OSError):
         return False
     if expected_start is not None:
         actual = process_start_time(pid=pid)

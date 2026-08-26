@@ -16,7 +16,7 @@ import tempfile
 
 from .connection import check_cdp_port
 from .registry import REGISTRY_PATH, InstanceInfo, allocate_port, register, cleanup
-from .registry import _load_registry, _resolve_path
+from .registry import _load_registry, _resolve_path, find_live_by_user_data_dir
 from .utils import process_is_ours, process_is_running, process_start_time
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,60 @@ def find_chrome_binary() -> str | None:
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
     return None
+
+
+def default_persistent_profile_dir() -> str:
+    """Stable chrome-agent profile directory, separate from daily Chrome."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "chrome-agent", "profile")
+    if sys.platform == "darwin":
+        return os.path.join(
+            os.path.expanduser("~"),
+            "Library",
+            "Application Support",
+            "chrome-agent",
+            "profile",
+        )
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return os.path.join(xdg, "chrome-agent", "profile")
+    return os.path.join(
+        os.path.expanduser("~"), ".local", "share", "chrome-agent", "profile",
+    )
+
+
+def _is_daily_chrome_user_data_dir(path: str) -> bool:
+    """True if path is Chrome/Chromium's everyday profile, not ours."""
+    normalized = os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+    markers = (
+        os.path.normcase(os.path.join("Google", "Chrome", "User Data")),
+        os.path.normcase(os.path.join("Google", "Chrome Beta", "User Data")),
+        os.path.normcase(os.path.join("Chromium", "User Data")),
+    )
+    return any(normalized.endswith(marker) for marker in markers)
+
+
+def _ensure_new_profile_prefs(session_dir: str) -> None:
+    """Write first-run prefs only. Never clobber an existing profile."""
+    default_dir = os.path.join(session_dir, "Default")
+    prefs_path = os.path.join(default_dir, "Preferences")
+    if os.path.exists(prefs_path):
+        return
+    os.makedirs(default_dir, exist_ok=True)
+    prefs = {
+        "credentials_enable_service": False,
+        "profile": {
+            "password_manager_enabled": False,
+        },
+    }
+    with open(prefs_path, "w") as f:
+        json.dump(prefs, f)
+
+
+def _profile_lock_present(session_dir: str) -> bool:
+    lock_file = os.path.join(session_dir, "SingletonLock")
+    return os.path.exists(lock_file) or os.path.islink(lock_file)
 
 
 def _platform_candidates() -> list[str]:
@@ -79,6 +133,8 @@ async def launch_browser(
     registry_path: str | None = None,
     extra_args: list[str] | None = None,
     window_border: bool = True,
+    user_data_dir: str | None = None,
+    persistent: bool = False,
 ) -> InstanceInfo:
     """Launch Chrome with CDP enabled and register as a named instance.
 
@@ -87,14 +143,17 @@ async def launch_browser(
     ready, registers the instance in the registry, and optionally applies
     a fingerprint profile.
 
-    Session data is stored under /tmp/chrome-agent/session-<id>/.
-    The browser continues running after this function returns.
+    Session data is stored under /tmp/chrome-agent/session-<id>/ unless
+    ``persistent`` or ``user_data_dir`` is set. Those reuse a profile
+    across launches and are not deleted on stop/cleanup.
 
     Returns InstanceInfo with name, port, pid, browser_version, user_data_dir.
 
     Raises BrowserNotFoundError if Chrome is not installed.
     Raises RuntimeError if no ports are available.
     Raises TimeoutError if the browser doesn't start within 30 seconds.
+    Raises ValueError if persistent and user_data_dir are both set, or if
+    user_data_dir points at Chrome's daily profile.
     """
 
     # Phase 1: Find Chrome binary
@@ -110,6 +169,29 @@ async def launch_browser(
     # genuinely-gone browsers, and it frees their names/ports for reuse.
     cleanup_sessions(registry_path=registry_path)
 
+    if persistent and user_data_dir:
+        raise ValueError("pass --persistent or --user-data-dir, not both")
+    if persistent:
+        user_data_dir = default_persistent_profile_dir()
+
+    keep_profile = user_data_dir is not None
+    if keep_profile:
+        session_dir = os.path.abspath(os.path.expanduser(user_data_dir))
+        if _is_daily_chrome_user_data_dir(session_dir):
+            raise ValueError(
+                "Refusing to use Chrome's daily profile. "
+                "Use --persistent for a separate chrome-agent profile."
+            )
+        os.makedirs(session_dir, exist_ok=True)
+        existing = find_live_by_user_data_dir(
+            session_dir, registry_path=registry_path,
+        )
+        if existing is not None:
+            return existing
+    else:
+        os.makedirs(_SESSION_ROOT, exist_ok=True)
+        session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
+
     # Phase 2: Allocate port
     if port_override is not None:
         port = port_override
@@ -119,20 +201,7 @@ async def launch_browser(
         port = allocate_port(registry=registry_data)
 
     # Phase 3: Prepare launch arguments
-    os.makedirs(_SESSION_ROOT, exist_ok=True)
-    session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
-
-    # Write Chrome preferences to disable password save prompts
-    default_dir = os.path.join(session_dir, "Default")
-    os.makedirs(default_dir, exist_ok=True)
-    prefs = {
-        "credentials_enable_service": False,
-        "profile": {
-            "password_manager_enabled": False,
-        },
-    }
-    with open(os.path.join(default_dir, "Preferences"), "w") as f:
-        json.dump(prefs, f)
+    _ensure_new_profile_prefs(session_dir)
 
     args = [
         binary,
@@ -178,6 +247,11 @@ async def launch_browser(
         # Check if process died
         if process.poll() is not None:
             stderr_output = process.stderr.read().decode(errors="replace") if process.stderr else ""
+            if keep_profile and _profile_lock_present(session_dir):
+                raise RuntimeError(
+                    f"Persistent profile is already in use: {session_dir}. "
+                    "Close that Chrome, or reuse it with `chrome-agent status`."
+                )
             raise RuntimeError(
                 f"Chrome exited immediately with code {process.returncode}. "
                 f"stderr: {stderr_output[:500]}"
@@ -207,6 +281,7 @@ async def launch_browser(
         port_override=port,
         registry_path=registry_path,
         pid_start=pid_start,
+        persistent=keep_profile,
     )
 
     # Phase 8: Spawn the per-instance supervisor (headed launches only). It is a

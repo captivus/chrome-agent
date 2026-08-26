@@ -183,7 +183,7 @@ Full technique, pitfalls, and the reproducible proof: **[docs/event-driven-witho
 Output is JSON on stdout. A one-shot prints the CDP method's **raw result object**, pretty-printed (shapes differ by method — check, don't assume). `launch`/`status` print structured JSON when stdout isn't a TTY. Errors go to **stderr** and exit non-zero, and are self-describing (an unknown instance lists the available ones; a CDP protocol error prints `CDP error <code>: <message>`).
 
 ```bash
-chrome-agent launch [--port PORT] [--headless] [--fingerprint profile.json] [--no-window-border]
+chrome-agent launch [--port PORT] [--headless] [--fingerprint profile.json] [--no-window-border] [--persistent] [--user-data-dir PATH]
 chrome-agent status [<instance>]
 chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
 chrome-agent stop <instance> [--target SPEC] [--url SUBSTRING]
@@ -212,7 +212,9 @@ A one-shot against multiple tabs without a specifier is an error that lists them
 ## Managing instances
 
 ```bash
-chrome-agent launch                       # auto port + name (from cwd); isolated profile under /tmp/chrome-agent
+chrome-agent launch                       # auto port + name (from cwd); isolated throwaway profile under /tmp/chrome-agent
+chrome-agent launch --persistent          # reuse a chrome-agent profile (cookies/logins survive stop); not daily Chrome
+chrome-agent launch --user-data-dir PATH  # same, but at PATH (refuses Chrome's daily User Data dir)
 chrome-agent launch --headless            # no window (no border, no desktop pinning)
 chrome-agent launch --fingerprint p.json  # spoof UA/viewport/lang/TZ via launch flags (also suppresses the marker)
 chrome-agent launch -- --some-chrome-flag # everything after -- passes through to Chrome
@@ -222,6 +224,8 @@ chrome-agent cleanup                      # drop dead instances + stale session 
 ```
 
 **Instances outlive your task — stopping them is part of the workflow, not optional cleanup.** A launched instance is a full Chrome process that keeps running (and accumulating memory) until stopped. When you're done with an instance you launched: `chrome-agent stop <instance>`, then **verify with `chrome-agent status`** that the instances you started are gone — the stop's return is not the verification; the status read is. If dead instances or stale session dirs linger, `chrome-agent cleanup`. Keep an instance alive only deliberately (e.g. its login session is wanted for later work) — never by omission.
+
+**`--persistent` (or `--user-data-dir`) keeps cookies and logins across launches.** `stop` closes the window but does not delete that profile. A later `launch --persistent` reopens it, or reuses the live instance if that profile is already running. Default `launch` is still a throwaway profile. Do not point `--user-data-dir` at Chrome's daily profile — the command refuses that. Log into sites in the chrome-agent window; they will not pick up logins from your everyday Chrome.
 
 Headed launches are marked (colored border + `🤖 <instance>` title prefix) so a human can tell an agent-driven window from their own; `--no-window-border` disables it. Closing a headed window **auto-retires** its instance from the registry in real time (a transient CDP drop does not); `status` is real-time truth (port-based liveness). On Linux/X11 the window is pinned to the launching terminal's desktop (needs `xdotool`).
 

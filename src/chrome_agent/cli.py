@@ -67,7 +67,7 @@ def _print_static_usage() -> None:
     print("chrome-agent -- CLI for AI agents to control Chrome via CDP\n")
     print("Usage: chrome-agent <command> [args...]\n")
     print("Operational commands:")
-    print("  launch [--port PORT] [--fingerprint PATH] [--headless] [--no-window-border] [-- CHROME_ARGS]  Launch Chrome")
+    print("  launch [--port PORT] [--fingerprint PATH] [--headless] [--no-window-border] [--persistent] [--user-data-dir PATH] [-- CHROME_ARGS]  Launch Chrome")
     print("  status [<instance>]                                      List instances and targets")
     print("  attach <instance> [+Event ...] [--target SPEC] [--url SUB]  Attach for events")
     print("  help [<instance>] [Domain | Domain.method]               Protocol discovery")
@@ -98,6 +98,8 @@ async def _run_launch(args: list[str]) -> None:
     port_override = None
     window_border = True
     extra_args = []
+    user_data_dir = None
+    persistent = False
     i = 0
     while i < len(args):
         if args[i] == "--":
@@ -113,6 +115,12 @@ async def _run_launch(args: list[str]) -> None:
         elif args[i] == "--no-window-border":
             window_border = False
             i += 1
+        elif args[i] == "--persistent":
+            persistent = True
+            i += 1
+        elif args[i] == "--user-data-dir" and i + 1 < len(args):
+            user_data_dir = args[i + 1]
+            i += 2
         elif args[i] == "--port" and i + 1 < len(args):
             try:
                 port_override = int(args[i + 1])
@@ -124,6 +132,10 @@ async def _run_launch(args: list[str]) -> None:
             print(f"Error: unknown launch option: {args[i]}", file=sys.stderr)
             sys.exit(1)
 
+    if persistent and user_data_dir:
+        print("Error: pass --persistent or --user-data-dir, not both", file=sys.stderr)
+        sys.exit(1)
+
     try:
         result = await launch_browser(
             port_override=port_override,
@@ -131,8 +143,10 @@ async def _run_launch(args: list[str]) -> None:
             headless=headless,
             extra_args=extra_args,
             window_border=window_border,
+            user_data_dir=user_data_dir,
+            persistent=persistent,
         )
-    except (BrowserNotFoundError, RuntimeError, TimeoutError) as exc:
+    except (BrowserNotFoundError, RuntimeError, TimeoutError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -141,13 +155,19 @@ async def _run_launch(args: list[str]) -> None:
         print(f"  Port:    {result.port}")
         print(f"  PID:     {result.pid}")
         print(f"  Version: {result.browser_version}")
+        if result.persistent:
+            print(f"  Profile: {result.user_data_dir} (persistent)")
     else:
-        print(json.dumps({
+        payload = {
             "name": result.name,
             "port": result.port,
             "pid": result.pid,
             "browser_version": result.browser_version,
-        }))
+        }
+        if result.persistent:
+            payload["persistent"] = True
+            payload["user_data_dir"] = result.user_data_dir
+        print(json.dumps(payload))
 
 
 def _run_status(args: list[str]) -> None:
