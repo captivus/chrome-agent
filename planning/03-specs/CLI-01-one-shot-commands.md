@@ -30,7 +30,7 @@ The CLI uses argparse or equivalent for operational commands, and falls back to 
 
 The `--port` flag is removed from the global position. It remains available only on the `launch` command as an override for the registry-assigned port.
 
-**Target specifier support.** One-shot commands accept `--target <id-prefix-or-index>` and `--url <substring>` to specify which page target in a multi-tab browser. When there is only one tab, no specifier is needed.
+**Target specifier support.** One-shot commands accept `--target <id-prefix-or-index>`, the explicit `--target-id <id-prefix>` / `--target-index <n>`, and `--url <substring>` to specify which page target in a multi-tab browser. When there is only one tab, no specifier is needed. Exactly one selector may be given. The CLI does not interpret the spec itself: it maps the flag to a `target_by` value and hands both to CDP-04's `resolve_target`, which owns the shape rule (a bare `--target` passes `target_by=None`, meaning "decide by length"). Keeping that decision in one place is deliberate -- it was previously re-derived with `isdigit()` at each of the three call sites, and got it wrong for every target ID whose short form is all digits.
 
 **Isolated sessions.** One-shot CDP commands connect to the browser-level WebSocket, create a temporary CDP session via `Target.attachToTarget`, send the command through that session, and detach. This provides event isolation from other participants.
 
@@ -124,7 +124,7 @@ main():
 **Updated INPUT:**
 
 - For operational commands: `chrome-agent launch [--port PORT] [--fingerprint PATH] [--headless]`
-- For operational commands: `chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]`
+- For operational commands: `chrome-agent attach <instance> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]`
 - For operational commands: `chrome-agent status [<instance>]`
 - For operational commands: `chrome-agent help [<instance-or-domain> [Domain | Domain.method]]`
   - Disambiguation rule: if the first arg after `help` exists in the registry, treat it as an instance name (and the next arg, if any, as a domain query). Otherwise, treat it as a domain query.
@@ -141,17 +141,20 @@ OPERATIONAL_COMMANDS = {"launch", "attach", "status", "help", "cleanup"}
 main():
     args = parse_command_line()
 
-    // Phase 0: Extract global flags
-    args, target_spec = extract_flag(args, "--target")  // returns (remaining_args, value_or_None)
-    args, url_spec = extract_flag(args, "--url")
+    // Phase 0: Extract the target-selection flags.
+    // Each flag carries the reading it forces; bare --target maps to None,
+    // meaning "decide by shape", which resolve_target (CDP-04) does by length.
+    TARGET_FLAGS = {"--target": None, "--target-id": "id",
+                    "--target-index": "index", "--url": "url"}
 
-    // --target and --url are mutually exclusive
-    if target_spec is not None and url_spec is not None:
-        print_stderr("Error: Cannot specify both --target and --url")
+    args, seen = extract_flags(args, TARGET_FLAGS)  // list of (flag, value) in order
+
+    if len(seen) > 1:
+        print_stderr("Error: specify only one target selector (got " +
+                     join(", ", [flag for flag, _ in seen]) + ")")
         exit(1)
 
-    target_by = "id" if target_spec else ("url" if url_spec else None)
-    target_value = target_spec or url_spec
+    target_value, target_by = (seen[0][1], TARGET_FLAGS[seen[0][0]]) if seen else (None, None)
 
     command = args[0] if args else "help"
 
@@ -187,7 +190,7 @@ main():
         // Bare CDP method -- use default instance
         method = command
         params_str = args[1] if len(args) > 1 else None
-        run_one_shot(instance_name=None, method, params_str, target_spec, url_spec)
+        run_one_shot(instance_name=None, method, params_str, target_value, target_by)
 
     else:
         // Treat as instance name; next arg must be CDP method
@@ -198,7 +201,7 @@ main():
             exit(1)
         method = args[1]
         params_str = args[2] if len(args) > 2 else None
-        run_one_shot(instance_name, method, params_str, target_spec, url_spec)
+        run_one_shot(instance_name, method, params_str, target_value, target_by)
 
 
 resolve_default_instance():
@@ -216,7 +219,7 @@ resolve_default_instance():
         exit(1)
 
 
-run_one_shot(instance_name, method, params_str, target_spec, url_spec):
+run_one_shot(instance_name, method, params_str, target_spec, target_by):
     params = json.parse(params_str) if params_str else None
     if params is not None and not isinstance(params, dict):
         print_stderr("Error: parameters must be a JSON object")
@@ -233,11 +236,9 @@ run_one_shot(instance_name, method, params_str, target_spec, url_spec):
         targets = await cdp.send("Target.getTargets")
         page_targets = [t for t in targets["targetInfos"] if t["type"] == "page"]
 
-        // Resolve target
-        if target_spec or url_spec:
-            target_id = resolve_target(page_targets, target_spec, url_spec)
-        else:
-            target_id = page_targets[0]["targetId"]
+        // Resolve target -- CDP-04 owns the reading, including the shape
+        // rule applied when target_by is None (a bare --target).
+        target_id = resolve_target(page_targets, target_spec, target_by)
 
         // Create isolated session
         result = await cdp.send("Target.attachToTarget",
@@ -289,7 +290,7 @@ def run_one_shot(
     method: str,
     params_str: str | None,
     target_spec: str | None,
-    url_spec: str | None,
+    target_by: str | None,
 ) -> None:
     """Execute a single CDP command via an isolated session and print the result.
     If instance_name is None, calls resolve_default_instance()."""
@@ -311,7 +312,10 @@ def exists(instance_name: str) -> bool:
 
 # From CDP-04 (Attach Mode) -- shared target resolution logic
 def resolve_target(page_targets, target_spec, target_by) -> str:
-    """Resolve target specifier to target ID. Raises AmbiguousTargetError or TargetNotFoundError."""
+    """Resolve target specifier to target ID. target_by is "id" | "index" | "url",
+    or None for a bare --target, which CDP-04 resolves by shape (a run of fewer
+    than 8 digits is an index, anything else an ID prefix).
+    Raises AmbiguousTargetError or TargetNotFoundError."""
 ```
 
 ## 4. Validation Contract
@@ -346,6 +350,8 @@ Instance not found:
 
 Target specifier:
 - `--target <id-prefix>` selects the matching page target in a multi-tab browser.
+- `--target <n>` selects by 1-based index when the spec is a run of fewer than 8 digits; longer or non-digit specs are read as ID prefixes.
+- `--target-id <id-prefix>` and `--target-index <n>` force one reading, with no inference.
 - `--url <substring>` selects the page whose URL contains the substring.
 - When neither is provided and only one tab exists, it is selected automatically.
 - When neither is provided and multiple tabs exist, an error is produced listing available targets.
@@ -362,8 +368,8 @@ Default instance resolution:
 - If multiple instances are alive, an error lists the available names.
 
 Flag extraction:
-- `--target` and `--url` flags are extracted from argv before routing, so they work regardless of position in the argument list.
-- `--target` and `--url` are mutually exclusive. If both are provided, the CLI errors with "Cannot specify both --target and --url".
+- `--target`, `--target-id`, `--target-index` and `--url` are extracted from argv before routing, so they work regardless of position in the argument list.
+- The four selectors are mutually exclusive. If more than one is provided, the CLI errors with "specify only one target selector (got ...)", naming the flags it saw.
 
 Help disambiguation:
 - `chrome-agent help <arg>` checks whether `<arg>` exists in the instance registry. If it does, `<arg>` is treated as an instance name (and a subsequent arg, if any, as a domain query). If it does not, `<arg>` is treated as a domain query.
@@ -427,10 +433,25 @@ GIVEN: a browser registered as "mysite-01" with two page targets
 WHEN: `chrome-agent mysite-01 Page.getFrameTree` is run (no --target or --url)
 THEN: stderr contains an error listing available targets, exit code 1
 
-Scenario: Mutual exclusivity of --target and --url
+Scenario: Target specifier by an all-digit short ID
+GIVEN: a browser registered as "mysite-01" with one page target whose ID starts with 8 digits (e.g. "65602889...")
+WHEN: `chrome-agent mysite-01 --target 65602889 Page.getFrameTree` is run
+THEN: the command executes against that target, exit code 0 -- the spec is read as an ID prefix, not as index 65602889
+
+Scenario: Target specifier by index
+GIVEN: a browser registered as "mysite-01" with three page targets
+WHEN: `chrome-agent mysite-01 --target 2 Page.getFrameTree` is run
+THEN: the command executes against the target `status` lists at index 2, exit code 0
+
+Scenario: Out-of-range index is an error, not a fall-through to an ID
+GIVEN: a browser registered as "mysite-01" with three page targets, one of whose IDs starts with "5"
+WHEN: `chrome-agent mysite-01 --target 5 Page.getFrameTree` is run
+THEN: stderr contains "Index 5 out of range (1-3)" and names --target-id, exit code 1
+
+Scenario: Mutual exclusivity of the target selectors
 GIVEN: a browser registered as "mysite-01"
 WHEN: `chrome-agent mysite-01 --target ABC --url "/b" Page.getFrameTree` is run
-THEN: stderr contains "Cannot specify both --target and --url", exit code 1
+THEN: stderr contains "specify only one target selector (got --target, --url)", exit code 1
 
 Scenario: Attach command routing
 GIVEN: a browser registered as "mysite-01"
@@ -604,7 +625,7 @@ test_ambiguous_target:
         result.returncode == 1
         // stderr lists available targets
 
-test_target_and_url_mutual_exclusivity:
+test_target_selectors_mutually_exclusive:
     action:
         result = subprocess.run(
             ["chrome-agent", "mysite-01", "--target", "ABC",
@@ -612,7 +633,22 @@ test_target_and_url_mutual_exclusivity:
             capture_output=True, text=True)
     assertions:
         result.returncode == 1
-        "Cannot specify both --target and --url" in result.stderr
+        "only one target selector" in result.stderr.lower()
+        "--target, --url" in result.stderr
+
+test_all_digit_short_id_resolves_as_an_id:
+    setup:
+        browser registered as "mysite-01"; open tabs until one target ID's
+        8-char short form is all digits (~1 in 43 -- generated, not hand-picked,
+        so the test keeps exercising Chrome's real uppercase-hex charset)
+    action:
+        result = subprocess.run(
+            ["chrome-agent", "mysite-01", "--target", short_id,
+             "Runtime.evaluate", '{"expression":"document.title","returnByValue":true}'],
+            capture_output=True, text=True)
+    assertions:
+        result.returncode == 0
+        json.loads(result.stdout)["result"]["value"] == that tab's title
 
 test_attach_routing:
     setup:
@@ -749,6 +785,7 @@ Updated tactile workflow: `chrome-agent launch --port 9333`, `chrome-agent statu
 | `--port` removed from global position, retained on `launch` only | Instance Registry makes port management implicit | Agents address browsers by name, not port. The registry resolves names to ports. `--port` on `launch` is an override for cases where a specific port is needed. | If there is a use case for bypassing the registry entirely. |
 | `session` replaced by `attach` | Alignment with CDP-04 (Attach Mode) naming | `attach` better describes the operation -- connecting to an existing browser. `session` was ambiguous (it could mean creating a browser session or a CDP session). | N/A -- this is a permanent rename. |
 | `--target` and `--url` flags added to one-shot commands | Multi-tab browser support | Agents working with multiple tabs need to specify which target to send commands to. The flags use the same resolution logic as Attach Mode (CDP-04). | If more complex target selection is needed (e.g., by title, by type). |
+| `--target-id` / `--target-index` added alongside bare `--target` | A published short target ID that is all digits was read as a tab index and rejected (CDP-04 Learnings #5) | Bare `--target` must infer a reading, and inference can always be wrong for some spec. The explicit selectors give callers -- especially `stop --target`, which closes a tab -- a way to state the reading and get no inference at all. Bare `--target` is kept so existing callers are unaffected. | If a third ambiguous spec form appears, or if inference proves unnecessary because callers always use the explicit flags. |
 | Isolated sessions via `Target.attachToTarget` for one-shot | Event isolation in multi-participant scenarios | Without isolated sessions, one-shot commands share the page-level WebSocket and can receive events intended for other participants. Creating a temporary session via `Target.attachToTarget` provides clean isolation. | If the overhead of attach/detach proves problematic (unlikely -- it is sub-millisecond). |
 
 ## 8. Learnings
@@ -763,7 +800,7 @@ Updated tactile workflow: `chrome-agent launch --port 9333`, `chrome-agent statu
 
 **Iteration 1 Status:** Complete
 
-**Iteration 2 Status:** Not started
+**Iteration 2 Status:** Shipped. Code in `src/chrome_agent/cli.py`, tests in `tests/test_cli.py`.
 
 ## 10. Test Results
 

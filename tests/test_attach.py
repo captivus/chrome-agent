@@ -7,6 +7,7 @@ and a temporary registry for isolation.
 import asyncio
 import json
 import os
+import random
 import subprocess
 import sys
 
@@ -22,6 +23,7 @@ from chrome_agent.attach import (
     run_attach,
 )
 from chrome_agent.cdp_client import CDPClient, get_ws_url
+from chrome_agent.instance_status import TARGET_ID_LENGTH
 from chrome_agent.registry import (
     InstanceInfo,
     InstanceNotFoundError,
@@ -88,6 +90,127 @@ def test_resolve_target_not_found():
     targets = [{"targetId": "ABCD1234", "url": "https://example.com", "title": "Ex"}]
     with pytest.raises(TargetNotFoundError):
         resolve_target(page_targets=targets, target_spec="ZZZZ", target_by="id")
+
+
+# ---------------------------------------------------------------------------
+# Auto (shape-based) resolution: what a bare --target means
+# ---------------------------------------------------------------------------
+
+
+def _fake_target_id(rng, *, all_digit_prefix: bool) -> str:
+    """A 32-char id in Chrome's real charset: uppercase hex.
+
+    Generated rather than hand-picked so the regression keeps testing the
+    charset that produces the bug, not one memorised string.
+    """
+    head = "".join(rng.choice("0123456789" if all_digit_prefix else "0123456789ABCDEF")
+                   for _ in range(TARGET_ID_LENGTH))
+    tail = "".join(rng.choice("0123456789ABCDEF") for _ in range(32 - TARGET_ID_LENGTH))
+    return head + tail
+
+
+def test_resolve_target_auto_reads_all_digit_short_id_as_an_id():
+    """A status-published short id that happens to be all digits still resolves.
+
+    The regression: a target id is uppercase hex, so its 8-char prefix -- the
+    `id` field `status` publishes -- contains no letter about 1 time in 43.
+    Those were routed to the index branch and rejected against the tab count,
+    silently, listing the very target they could not find.
+    """
+    rng = random.Random(20260823)
+    for _ in range(200):
+        full = _fake_target_id(rng, all_digit_prefix=True)
+        short = full[:TARGET_ID_LENGTH].upper()
+        assert short.isdigit(), "fixture must exercise the all-digit case"
+        targets = [{"targetId": full, "url": "https://x.com/home", "title": "X"}]
+        assert resolve_target(page_targets=targets, target_spec=short, target_by=None) == full
+
+
+def test_resolve_target_auto_prefers_a_short_digit_run_as_an_index():
+    """A short digit run keeps meaning the index, even when it prefixes an id.
+
+    Length, not range, is what makes the auto path safe to adopt: every spec
+    that resolved before resolves the same way now. `--target-id` is the escape
+    for the caller who meant the id.
+    """
+    targets = [
+        {"targetId": "2AAA0000" + "0" * 24, "url": "https://a.com", "title": "A"},
+        {"targetId": "BBBB0000" + "0" * 24, "url": "https://b.com", "title": "B"},
+        {"targetId": "CCCC0000" + "0" * 24, "url": "https://c.com", "title": "C"},
+    ]
+    assert resolve_target(page_targets=targets, target_spec="2", target_by=None) \
+        == targets[1]["targetId"]
+    assert resolve_target(page_targets=targets, target_spec="2", target_by="id") \
+        == targets[0]["targetId"]
+
+
+def test_resolve_target_auto_treats_full_length_digit_spec_as_an_id_prefix():
+    """"00000003" is an id prefix, not index 3 -- it is as long as a short id."""
+    padded = "00000003" + "F" * 24
+    targets = [
+        {"targetId": "AAAA0000" + "0" * 24, "url": "https://a.com", "title": "A"},
+        {"targetId": "BBBB0000" + "0" * 24, "url": "https://b.com", "title": "B"},
+        {"targetId": padded, "url": "https://c.com", "title": "C"},
+    ]
+    assert resolve_target(page_targets=targets, target_spec="00000003", target_by=None) == padded
+
+
+def test_resolve_target_id_prefix_is_case_insensitive():
+    """Chrome emits uppercase ids; a lower-case prefix is a transcription of one."""
+    full = "83F08D196FD29E1B473BE4AF92B0E865"
+    targets = [{"targetId": full, "url": "chrome://newtab/", "title": "New Tab"}]
+    assert resolve_target(page_targets=targets, target_spec="83f08d19", target_by=None) == full
+    assert resolve_target(page_targets=targets, target_spec="83f08d19", target_by="id") == full
+
+
+def test_resolve_target_auto_out_of_range_index_never_falls_through_to_an_id():
+    """A mistyped index must stay an error, not silently hit a tab whose id starts with it.
+
+    The mirror of the reported bug: resolving an out-of-range number by falling
+    back to an id prefix lands on some unrelated tab about N/16 of the time for
+    N tabs -- and on `stop --target` that closes the wrong one.
+    """
+    targets = [
+        {"targetId": "5A3B0000" + "0" * 24, "url": "https://a.com", "title": "A"},
+        {"targetId": "BBBB0000" + "0" * 24, "url": "https://b.com", "title": "B"},
+        {"targetId": "CCCC0000" + "0" * 24, "url": "https://c.com", "title": "C"},
+    ]
+    with pytest.raises(TargetNotFoundError) as exc_info:
+        resolve_target(page_targets=targets, target_spec="5", target_by=None)
+    assert "out of range (1-3)" in str(exc_info.value)
+
+
+def test_resolve_target_auto_errors_name_the_other_reading():
+    """Each failure points at the flag that forces the reading it did not take."""
+    targets = [{"targetId": "ABCD1234" + "0" * 24, "url": "https://a.com", "title": "A"}]
+
+    with pytest.raises(TargetNotFoundError) as exc_info:
+        resolve_target(page_targets=targets, target_spec="99999999", target_by=None)
+    assert "--target-index" in str(exc_info.value)
+
+    with pytest.raises(TargetNotFoundError) as exc_info:
+        resolve_target(page_targets=targets, target_spec="9", target_by=None)
+    assert "--target-id" in str(exc_info.value)
+
+
+def test_resolve_target_auto_ambiguous_id_prefix():
+    """An id prefix matching several targets is ambiguous, not silently first-wins."""
+    targets = [
+        {"targetId": "AB000000" + "0" * 24, "url": "https://a.com", "title": "A"},
+        {"targetId": "AB111111" + "1" * 24, "url": "https://b.com", "title": "B"},
+    ]
+    with pytest.raises(AmbiguousTargetError) as exc_info:
+        resolve_target(page_targets=targets, target_spec="AB", target_by=None)
+    assert len(exc_info.value.targets) == 2
+
+
+def test_resolve_target_explicit_index_does_not_fall_back():
+    """--target-index is deterministic: an out-of-range index is an error, not an id."""
+    full = "19041805" + "D8B9D13219041222A48F8631"
+    targets = [{"targetId": full, "url": "https://www.linkedin.com/feed/", "title": "Feed"}]
+    with pytest.raises(TargetNotFoundError) as exc_info:
+        resolve_target(page_targets=targets, target_spec="19041805", target_by="index")
+    assert "out of range" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------

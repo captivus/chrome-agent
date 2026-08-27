@@ -102,12 +102,12 @@ Single feature -- no parallelism. This is the integration layer that wires every
 
 #### Recommended Implementation Order
 
-1. CLI-01 -- rewrites the routing logic for instance name addressing, adds attach route, updates status routing, adds flag extraction for --target/--url, adds default instance resolution, adds help disambiguation
+1. CLI-01 -- rewrites the routing logic for instance name addressing, adds attach route, updates status routing, adds extraction of the target-selection flags (--target, --target-id, --target-index, --url), adds default instance resolution, adds help disambiguation
 
 #### Phase Completion Criteria
 
 - CLI-01: All routing forms work correctly (operational commands, instance+method, bare method with default resolution, attach, status with instance filter, help disambiguation)
-- --target and --url flag extraction works, mutual exclusivity enforced
+- Target-selection flag extraction works, and only one selector may be given at a time
 - Backward compatibility: `chrome-agent Page.navigate '...'` still works via default instance resolution
 - **Integration verification:** Full end-to-end workflow from terminal: launch -> status -> attach in background -> one-shot navigate -> verify attach captured events -> help with instance name -> cleanup
 - **Phase gate:** All tests passing, full end-to-end verified, no regressions in iteration 1 tests.

@@ -185,8 +185,8 @@ Output is JSON on stdout. A one-shot prints the CDP method's **raw result object
 ```bash
 chrome-agent launch [--port PORT] [--headless] [--fingerprint profile.json] [--no-window-border] [--persistent] [--user-data-dir PATH]
 chrome-agent status [<instance>]
-chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
-chrome-agent stop <instance> [--target SPEC] [--url SUBSTRING]
+chrome-agent attach <instance> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
+chrome-agent stop <instance> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
 chrome-agent help [<instance>] [Domain | Domain.method]
 chrome-agent cleanup
 chrome-agent --version
@@ -194,7 +194,7 @@ chrome-agent <instance> Domain.method '{"param": "value"}'
 ```
 
 - `launch` → `{"name","port","pid","browser_version"}`
-- `status` → `[{"name","port","alive","targets":[{"id","full_id","index","url","title"}]}]` — `index` is what `--target N` selects
+- `status` → `[{"name","port","alive","targets":[{"id","full_id","index","url","title"}]}]` — `index` is what `--target N` selects; `id` (the 8-char short form) and `full_id` both work as `--target`/`--target-id` specs
 - `Page.navigate` → `{"frameId","loaderId","isDownload"}`
 - `Runtime.evaluate` (`returnByValue:true`) → `{"result":{"type":"string","value":"..."}}` — read **`result.value`** (the value sits under the `result` key)
 - `Page.captureScreenshot` → `{"data":"<base64 png>"}` — bytes are at `data`, **not** `result.data`; decode with `… | python3 -c "import sys,json,base64; open('/tmp/s.png','wb').write(base64.b64decode(json.load(sys.stdin)['data']))"` — then view `/tmp/s.png` to actually see the render.
@@ -205,9 +205,17 @@ chrome-agent <instance> Domain.method '{"param": "value"}'
 chrome-agent mysite-01 --target 2 Page.navigate '{"url":"..."}'   # 1-based index
 chrome-agent mysite-01 --target 956FD3C2 Runtime.evaluate '{...}' # target-id prefix
 chrome-agent mysite-01 --url example.com Runtime.evaluate '{...}' # url substring
+chrome-agent mysite-01 --target-index 2 Runtime.evaluate '{...}'  # index, no inference
+chrome-agent mysite-01 --target-id 65602889 Runtime.evaluate '{...}' # id, no inference
 ```
 
 A one-shot against multiple tabs without a specifier is an error that lists them. **Index gotcha:** `--target N` indices are sorted by stable target id, **not** tab creation/visual order — opening a tab can renumber the others. Prefer `--url` or an id prefix for stability.
+
+**Bare `--target` reads its spec by length:** a run of fewer than 8 digits is a tab index; anything else is a target-id prefix, matched case-insensitively so a lower-cased id works. So the `id` field from `status` is usable directly — including the ~1-in-43 target id whose 8-char short form is all digits (ids are uppercase hex, so `(10/16)**8` of short ids contain no letter; those used to be read as an out-of-range index and rejected, in an error that listed the very tab it could not find).
+
+Length is the discriminator, **not** range: a mistyped `--target 5` against 3 tabs stays a plain out-of-range error rather than silently resolving to whichever tab's id happens to start with `5`. Each failure names the flag that forces the other reading.
+
+**`--target-id`, `--target-index` and `--url` skip the inference entirely.** Worth it for `stop --target`, which closes a tab, and required for an **all-digit** id prefix shorter than 8 characters — a short prefix containing any letter (`--target 956F`) is unambiguous and needs no flag.
 
 ## Managing instances
 
@@ -219,7 +227,7 @@ chrome-agent launch --headless            # no window (no border, no desktop pin
 chrome-agent launch --fingerprint p.json  # spoof UA/viewport/lang/TZ via launch flags (also suppresses the marker)
 chrome-agent launch -- --some-chrome-flag # everything after -- passes through to Chrome
 chrome-agent status                       # all instances + their tabs
-chrome-agent stop mysite-01 [--target 2 | --url foo]   # whole browser, or one tab
+chrome-agent stop mysite-01 [--target-index 2 | --target-id 65602889 | --url foo]  # whole browser, or one tab
 chrome-agent cleanup                      # drop dead instances + stale session dirs
 ```
 

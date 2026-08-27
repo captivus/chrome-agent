@@ -28,6 +28,8 @@ The attach process is designed to run as a background process: under Claude Code
 
 When the instance has multiple page targets (tabs), the agent specifies which to attach to using a target specifier: a target ID prefix (e.g., `--target 956FD3C2`), a numeric index (e.g., `--target 1`), or a URL substring (e.g., `--url meetup.com`). When there's only one page target, no specifier is needed. Ambiguous or missing targets produce an error listing the available targets.
 
+A bare `--target` spec is read **by length**: a run of fewer than `TARGET_ID_LENGTH` (8) digits is a tab index, anything else is a target ID prefix, matched case-insensitively. Length rather than range is the discriminator, and the two readings are exclusive rather than a fallback chain, so neither can silently catch a spec the other got wrong -- an out-of-range `--target 5` stays an out-of-range error instead of resolving to whichever tab's ID happens to start with `5`. The explicit `--target-id`, `--target-index` and `--url` flags skip the inference entirely; each failure message names the flag that forces the reading it did not take. See Learnings #5 for why an ID could not simply be inferred by `isdigit()`.
+
 Detachment happens when the process exits (Ctrl+D, signal, or parent process termination). The CDP session is destroyed, event subscriptions die, and the browser and page are unaffected.
 
 ### Level 2 -- Logic Flow (INPUT / LOGIC / OUTPUT)
@@ -37,7 +39,7 @@ Detachment happens when the process exits (Ctrl+D, signal, or parent process ter
 - `instance_name`: string -- resolved via BRW-04 registry to get port
 - `subscriptions`: list of strings -- event names to subscribe to at launch (e.g., ["Page.loadEventFired", "Network.requestWillBeSent"])
 - `target_spec`: string or None -- target ID prefix, numeric index, or URL substring. None = default to only target.
-- `target_by`: "id" | "index" | "url" -- how to interpret target_spec. Inferred from the flag used (--target vs --url).
+- `target_by`: "id" | "index" | "url" | None -- how to interpret target_spec. Set from the explicit flag used (--target-id / --target-index / --url); None (or "auto") for a bare --target, meaning "decide by shape", which resolve_target does by length.
 
 **LOGIC:**
 
@@ -172,6 +174,23 @@ unsubscribe_event(cdp, session_id, event_name, subscribed_events):
         cdp.off(event=event_name, callback=handler)
 
 
+reads_as_index(target_spec) -> bool:
+    // Length decides, not range. A target ID is uppercase hex, so an 8-char
+    // short ID (what BRW-05 status publishes as "id") is all digits about
+    // 1 time in 43; reading those as an index rejected them against the tab
+    // count. Range must not be the discriminator: falling back to an ID
+    // prefix whenever a number is out of range turns a mistyped index into a
+    // silent hit on an unrelated tab (~N/16 for N tabs).
+    return target_spec.isdigit() and len(target_spec) < TARGET_ID_LENGTH
+
+
+match_id_prefix(page_targets, target_spec) -> list:
+    // Case-insensitive: Chrome emits uppercase hex and status upper-cases the
+    // short form it publishes, so a lower-cased prefix is a transcription.
+    prefix = target_spec.upper()
+    return [t for t in page_targets if t["targetId"].upper().startswith(prefix)]
+
+
 resolve_target(page_targets, target_spec, target_by) -> str:
     if target_spec is None:
         if len(page_targets) == 1:
@@ -179,14 +198,38 @@ resolve_target(page_targets, target_spec, target_by) -> str:
         else:
             raise AmbiguousTargetError(page_targets)
 
+    if target_by is None or target_by == "auto":
+        if reads_as_index(target_spec):
+            index = int(target_spec) - 1  // 1-based
+            if 0 <= index < len(page_targets):
+                return page_targets[index]["targetId"]
+            raise TargetNotFoundError(
+                f"Index {target_spec} out of range (1-{len(page_targets)})"
+                f" -- pass --target-id {target_spec} if you meant a target id",
+                page_targets)
+
+        matches = match_id_prefix(page_targets, target_spec)
+        if len(matches) == 1:
+            return matches[0]["targetId"]
+        elif len(matches) > 1:
+            raise AmbiguousTargetError(matches)
+        raise TargetNotFoundError(
+            f"No target matching id prefix '{target_spec}'"
+            + (f" -- pass --target-index {target_spec} if you meant a tab index"
+               if target_spec.isdigit() else ""),
+            page_targets)
+
     if target_by == "index":
+        if not target_spec.isdigit():
+            raise TargetNotFoundError(f"Index '{target_spec}' is not a number", page_targets)
         index = int(target_spec) - 1  // 1-based
         if 0 <= index < len(page_targets):
             return page_targets[index]["targetId"]
-        raise TargetNotFoundError(f"Index {target_spec} out of range", page_targets)
+        raise TargetNotFoundError(
+            f"Index {target_spec} out of range (1-{len(page_targets)})", page_targets)
 
     elif target_by == "id":
-        matches = [t for t in page_targets if t["targetId"].startswith(target_spec)]
+        matches = match_id_prefix(page_targets, target_spec)
         if len(matches) == 1:
             return matches[0]["targetId"]
         elif len(matches) == 0:
@@ -249,7 +292,8 @@ async def run_attach(
     instance_name: str,
     subscriptions: list[str] | None = None,
     target_spec: str | None = None,
-    target_by: str = "id",
+    target_by: str | None = None,
+    registry_path: str | None = None,
 ) -> None:
     """Run the attach session.
 
@@ -269,11 +313,15 @@ async def run_attach(
 def resolve_target(
     page_targets: list[dict],
     target_spec: str | None,
-    target_by: str,
+    target_by: str | None,
 ) -> str:
     """Resolve a target specifier to a target ID.
 
-    target_by: "id" (prefix match), "index" (1-based), or "url" (substring match).
+    target_by: "id" (prefix match, case-insensitive), "index" (1-based),
+    "url" (substring match), or None/"auto" to decide by shape -- a run of
+    fewer than TARGET_ID_LENGTH digits is an index, anything else an id
+    prefix. Auto is a single reading, not a fallback chain: neither reading
+    can silently catch a spec the other one got wrong.
     Returns the targetId string.
 
     Raises AmbiguousTargetError or TargetNotFoundError.
@@ -293,6 +341,10 @@ Target identification:
 - Attach to a multi-tab instance by target index.
 - Attach to a multi-tab instance by URL substring.
 - Attach to a single-tab instance with no target specifier (auto-selects).
+- Attach by a short target ID that is entirely digits (the ~1-in-43 case) -- resolves as an ID, not as an out-of-range index.
+- Attach by a lower-cased target ID prefix -- resolves, since ID matching is case-insensitive.
+- A number larger than the tab count is an out-of-range error, never a silent ID match on an unrelated tab.
+- The explicit `--target-id` / `--target-index` selectors force one reading and never fall through to the other.
 
 Event isolation:
 - Two attach sessions on the same page target with different subscriptions each see only their own subscribed events.
@@ -331,6 +383,21 @@ Scenario: Target by index
 GIVEN: browser instance "test-01" with 2 page targets
 WHEN: run_attach("test-01", target_spec="2", target_by="index")
 THEN: attaches to the second page target successfully
+
+Scenario: Target by an all-digit short ID (bare --target)
+GIVEN: browser instance "test-01" with 1 page target whose target ID begins with 8 digits
+WHEN: run_attach("test-01", target_spec=<that 8-digit short ID>, target_by=None)
+THEN: attaches to that page target -- the spec is read as an ID prefix, not as index 19041805
+
+Scenario: Bare --target keeps a short digit run as an index
+GIVEN: browser instance "test-01" with 3 page targets, the first of whose ID begins with "2"
+WHEN: run_attach("test-01", target_spec="2", target_by=None)
+THEN: attaches to the SECOND page target (index), not the first (ID prefix)
+
+Scenario: Out-of-range index never falls through to an ID match
+GIVEN: browser instance "test-01" with 3 page targets, one of whose ID begins with "5"
+WHEN: run_attach("test-01", target_spec="5", target_by=None)
+THEN: TargetNotFoundError "out of range (1-3)", naming --target-id as the alternative reading
 
 Scenario: Auto-select single target
 GIVEN: browser instance "test-01" with 1 page target
@@ -518,7 +585,7 @@ Run the full dual-channel workflow:
 | No built-in event filtering | User explicitly decided not to be opinionated about filtering | chrome-agent passes through subscribed events. Users subscribe selectively and filter downstream with jq, grep, or Python. CDP's `Fetch.enable` with URL patterns is documented as an advanced technique. | If common filtering patterns emerge from real-world use. |
 | Domain disable not attempted on unsubscribe | Complexity and risk | When unsubscribing from an event, we remove it from the subscribed set but don't call `Domain.disable` because other subscribed events may still need the domain enabled. Disabling a domain that another subscription depends on would silently break that subscription. | If the event volume from enabled-but-unsubscribed events becomes a performance concern (unlikely -- events are filtered in chrome-agent's event handler, not in Chrome). |
 | Subsumes observe.py functionality | observe.py was a standalone script; attach makes event observation a native CLI command | observe.py's tier-based filtering (nav/dev/full) is not replicated in attach -- users compose their own subscription sets. The observe.py script can be retired. | N/A |
-| CLI argument parsing is CLI-01's responsibility | `attach` subcommand has `--target`, `--url` flags and `+Event` positional args | The `--target`, `--url` flags and `+Event` positional args for the `attach` subcommand are parsed by CLI-01's routing logic, which extracts flags before passing remaining args to `run_attach`. CDP-04 defines the `run_attach` interface; CLI-01 is responsible for parsing the command line and calling `run_attach` with the extracted values. | N/A |
+| CLI argument parsing is CLI-01's responsibility | `attach` subcommand has `--target`, `--target-id`, `--target-index`, `--url` flags and `+Event` positional args | The target-selection flags and the `+Event` positional args for the `attach` subcommand are parsed by CLI-01's routing logic, which extracts flags before passing remaining args to `run_attach`. CLI-01 maps each flag to a `target_by` value (`--target` -> None, meaning decide by shape) and passes it through; CDP-04 owns the resolution itself, so the shape rule lives in `resolve_target` rather than being re-derived per call site. | N/A |
 
 ## 8. Learnings
 
@@ -528,18 +595,20 @@ Run the full dual-channel workflow:
 | 2 | Event isolation via Target.attachToTarget | Exploration | Two sessions on the same page target with different subscriptions see only their own events -- verified with dual-session experiment | Learning record: 2026-04-14-chrome-agent-session-mode-for-exploratory-scraping.md |
 | 3 | Concurrent attach + one-shot | Exploration | Attach subprocess captures events caused by independent one-shot CLI commands -- the dual-channel pattern works across separate processes | /tmp/exp3_attach_process.py (process experiment) |
 | 4 | CDP domain enabling is all-or-nothing | Research | CDP has no per-event filtering at the protocol level. Network.enable delivers ALL network events. Per-event selectivity must be implemented in chrome-agent's event handler (already done in session.py's +/- protocol). Exception: Fetch.enable takes URL patterns. | Sub-agent research from this session |
+| 5 | A target ID cannot be told from an index by `isdigit()` | Measurement | Chrome target IDs are uppercase hex, so an 8-char short ID (BRW-05's published `id`) is all digits `(10/16)**8` of the time -- measured 46/2000 = 2.30% (95% CI +/-0.66) over 2000 real Chrome 151 IDs, i.e. 1 tab in 43. The original `target_by = "index" if spec.isdigit() else "id"` sent those to the index branch, where they were rejected against the tab count in an error that listed the very tab it could not find -- silent, self-consistent, and identical on every retry since a target ID is fixed for the target's lifetime. Observed in the wild: an AIE-notifier post failed because a cold-started browser drew `656028891FD77008DA0E9E1D96B66903`. | TODO.md issue (removed on fix); `tests/test_attach.py::test_resolve_target_auto_reads_all_digit_short_id_as_an_id` |
+| 6 | Range is the wrong discriminator for the ID/index ambiguity | Exploration | The obvious fix -- try index, fall back to ID prefix when out of range -- introduces the mirror failure: a mistyped `--target 5` silently resolves to whichever tab's ID starts with `5` (~N/16 for N tabs; ~16% at 3 tabs, higher than the 2.3% bug being fixed), and on `stop --target` closes the wrong tab. Length is the safe discriminator because it separates the two populations without either reading catching the other's mistakes. Differential-tested over 20,000 randomized specs: 0 previously-successful resolutions changed, 3,322 previously-failing ones now resolve. | `_reads_as_index` in src/chrome_agent/attach.py; `tests/test_attach.py::test_resolve_target_auto_out_of_range_index_never_falls_through_to_an_id` |
 
 ---
 
 ## 9. Implementation Status
 
-**Status:** Not started
+**Status:** Shipped. Code in `src/chrome_agent/attach.py`, tests in `tests/test_attach.py`.
 
 ## 10. Test Results
 
 ### Refinement Log
 
-[Filled during the Implementation Loop]
+Not kept for this feature.
 
 ### Final Test Results
 

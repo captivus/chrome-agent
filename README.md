@@ -115,8 +115,8 @@ An attach session **exits on its own once it has outlived its purpose** -- when 
 ```
 chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT] [--no-window-border] [--persistent] [--user-data-dir PATH]
 chrome-agent status [<instance>]
-chrome-agent attach <instance> [+Event ...] [--target SPEC] [--url SUBSTRING]
-chrome-agent stop <instance> [--target SPEC] [--url SUBSTRING]
+chrome-agent attach <instance> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
+chrome-agent stop <instance> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
 chrome-agent help [<instance>] [Domain | Domain.method]
 chrome-agent cleanup
 chrome-agent --version
@@ -126,8 +126,8 @@ chrome-agent --version
 |---------|-------------|
 | `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. `--persistent` reuses a chrome-agent profile (cookies survive `stop`); `--user-data-dir PATH` does the same at PATH. Default launch is still a throwaway profile. |
 | `status` | List running instances with their page targets (IDs, URLs, titles). |
-| `attach` | Persistent event observation with isolated subscriptions. Use `--target N` or `--url substring` for multi-tab browsers. |
-| `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Use `--target` or `--url` to close a single tab without affecting the browser. |
+| `attach` | Persistent event observation with isolated subscriptions. Use `--target` (fewer than 8 digits is a tab index, anything else a target-id prefix), `--url substring`, or the explicit `--target-id` / `--target-index` for multi-tab browsers. |
+| `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Use `--target` or `--url` to close a single tab without affecting the browser; because this closes a tab, prefer the explicit `--target-id` / `--target-index`. |
 | `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |
 | `cleanup` | Remove stale instances (dead browsers) and their session directories. |
 | `--version` | Print the installed chrome-agent version (`-V` alias) and exit. |

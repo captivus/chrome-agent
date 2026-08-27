@@ -326,11 +326,12 @@ chrome-agent attach myapp +Page.frameNavigated +Page.loadEventFired 2>&1
 
 **Attach exits immediately:** The instance name may not be registered. Run `chrome-agent status` to see registered instances and their names. If the instance was launched before the registry existed, relaunch it.
 
-**Multiple page targets:** If the browser has multiple tabs, attach auto-selects when there is exactly one page target. With multiple targets, it reports the available targets and exits. Use `--target` (ID prefix or 1-based index) or `--url` (substring match) to specify which tab:
+**Multiple page targets:** If the browser has multiple tabs, attach auto-selects when there is exactly one page target. With multiple targets, it reports the available targets and exits. Use `--target` (fewer than 8 digits is the 1-based index, anything else a target-id prefix) or `--url` (substring match) to specify which tab. `--target-id` and `--target-index` force one reading when you want no inference at all:
 
 ```bash
 chrome-agent attach myapp +Page.loadEventFired --url localhost:3000
 chrome-agent attach myapp +Page.loadEventFired --target 1
+chrome-agent attach myapp +Page.loadEventFired --target-id 65097196
 ```
 
 **Browser crashes while attached:** The attach process exits with `{"error": "Browser disconnected"}` on stdout and terminates. Monitor sees this as the process ending. Recovery: check `chrome-agent status` to confirm the instance is dead, relaunch with `chrome-agent launch`, and restart the attach session against the new instance. Events between the crash and the new attach are lost -- there is no replay.

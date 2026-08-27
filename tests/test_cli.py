@@ -156,7 +156,28 @@ def test_target_url_mutual_exclusivity():
     """--target and --url together produces error."""
     result = _run_cli("--target", "ABC", "--url", "test.com", "mysite", "Page.navigate", '{"url": "x"}')
     assert result.returncode == 1
-    assert "cannot specify both" in result.stderr.lower()
+    assert "only one target selector" in result.stderr.lower()
+    assert "--target, --url" in result.stderr
+
+
+def test_explicit_target_selectors_are_mutually_exclusive():
+    """The explicit selectors join the same exclusivity rule as --target/--url."""
+    result = _run_cli(
+        "--target-id", "ABC", "--target-index", "1", "mysite", "Page.navigate", '{"url": "x"}'
+    )
+    assert result.returncode == 1
+    assert "only one target selector" in result.stderr.lower()
+
+
+def test_extract_flags_maps_each_selector_to_its_resolution():
+    """Each flag carries its own resolution; bare --target defers to shape."""
+    from chrome_agent.cli import _extract_flags
+
+    assert _extract_flags(["mysite", "--target", "2"]) == (["mysite"], "2", None)
+    assert _extract_flags(["mysite", "--target-id", "2"]) == (["mysite"], "2", "id")
+    assert _extract_flags(["mysite", "--target-index", "2"]) == (["mysite"], "2", "index")
+    assert _extract_flags(["mysite", "--url", "x.com"]) == (["mysite"], "x.com", "url")
+    assert _extract_flags(["mysite", "Page.navigate"]) == (["mysite", "Page.navigate"], None, None)
 
 
 def test_launch_persistent_and_user_data_dir_mutex():
@@ -248,7 +269,7 @@ def test_stop_target_dead_instance_clean_error(monkeypatch, capsys):
         ),
     )
     with pytest.raises(SystemExit) as exc_info:
-        cli._run_stop(args=["deadinst"], target_spec="1", url_spec=None)
+        cli._run_stop(args=["deadinst"], target_spec="1", target_by=None)
     assert exc_info.value.code == 1
     out = capsys.readouterr()
     assert "Traceback" not in (out.out + out.err), f"uncaught traceback leaked:\n{out.err}"
@@ -308,7 +329,7 @@ def test_one_shot_ambiguous_target_clean_error(browser_session, monkeypatch, cap
                 method="Page.captureScreenshot",
                 params_str='{"format": "png"}',
                 target_spec=None,
-                url_spec=None,
+                target_by=None,
             ))
         assert exc_info.value.code == 1
         out = capsys.readouterr()
@@ -387,7 +408,7 @@ def test_dotted_instance_name_routes_as_instance(monkeypatch):
     # Capture what _run_cdp_one_shot receives
     captured = {}
 
-    async def fake_one_shot(instance_name, method, params_str, target_spec, url_spec):
+    async def fake_one_shot(instance_name, method, params_str, target_spec, target_by):
         captured["instance_name"] = instance_name
         captured["method"] = method
         captured["params_str"] = params_str
@@ -419,7 +440,7 @@ def test_unregistered_dotted_first_arg_routes_as_method(monkeypatch):
 
     captured = {}
 
-    async def fake_one_shot(instance_name, method, params_str, target_spec, url_spec):
+    async def fake_one_shot(instance_name, method, params_str, target_spec, target_by):
         captured["instance_name"] = instance_name
         captured["method"] = method
 

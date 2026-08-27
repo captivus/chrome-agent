@@ -16,6 +16,7 @@ import warnings
 
 from .cdp_client import CDPClient, get_ws_url
 from .errors import CDPError, NoPageError
+from .instance_status import TARGET_ID_LENGTH
 from .registry import (
     InstanceInfo,
     InstanceNotFoundError,
@@ -103,6 +104,35 @@ class TargetNotFoundError(Exception):
         super().__init__(f"{message}\nAvailable targets:\n{listing}")
 
 
+def _reads_as_index(target_spec: str) -> bool:
+    """Whether a bare --target spec denotes a tab index rather than a target id.
+
+    Length decides, not range. A target id is uppercase hex, so the 8-character
+    short form ``status`` publishes as ``id`` contains no letter roughly 1 time
+    in 43; those all-digit ids were read as an index and rejected against the
+    tab count, silently, in an error that listed the very target it could not
+    find. Anything that long is an id -- no browser has 10 million tabs.
+
+    Range must NOT be the discriminator. Falling back to an id prefix whenever
+    a number is out of range turns a mistyped index into a silent hit on some
+    unrelated tab whose id happens to start with that digit (~N/16 for N tabs),
+    which is the same silent-misroute failure pointing the other way. Below
+    TARGET_ID_LENGTH digits a spec is an index, and an out-of-range one is an
+    error -- exactly as before.
+    """
+    return target_spec.isdigit() and len(target_spec) < TARGET_ID_LENGTH
+
+
+def _match_id_prefix(page_targets: list[dict], target_spec: str) -> list[dict]:
+    """Targets whose id starts with the spec, matched case-insensitively.
+
+    Chrome emits uppercase-hex ids and ``status`` upper-cases the short form it
+    publishes, so a lower-case prefix is a transcription, not a different id.
+    """
+    prefix = target_spec.upper()
+    return [t for t in page_targets if t["targetId"].upper().startswith(prefix)]
+
+
 def resolve_target(
     page_targets: list[dict],
     target_spec: str | None,
@@ -110,7 +140,11 @@ def resolve_target(
 ) -> str:
     """Resolve a target specifier to a target ID.
 
-    target_by: "id" (prefix match), "index" (1-based), or "url" (substring).
+    target_by: "id" (prefix match), "index" (1-based), "url" (substring), or
+    None/"auto" to decide by shape -- a run of fewer than TARGET_ID_LENGTH
+    digits is an index, anything else is an id prefix. Auto is a single
+    reading, not a fallback chain: neither reading can silently catch a spec
+    the other one got wrong.
     Returns the targetId string.
 
     Raises AmbiguousTargetError or TargetNotFoundError.
@@ -121,7 +155,40 @@ def resolve_target(
         else:
             raise AmbiguousTargetError(targets=page_targets)
 
+    if target_by in (None, "auto"):
+        if _reads_as_index(target_spec):
+            index = int(target_spec) - 1
+            if 0 <= index < len(page_targets):
+                return page_targets[index]["targetId"]
+            raise TargetNotFoundError(
+                message=(
+                    f"Index {target_spec} out of range (1-{len(page_targets)})"
+                    f" -- pass --target-id {target_spec} if you meant a target id"
+                ),
+                targets=page_targets,
+            )
+
+        matches = _match_id_prefix(page_targets, target_spec)
+        if len(matches) == 1:
+            return matches[0]["targetId"]
+        elif len(matches) > 1:
+            raise AmbiguousTargetError(targets=matches)
+        raise TargetNotFoundError(
+            message=(
+                f"No target matching id prefix '{target_spec}'"
+                f" -- pass --target-index {target_spec} if you meant a tab index"
+                if target_spec.isdigit()
+                else f"No target matching id prefix '{target_spec}'"
+            ),
+            targets=page_targets,
+        )
+
     if target_by == "index":
+        if not target_spec.isdigit():
+            raise TargetNotFoundError(
+                message=f"Index '{target_spec}' is not a number",
+                targets=page_targets,
+            )
         index = int(target_spec) - 1
         if 0 <= index < len(page_targets):
             return page_targets[index]["targetId"]
@@ -131,7 +198,7 @@ def resolve_target(
         )
 
     elif target_by == "id":
-        matches = [t for t in page_targets if t["targetId"].startswith(target_spec)]
+        matches = _match_id_prefix(page_targets, target_spec)
         if len(matches) == 1:
             return matches[0]["targetId"]
         elif len(matches) == 0:

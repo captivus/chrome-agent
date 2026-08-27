@@ -565,7 +565,7 @@ Invalid commands return a `CDPError` with Chrome's error code and message. The c
 
 - **Event isolation scales.** Each attach session has isolated subscriptions. Five agents can each subscribe to different events on the same browser without interfering.
 
-- **Target specifiers for multi-tab browsers.** Use `--target <id-or-index>` or `--url <substring>` on attach and one-shot commands to pick a specific tab.
+- **Target specifiers for multi-tab browsers.** Use `--target <id-or-index>` or `--url <substring>` on attach and one-shot commands to pick a specific tab. `--target` reads a run of fewer than 8 digits as the index and anything else as a target-id prefix; `--target-id` / `--target-index` remove the inference.
 
 - **The console is a communication channel.** `console.log` from the agent. Human sees it in DevTools. Other agents see it via `Runtime.consoleAPICalled`.
 

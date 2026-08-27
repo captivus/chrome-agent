@@ -17,32 +17,45 @@ import sys
 OPERATIONAL_COMMANDS = {"launch", "status", "attach", "help", "cleanup", "stop", "guide"}
 
 
-def _extract_flags(argv: list[str]) -> tuple[list[str], str | None, str | None]:
-    """Extract --target and --url flags from argv before routing.
+# Target-selection flags and the resolution each one forces. Bare --target maps
+# to None: "decide by shape", handled in one place by attach.resolve_target
+# rather than guessed separately at each call site.
+TARGET_FLAGS = {
+    "--target": None,
+    "--target-id": "id",
+    "--target-index": "index",
+    "--url": "url",
+}
 
-    Returns (remaining_args, target_spec, url_spec).
-    Flags can appear anywhere in argv.
+
+def _extract_flags(argv: list[str]) -> tuple[list[str], str | None, str | None]:
+    """Extract the target-selection flags from argv before routing.
+
+    Returns (remaining_args, target_spec, target_by), where target_by is "id",
+    "index" or "url" for an explicit flag and None for bare --target (resolved
+    by shape when the targets are known). Flags can appear anywhere in argv.
     """
     remaining = []
-    target_spec = None
-    url_spec = None
+    seen: list[tuple[str, str]] = []
     i = 0
     while i < len(argv):
-        if argv[i] == "--target" and i + 1 < len(argv):
-            target_spec = argv[i + 1]
-            i += 2
-        elif argv[i] == "--url" and i + 1 < len(argv):
-            url_spec = argv[i + 1]
+        if argv[i] in TARGET_FLAGS and i + 1 < len(argv):
+            seen.append((argv[i], argv[i + 1]))
             i += 2
         else:
             remaining.append(argv[i])
             i += 1
 
-    if target_spec and url_spec:
-        print("Error: cannot specify both --target and --url", file=sys.stderr)
+    if len(seen) > 1:
+        names = ", ".join(flag for flag, _ in seen)
+        print(f"Error: specify only one target selector (got {names})", file=sys.stderr)
         sys.exit(1)
 
-    return remaining, target_spec, url_spec
+    if not seen:
+        return remaining, None, None
+
+    flag, spec = seen[0]
+    return remaining, spec, TARGET_FLAGS[flag]
 
 
 def _print_guide(args: list[str]) -> None:
@@ -68,14 +81,20 @@ def _print_static_usage() -> None:
     print("Usage: chrome-agent <command> [args...]\n")
     print("Operational commands:")
     print("  launch [--port PORT] [--fingerprint PATH] [--headless] [--no-window-border] [--persistent] [--user-data-dir PATH] [-- CHROME_ARGS]  Launch Chrome")
-    print("  status [<instance>]                                      List instances and targets")
-    print("  attach <instance> [+Event ...] [--target SPEC] [--url SUB]  Attach for events")
-    print("  help [<instance>] [Domain | Domain.method]               Protocol discovery")
-    print("  stop <instance>                                            Stop a browser gracefully")
-    print("  cleanup                                                   Remove stale instances")
-    print("  guide [--path]                                            Print this tool's agent guide")
+    print("  status [<instance>]                                    List instances and targets")
+    print("  attach <instance> [+Event ...] [TARGET]                Attach for events")
+    print("  help [<instance>] [Domain | Domain.method]             Protocol discovery")
+    print("  stop <instance> [TARGET]                               Stop a browser, or close one tab")
+    print("  cleanup                                                Remove stale instances")
+    print("  guide [--path]                                         Print this tool's agent guide")
     print()
-    print("  --version, -V                                            Show version and exit")
+    print("  --version, -V                                          Show version and exit")
+    print()
+    print("Target selectors (TARGET -- pick one; usable on attach, stop and one-shots):")
+    print("  --target SPEC          Tab index if SPEC is fewer than 8 digits, else a target-id prefix")
+    print("  --target-id ID         Always a target-id prefix (the `id` or `full_id` from status)")
+    print("  --target-index N       Always the 1-based index from status")
+    print("  --url SUBSTRING        The tab whose URL contains SUBSTRING")
     print()
     print("CDP one-shot commands:")
     print("  <instance> Domain.method '{\"param\": \"value\"}'         Send a single CDP command")
@@ -197,7 +216,7 @@ def _run_status(args: list[str]) -> None:
         print(format_status_json(statuses))
 
 
-async def _run_attach(args: list[str], target_spec: str | None, url_spec: str | None) -> None:
+async def _run_attach(args: list[str], target_spec: str | None, target_by: str | None) -> None:
     """Attach to a browser instance for event observation."""
     from .attach import run_attach
 
@@ -209,21 +228,11 @@ async def _run_attach(args: list[str], target_spec: str | None, url_spec: str | 
     instance_name = args[0]
     subscriptions = [arg[1:] for arg in args[1:] if arg.startswith("+")]
 
-    target_by = None
-    spec = None
-    if target_spec is not None:
-        spec = target_spec
-        # Determine if it's an index (numeric) or ID prefix
-        target_by = "index" if target_spec.isdigit() else "id"
-    elif url_spec is not None:
-        spec = url_spec
-        target_by = "url"
-
     try:
         await run_attach(
             instance_name=instance_name,
             subscriptions=subscriptions,
-            target_spec=spec,
+            target_spec=target_spec,
             target_by=target_by,
         )
     except Exception as exc:
@@ -280,20 +289,20 @@ def _run_help(args: list[str]) -> None:
         sys.exit(1)
 
 
-def _run_stop(args: list[str], target_spec: str | None, url_spec: str | None) -> None:
+def _run_stop(args: list[str], target_spec: str | None, target_by: str | None) -> None:
     """Stop a browser instance or close a specific tab."""
     from .registry import InstanceNotFoundError, stop
 
     if not args:
         print("Error: stop requires an instance name", file=sys.stderr)
-        print("Usage: chrome-agent stop <instance> [--target SPEC | --url SUBSTRING]", file=sys.stderr)
+        print("Usage: chrome-agent stop <instance> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]", file=sys.stderr)
         sys.exit(1)
 
     instance_name = args[0]
 
     # If a target specifier was provided, resolve it to a target ID
     resolved_target_id = None
-    if target_spec is not None or url_spec is not None:
+    if target_spec is not None:
         from .attach import resolve_target
         from .cdp_client import CDPClient, get_ws_url
         from .registry import lookup
@@ -320,19 +329,10 @@ def _run_stop(args: list[str], target_spec: str | None, url_spec: str | None) ->
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
 
-        target_by = None
-        spec = None
-        if target_spec is not None:
-            spec = target_spec
-            target_by = "index" if target_spec.isdigit() else "id"
-        elif url_spec is not None:
-            spec = url_spec
-            target_by = "url"
-
         try:
             resolved_target_id = resolve_target(
                 page_targets=page_targets,
-                target_spec=spec,
+                target_spec=target_spec,
                 target_by=target_by,
             )
         except Exception as exc:
@@ -366,7 +366,7 @@ async def _run_cdp_one_shot(
     method: str,
     params_str: str | None,
     target_spec: str | None,
-    url_spec: str | None,
+    target_by: str | None,
 ) -> None:
     """Send a single CDP command via browser-level WS + Target.attachToTarget."""
     from .attach import AmbiguousTargetError, TargetNotFoundError
@@ -430,18 +430,9 @@ async def _run_cdp_one_shot(
                 sys.exit(1)
 
             from .attach import resolve_target
-            target_by = None
-            spec = None
-            if target_spec is not None:
-                spec = target_spec
-                target_by = "index" if target_spec.isdigit() else "id"
-            elif url_spec is not None:
-                spec = url_spec
-                target_by = "url"
-
             target_id = resolve_target(
                 page_targets=page_targets,
-                target_spec=spec,
+                target_spec=target_spec,
                 target_by=target_by,
             )
 
@@ -481,8 +472,8 @@ async def _run_cdp_one_shot(
 
 def main() -> None:
     """CLI entry point."""
-    # Phase 0: Extract --target and --url flags before routing
-    args, target_spec, url_spec = _extract_flags(sys.argv[1:])
+    # Phase 0: Extract the target-selection flags before routing
+    args, target_spec, target_by = _extract_flags(sys.argv[1:])
 
     if args and args[0] in ("--version", "-V"):
         from . import __version__
@@ -503,11 +494,11 @@ def main() -> None:
         elif command == "status":
             _run_status(args=rest)
         elif command == "attach":
-            asyncio.run(_run_attach(args=rest, target_spec=target_spec, url_spec=url_spec))
+            asyncio.run(_run_attach(args=rest, target_spec=target_spec, target_by=target_by))
         elif command == "help":
             _run_help(args=rest)
         elif command == "stop":
-            _run_stop(args=rest, target_spec=target_spec, url_spec=url_spec)
+            _run_stop(args=rest, target_spec=target_spec, target_by=target_by)
         elif command == "cleanup":
             _run_cleanup()
         elif command == "guide":
@@ -540,7 +531,7 @@ def main() -> None:
             method=method,
             params_str=params_str,
             target_spec=target_spec,
-            url_spec=url_spec,
+            target_by=target_by,
         ))
         return
 
@@ -558,5 +549,5 @@ def main() -> None:
         method=method,
         params_str=params_str,
         target_spec=target_spec,
-        url_spec=url_spec,
+        target_by=target_by,
     ))
