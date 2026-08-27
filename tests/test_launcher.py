@@ -21,6 +21,7 @@ from chrome_agent.launcher import (
     BrowserNotFoundError,
     _SESSION_ROOT,
     cleanup_sessions,
+    default_persistent_profile_dir,
     find_chrome_binary,
     launch_browser,
 )
@@ -54,15 +55,18 @@ def cleanup_after_test():
     """Ensure any launched browser is cleaned up after each test."""
     yield
     import subprocess
-    result = subprocess.run(
-        ["lsof", "-ti", f":{LAUNCH_PORT}"],
-        capture_output=True, text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{LAUNCH_PORT}"],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        return
     for pid_str in result.stdout.strip().split("\n"):
         if pid_str.strip():
             try:
                 os.kill(int(pid_str.strip()), signal.SIGTERM)
-            except (ProcessLookupError, ValueError):
+            except (ProcessLookupError, ValueError, OSError):
                 pass
 
 
@@ -248,6 +252,93 @@ async def test_cleanup_preserves_active_dirs(tmp_path):
         assert os.path.isdir(result.user_data_dir), (
             "Active session directory should be preserved"
         )
+    finally:
+        os.kill(result.pid, signal.SIGTERM)
+        await asyncio.sleep(0.5)
+
+
+# ---------------------------------------------------------------------------
+# Persistent profile
+# ---------------------------------------------------------------------------
+
+
+def test_default_persistent_profile_dir_windows(monkeypatch):
+    """Windows profile lives under LOCALAPPDATA, not daily Chrome."""
+    monkeypatch.setattr("chrome_agent.launcher.sys.platform", "win32")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\bart\AppData\Local")
+    path = default_persistent_profile_dir()
+    assert path == os.path.join(
+        r"C:\Users\bart\AppData\Local", "chrome-agent", "profile",
+    )
+
+
+def test_default_persistent_profile_dir_linux(monkeypatch):
+    monkeypatch.setattr("chrome_agent.launcher.sys.platform", "linux")
+    monkeypatch.setenv("XDG_DATA_HOME", "/home/bart/.local/share")
+    path = default_persistent_profile_dir()
+    assert path == os.path.join(
+        "/home/bart/.local/share", "chrome-agent", "profile",
+    )
+
+
+@pytest.mark.asyncio
+async def test_refuses_daily_chrome_profile(tmp_path):
+    """Will not launch against Chrome's everyday User Data directory."""
+    daily = tmp_path / "Google" / "Chrome" / "User Data"
+    daily.mkdir(parents=True)
+    with pytest.raises(ValueError, match="daily profile"):
+        await launch_browser(
+            user_data_dir=str(daily),
+            headless=True,
+            pin_to_desktop=False,
+            registry_path=str(tmp_path / "registry.json"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_persistent_and_user_data_dir_are_mutex(tmp_path):
+    with pytest.raises(ValueError, match="not both"):
+        await launch_browser(
+            persistent=True,
+            user_data_dir=str(tmp_path / "profile"),
+            headless=True,
+            pin_to_desktop=False,
+            registry_path=str(tmp_path / "registry.json"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_launch_user_data_dir_keeps_existing_prefs(tmp_path):
+    """Reuses the supplied profile and does not clobber existing Preferences."""
+    profile = tmp_path / "agent-profile"
+    prefs_path = profile / "Default" / "Preferences"
+    prefs_path.parent.mkdir(parents=True)
+    prefs_path.write_text('{"keep": true}', encoding="utf-8")
+    reg_path = str(tmp_path / "registry.json")
+
+    result = await launch_browser(
+        port_override=LAUNCH_PORT,
+        headless=True,
+        pin_to_desktop=False,
+        working_dir="/home/user/persisttest",
+        registry_path=reg_path,
+        user_data_dir=str(profile),
+    )
+    try:
+        assert result.persistent is True
+        assert os.path.normcase(os.path.abspath(result.user_data_dir)) == (
+            os.path.normcase(os.path.abspath(str(profile)))
+        )
+        assert json.loads(prefs_path.read_text(encoding="utf-8")) == {"keep": True}
+
+        reused = await launch_browser(
+            headless=True,
+            pin_to_desktop=False,
+            registry_path=reg_path,
+            user_data_dir=str(profile),
+        )
+        assert reused.name == result.name
+        assert reused.pid == result.pid
     finally:
         os.kill(result.pid, signal.SIGTERM)
         await asyncio.sleep(0.5)

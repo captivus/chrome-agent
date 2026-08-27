@@ -49,6 +49,9 @@ Requires Google Chrome or Chromium installed on the system. Single runtime depen
 chrome-agent launch
 # {"name": "myproject-01", "port": 9222, "pid": 58469, "browser_version": "Chrome/147"}
 
+# Reuse a chrome-agent profile so cookies/logins survive stop
+chrome-agent launch --persistent
+
 # Check what's running
 chrome-agent status
 # myproject-01  port 9222
@@ -110,7 +113,7 @@ An attach session **exits on its own once it has outlived its purpose** -- when 
 ## Operational Commands
 
 ```
-chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT] [--no-window-border]
+chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT] [--no-window-border] [--persistent] [--user-data-dir PATH]
 chrome-agent status [<instance>]
 chrome-agent attach <instance> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
 chrome-agent stop <instance> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
@@ -121,7 +124,7 @@ chrome-agent --version
 
 | Command | Description |
 |---------|-------------|
-| `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. |
+| `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. `--persistent` reuses a chrome-agent profile (cookies survive `stop`); `--user-data-dir PATH` does the same at PATH. Default launch is still a throwaway profile. |
 | `status` | List running instances with their page targets (IDs, URLs, titles). |
 | `attach` | Persistent event observation with isolated subscriptions. Use `--target` (fewer than 8 digits is a tab index, anything else a target-id prefix), `--url substring`, or the explicit `--target-id` / `--target-index` for multi-tab browsers. |
 | `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Use `--target` or `--url` to close a single tab without affecting the browser; because this closes a tab, prefer the explicit `--target-id` / `--target-index`. |
@@ -129,7 +132,7 @@ chrome-agent --version
 | `cleanup` | Remove stale instances (dead browsers) and their session directories. |
 | `--version` | Print the installed chrome-agent version (`-V` alias) and exit. |
 
-Instances are tracked in a registry at `/tmp/chrome-agent/registry.json`. A headed browser's instance is **automatically removed from the registry when its window is closed** (its session directory is cleaned up too), so `status` reflects what is actually running. Liveness is determined by **process identity plus port attribution**, not a bare PID-existence check: the recorded PID counts only if it is a live process of the launching user whose start time matches what was recorded at launch (so a recycled or namespace-local PID never masquerades as the browser), and a listening CDP port counts only if a process claiming that port with this instance's profile directory can be found -- so browsers started via wrapper/snap launchers (which fork the real browser into another process) are still reported correctly, while a port since claimed by a *different* browser is not mistaken for this one. A **transient connection drop does not retire a live instance**: a host suspend/resume severs the supervisor's CDP connection while Chrome keeps running, so the supervisor reconnects and keeps supervising; retirement happens only once the CDP port stops listening. `cleanup` removes any entries that remain (headless instances, or browsers that were killed abruptly).
+Instances are tracked in a registry at `/tmp/chrome-agent/registry.json`. A headed browser's instance is **automatically removed from the registry when its window is closed** (throwaway session directories are cleaned up too; `--persistent` / `--user-data-dir` profiles are kept), so `status` reflects what is actually running. Liveness is determined by **process identity plus port attribution**, not a bare PID-existence check: the recorded PID counts only if it is a live process of the launching user whose start time matches what was recorded at launch (so a recycled or namespace-local PID never masquerades as the browser), and a listening CDP port counts only if a process claiming that port with this instance's profile directory can be found -- so browsers started via wrapper/snap launchers (which fork the real browser into another process) are still reported correctly, while a port since claimed by a *different* browser is not mistaken for this one. A **transient connection drop does not retire a live instance**: a host suspend/resume severs the supervisor's CDP connection while Chrome keeps running, so the supervisor reconnects and keeps supervising; retirement happens only once the CDP port stops listening. `cleanup` removes any entries that remain (headless instances, or browsers that were killed abruptly).
 
 Two consequences worth knowing. **Launching from inside a PID-namespaced sandbox** (a container, bubblewrap, some agent-CLI sandboxes) records the sandbox's local PID in the shared registry; the identity check recognizes such an entry as stale once its browser is gone, instead of treating the aliased host PID as a live browser forever. **`stop` verifies its target before acting**: it never sends `Browser.close` to a port that is serving a different browser (it terminates the instance's own verified process instead, or just cleans up the stale entry), and its SIGTERM fallback only ever fires at a PID verified to be the instance's own browser process.
 

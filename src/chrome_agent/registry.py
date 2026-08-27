@@ -38,6 +38,7 @@ class InstanceInfo:
     user_data_dir: str = ""
     alive: bool = True
     pid_start: str | None = None
+    persistent: bool = False
 
 
 class InstanceNotFoundError(Exception):
@@ -80,7 +81,7 @@ def _save_registry(registry: dict, registry_path: str) -> None:
     tmp_path = registry_path + ".tmp"
     with open(tmp_path, "w") as f:
         json.dump(registry, f, indent=2)
-    os.rename(tmp_path, registry_path)
+    os.replace(tmp_path, registry_path)
 
 
 def _port_is_listening(port: int) -> bool:
@@ -241,6 +242,7 @@ def register(
     port_override: int | None = None,
     registry_path: str | None = None,
     pid_start: str | None = None,
+    persistent: bool = False,
 ) -> InstanceInfo:
     """Register a new browser instance in the registry.
 
@@ -265,6 +267,7 @@ def register(
         "user_data_dir": user_data_dir,
         "launched": datetime.now(timezone.utc).isoformat(),
         "pid_start": pid_start,
+        "persistent": bool(persistent),
     }
     _save_registry(registry, path)
 
@@ -277,6 +280,7 @@ def register(
         browser_version=browser_version,
         user_data_dir=user_data_dir,
         pid_start=pid_start,
+        persistent=bool(persistent),
     )
 
 
@@ -314,6 +318,7 @@ def lookup(
         user_data_dir=entry.get("user_data_dir", ""),
         alive=alive,
         pid_start=entry.get("pid_start"),
+        persistent=bool(entry.get("persistent", False)),
     )
 
 
@@ -340,8 +345,37 @@ def enumerate_instances(
             user_data_dir=entry.get("user_data_dir", ""),
             alive=alive,
             pid_start=entry.get("pid_start"),
+            persistent=bool(entry.get("persistent", False)),
         ))
     return results
+
+
+def _normalize_profile_path(path: str) -> str:
+    """Comparable form of a Chrome user-data-dir path."""
+    return os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+
+
+def find_live_by_user_data_dir(
+    user_data_dir: str,
+    registry_path: str | None = None,
+) -> InstanceInfo | None:
+    """Return the live instance already using this profile, if any."""
+    want = _normalize_profile_path(user_data_dir)
+    for info in enumerate_instances(registry_path=registry_path):
+        if not info.alive or not info.user_data_dir:
+            continue
+        if _normalize_profile_path(info.user_data_dir) == want:
+            return info
+    return None
+
+
+def _discard_ephemeral_profile(entry: dict | None) -> None:
+    """Delete a throwaway session dir. Leave persistent profiles on disk."""
+    if not entry or entry.get("persistent"):
+        return
+    session_dir = entry.get("user_data_dir")
+    if session_dir and os.path.exists(session_dir):
+        shutil.rmtree(session_dir, ignore_errors=True)
 
 
 def instance_is_alive(info: InstanceInfo) -> bool:
@@ -421,10 +455,7 @@ def stop(
         # Already dead -- just clean up the registry entry
         registry = _load_registry(path)
         entry = registry.pop(instance_name, None)
-        if entry:
-            session_dir = entry.get("user_data_dir")
-            if session_dir and os.path.exists(session_dir):
-                shutil.rmtree(session_dir, ignore_errors=True)
+        _discard_ephemeral_profile(entry)
         _save_registry(registry, path)
         logger.info("Instance %s was already dead, cleaned up", instance_name)
         return f"{instance_name} was already dead, cleaned up"
@@ -480,10 +511,7 @@ def stop(
             )
         registry = _load_registry(path)
         entry = registry.pop(instance_name, None)
-        if entry:
-            session_dir = entry.get("user_data_dir")
-            if session_dir and os.path.exists(session_dir):
-                shutil.rmtree(session_dir, ignore_errors=True)
+        _discard_ephemeral_profile(entry)
         _save_registry(registry, path)
         logger.info("%s", outcome)
         return outcome
@@ -523,13 +551,10 @@ def stop(
             break
         time.sleep(0.1)
 
-    # Clean up registry entry and session directory
+    # Clean up registry entry and throwaway session directory
     registry = _load_registry(path)
     entry = registry.pop(instance_name, None)
-    if entry:
-        session_dir = entry.get("user_data_dir")
-        if session_dir and os.path.exists(session_dir):
-            shutil.rmtree(session_dir, ignore_errors=True)
+    _discard_ephemeral_profile(entry)
     _save_registry(registry, path)
 
     logger.info("Stopped instance %s", instance_name)
@@ -576,7 +601,7 @@ def deregister(
         return False
     _save_registry(registry, path)
     session_dir = entry.get("user_data_dir")
-    if session_dir:
+    if session_dir and not entry.get("persistent"):
         _remove_session_dir(session_dir)
     logger.info("Deregistered instance %s (browser closed)", instance_name)
     return True
@@ -602,9 +627,7 @@ def cleanup(
         ):
             del registry[name]
             removed.append(name)
-            session_dir = entry.get("user_data_dir")
-            if session_dir and os.path.exists(session_dir):
-                shutil.rmtree(session_dir, ignore_errors=True)
+            _discard_ephemeral_profile(entry)
             logger.info("Cleaned up stale instance %s", name)
 
     _save_registry(registry, path)

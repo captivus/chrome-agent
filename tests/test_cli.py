@@ -180,6 +180,14 @@ def test_extract_flags_maps_each_selector_to_its_resolution():
     assert _extract_flags(["mysite", "Page.navigate"]) == (["mysite", "Page.navigate"], None, None)
 
 
+def test_launch_persistent_and_user_data_dir_mutex():
+    """--persistent and --user-data-dir together produces error without launching."""
+    result = _run_cli("launch", "--persistent", "--user-data-dir", "C:\\tmp\\profile")
+    assert result.returncode == 1
+    assert "not both" in result.stderr.lower()
+    assert "Traceback" not in (result.stdout + result.stderr)
+
+
 # ---------------------------------------------------------------------------
 # Malformed input
 # ---------------------------------------------------------------------------
