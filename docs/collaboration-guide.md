@@ -28,6 +28,14 @@ chrome-agent launch
 
 A Chrome window opens with a name derived from your current directory (e.g., `myproject-01`). The name auto-increments if one already exists. Navigate to any page.
 
+To keep cookies and logins across launches, use a chrome-agent profile that is **not** your daily Chrome:
+
+```bash
+chrome-agent launch --persistent
+```
+
+`stop` closes that window; the profile stays. A later `--persistent` launch reopens it, or reuses the window if it is already running.
+
 **From a separate terminal, check the browser:**
 
 ```bash
