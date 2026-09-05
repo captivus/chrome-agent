@@ -22,7 +22,9 @@ from .utils import process_is_ours, process_is_running, process_start_time
 logger = logging.getLogger(__name__)
 
 _SESSION_ROOT = "/tmp/chrome-agent"
-CHROME_PATH_ENV = "CHROME_PATH"
+# Namespaced deliberately: CHROME_PATH belongs to Lighthouse's chrome-launcher,
+# and reading it would let another tool's variable decide what we launch.
+CHROME_PATH_ENV = "CHROME_AGENT_PATH"
 
 # Command names to look for on PATH, after the standard locations below, for
 # installs nowhere near them (Playwright caches, Nix stores, rootless
@@ -43,10 +45,12 @@ class BrowserNotFoundError(Exception):
         self.searched_paths = searched_paths
         self.override = override
         if override is not None:
-            # Advising PATH or CHROME_PATH here would be inert: an override
-            # suppresses both searches, and the user just set one of them.
+            # Advising PATH or CHROME_AGENT_PATH here would be inert: an
+            # override suppresses both searches, and the user just set one of
+            # them. `override` arrives rendered with its source, e.g.
+            # "--chrome-path /opt/chrome" or "CHROME_AGENT_PATH=/opt/chrome".
             super().__init__(
-                f"Chrome/Chromium not found: --chrome-path {override} "
+                f"Chrome/Chromium not found: {override} "
                 f"does not name an executable."
             )
             return
@@ -61,7 +65,7 @@ class BrowserNotFoundError(Exception):
 def find_chrome_binary(chrome_path: str | None = None) -> str | None:
     """Resolve the Chrome/Chromium binary to launch.
 
-    Order: the `chrome_path` override, then the CHROME_PATH environment
+    Order: the `chrome_path` override, then the CHROME_AGENT_PATH environment
     variable, then the platform's standard install locations, then a PATH
     search. Returns the path to the first usable executable, or None.
 
@@ -69,24 +73,16 @@ def find_chrome_binary(chrome_path: str | None = None) -> str | None:
     already-working host launches: it is reached only where discovery used to
     fail outright.
 
-    The two overrides differ on purpose. `chrome_path` is this invocation's
-    explicit intent, so it never falls back -- a typo must not quietly launch
-    something else. CHROME_PATH is ambient (Lighthouse's chrome-launcher reads
-    the same variable), so a stale value warns and the search continues rather
-    than breaking a host that would otherwise start.
+    An override is authoritative and never falls back. Both forms are this
+    project's own -- the flag is one invocation's intent, and the variable is
+    namespaced rather than reusing CHROME_PATH, which belongs to Lighthouse's
+    chrome-launcher -- so a value in either is an instruction to chrome-agent.
+    Honoring it or failing is right; quietly launching a different browser is
+    not.
     """
-    if chrome_path:
-        return _resolve_executable(path=chrome_path)
-
-    env_override = os.environ.get(CHROME_PATH_ENV)
-    if env_override:
-        binary = _resolve_executable(path=env_override)
-        if binary is not None:
-            return binary
-        logger.warning(
-            "%s=%s does not name an executable -- ignoring it",
-            CHROME_PATH_ENV, env_override,
-        )
+    override, _ = _override_in_effect(chrome_path=chrome_path)
+    if override:
+        return _resolve_executable(path=override)
 
     for path in _platform_candidates():
         if os.path.isfile(path) and os.access(path, os.X_OK):
@@ -97,6 +93,16 @@ def find_chrome_binary(chrome_path: str | None = None) -> str | None:
         if found:
             return found
     return None
+
+
+def _override_in_effect(chrome_path: str | None = None) -> tuple[str | None, str | None]:
+    """The override discovery will use, as (path, how the user gave it)."""
+    if chrome_path:
+        return chrome_path, f"--chrome-path {chrome_path}"
+    env_override = os.environ.get(CHROME_PATH_ENV)
+    if env_override:
+        return env_override, f"{CHROME_PATH_ENV}={env_override}"
+    return None, None
 
 
 def _resolve_executable(path: str) -> str | None:
@@ -112,11 +118,7 @@ def _resolve_executable(path: str) -> str | None:
 
 def _searched_locations() -> list[str]:
     """Describe, for the not-found error, where find_chrome_binary looked."""
-    locations = _platform_candidates() + [f"{c} (PATH)" for c in _PATH_COMMANDS]
-    env_override = os.environ.get(CHROME_PATH_ENV)
-    if env_override:
-        locations.insert(0, f"{env_override} ({CHROME_PATH_ENV}, not executable)")
-    return locations
+    return _platform_candidates() + [f"{c} (PATH)" for c in _PATH_COMMANDS]
 
 
 def _platform_candidates() -> list[str]:
@@ -155,8 +157,8 @@ async def launch_browser(
 ) -> InstanceInfo:
     """Launch Chrome with CDP enabled and register as a named instance.
 
-    Finds the Chrome binary (chrome_path or CHROME_PATH override, then the
-    standard install locations, then PATH), auto-allocates a port (or uses
+    Finds the Chrome binary (chrome_path or CHROME_AGENT_PATH override, then
+    the standard install locations, then PATH), auto-allocates a port (or uses
     port_override), starts Chrome with --remote-debugging-port, waits for the
     port to be ready, registers the instance in the registry, and optionally
     applies a fingerprint profile.
@@ -174,9 +176,10 @@ async def launch_browser(
     # Phase 1: Find Chrome binary
     binary = find_chrome_binary(chrome_path=chrome_path)
     if binary is None:
-        if chrome_path:
+        override, description = _override_in_effect(chrome_path=chrome_path)
+        if override:
             raise BrowserNotFoundError(
-                searched_paths=[chrome_path], override=chrome_path
+                searched_paths=[override], override=description
             )
         raise BrowserNotFoundError(searched_paths=_searched_locations())
 

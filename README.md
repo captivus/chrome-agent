@@ -42,14 +42,14 @@ uv add chrome-agent
 
 Requires Google Chrome or Chromium installed on the system. Single runtime dependency (`websockets`). No Playwright, no browser downloads.
 
-`launch` resolves the browser in this order: the `--chrome-path` flag, then the `CHROME_PATH` environment variable, then the platform's standard install locations, then a PATH search (`google-chrome`, `chromium`, ...) as a last resort. The overrides and the PATH search are for browsers that live somewhere else entirely -- a Playwright-managed chromium, a Nix store path, an unprivileged container where `/usr/bin` is not yours to write to:
+`launch` resolves the browser in this order: the `--chrome-path` flag, then the `CHROME_AGENT_PATH` environment variable, then the platform's standard install locations, then a PATH search (`google-chrome`, `chromium`, ...) as a last resort. The overrides and the PATH search are for browsers that live somewhere else entirely -- a Playwright-managed chromium, a Nix store path, an unprivileged container where `/usr/bin` is not yours to write to:
 
 ```bash
-export CHROME_PATH=~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome
+export CHROME_AGENT_PATH=~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome
 chrome-agent launch --headless
 ```
 
-PATH is searched last so that adding it cannot change which browser an already-working machine launches. The two overrides differ on purpose: `--chrome-path` is that invocation's explicit intent, so a value that does not name an executable fails the launch rather than starting something else, while a stale `CHROME_PATH` -- an ambient variable other tools read too -- warns and the search continues.
+PATH is searched last so that adding it cannot change which browser an already-working machine launches. An override is authoritative: a value that does not name an executable fails the launch, naming it, rather than quietly starting something else. The variable is namespaced rather than reusing `CHROME_PATH`, which belongs to Lighthouse's `chrome-launcher` -- a variable another tool set, for another browser, should not decide what chrome-agent runs.
 
 ## Quick Start
 
@@ -130,7 +130,7 @@ chrome-agent --version
 
 | Command | Description |
 |---------|-------------|
-| `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. Use `--chrome-path` (or `CHROME_PATH`) for a browser outside the standard locations. |
+| `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. Use `--chrome-path` (or `CHROME_AGENT_PATH`) for a browser outside the standard locations. |
 | `status` | List running instances with their page targets (IDs, URLs, titles). |
 | `attach` | Persistent event observation with isolated subscriptions. Use `--target` (fewer than 8 digits is a tab index, anything else a target-id prefix), `--url substring`, or the explicit `--target-id` / `--target-index` for multi-tab browsers. |
 | `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Use `--target` or `--url` to close a single tab without affecting the browser; because this closes a tab, prefer the explicit `--target-id` / `--target-index`. |
@@ -251,7 +251,7 @@ Monitor is specific to Claude Code. Agents on other harnesses can still be event
 ## Requirements
 
 - Python >= 3.11
-- Google Chrome or Chromium (system-installed, on PATH, or named by `CHROME_PATH` / `--chrome-path`)
+- Google Chrome or Chromium (system-installed, on PATH, or named by `CHROME_AGENT_PATH` / `--chrome-path`)
 - Linux with xdotool (optional, for virtual desktop pinning)
 
 ## Releasing (maintainer)

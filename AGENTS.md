@@ -2,7 +2,7 @@
 
 Drive a real Chrome through the Chrome DevTools Protocol (CDP), from the terminal, for AI agents.
 
-Install: `uv tool install chrome-agent` (or `pip install chrome-agent`). Requires Google Chrome or Chromium — found via `--chrome-path`/`CHROME_PATH`, then the standard install locations, then PATH. One runtime dependency (`websockets`); no Playwright, no browser downloads.
+Install: `uv tool install chrome-agent` (or `pip install chrome-agent`). Requires Google Chrome or Chromium — found via `--chrome-path`/`CHROME_AGENT_PATH`, then the standard install locations, then PATH. One runtime dependency (`websockets`); no Playwright, no browser downloads.
 
 ## What it is
 
@@ -223,7 +223,7 @@ Length is the discriminator, **not** range: a mistyped `--target 5` against 3 ta
 chrome-agent launch                       # auto port + name (from cwd); isolated profile under /tmp/chrome-agent
 chrome-agent launch --headless            # no window (no border, no desktop pinning)
 chrome-agent launch --fingerprint p.json  # spoof UA/viewport/lang/TZ via launch flags (also suppresses the marker)
-chrome-agent launch --chrome-path /p/chrome # browser outside the standard locations (or set CHROME_PATH)
+chrome-agent launch --chrome-path /p/chrome # browser outside the standard locations (or set CHROME_AGENT_PATH)
 chrome-agent launch -- --some-chrome-flag # everything after -- passes through to Chrome
 chrome-agent status                       # all instances + their tabs
 chrome-agent stop mysite-01 [--target-index 2 | --target-id 65602889 | --url foo]  # whole browser, or one tab
