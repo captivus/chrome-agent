@@ -42,14 +42,14 @@ uv add chrome-agent
 
 Requires Google Chrome or Chromium installed on the system. Single runtime dependency (`websockets`). No Playwright, no browser downloads.
 
-`launch` resolves the browser in this order: the `--chrome-path` flag, then the `CHROME_PATH` environment variable, then a PATH search (`google-chrome`, `chromium`, ...), then the platform's standard install locations. The first two exist for browsers that live somewhere else entirely -- a Playwright-managed chromium, a Nix store path, an unprivileged container where `/usr/bin` is not yours to write to:
+`launch` resolves the browser in this order: the `--chrome-path` flag, then the `CHROME_PATH` environment variable, then the platform's standard install locations, then a PATH search (`google-chrome`, `chromium`, ...) as a last resort. The overrides and the PATH search are for browsers that live somewhere else entirely -- a Playwright-managed chromium, a Nix store path, an unprivileged container where `/usr/bin` is not yours to write to:
 
 ```bash
 export CHROME_PATH=~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome
 chrome-agent launch --headless
 ```
 
-An explicit override is authoritative: if it does not point at an executable, `launch` says so instead of quietly starting a different browser.
+PATH is searched last so that adding it cannot change which browser an already-working machine launches. The two overrides differ on purpose: `--chrome-path` is that invocation's explicit intent, so a value that does not name an executable fails the launch rather than starting something else, while a stale `CHROME_PATH` -- an ambient variable other tools read too -- warns and the search continues.
 
 ## Quick Start
 

@@ -372,16 +372,29 @@ def test_launch_chrome_path_flag_reaches_the_launcher(monkeypatch):
     assert captured["chrome_path"] == "/opt/chrome/chrome"
 
 
-def test_launch_chrome_path_flag_requires_a_value(capsys):
-    """A valueless --chrome-path errors like the other value-taking flags."""
+def test_launch_chrome_path_takes_exactly_one_value(monkeypatch):
+    """--chrome-path consumes its value and nothing else -- later flags still parse.
+
+    A valueless --chrome-path is not worth asserting on: it lands in the
+    unknown-option branch, which is what an unrecognized flag did already.
+    """
     import asyncio
 
     from chrome_agent import cli
 
-    with pytest.raises(SystemExit) as exc_info:
-        asyncio.run(cli._run_launch(args=["--chrome-path"]))
-    assert exc_info.value.code == 1
-    assert "--chrome-path" in capsys.readouterr().err
+    captured = {}
+
+    async def fake_launch(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop before launching a real browser")
+
+    monkeypatch.setattr("chrome_agent.launcher.launch_browser", fake_launch)
+    with pytest.raises(SystemExit):
+        asyncio.run(cli._run_launch(
+            args=["--chrome-path", "/opt/chrome/chrome", "--headless"]
+        ))
+    assert captured["chrome_path"] == "/opt/chrome/chrome"
+    assert captured["headless"] is True
 
 
 # ---------------------------------------------------------------------------

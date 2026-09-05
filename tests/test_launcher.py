@@ -9,6 +9,7 @@ takes port_override instead of port, and registers instances.
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import signal
@@ -117,6 +118,23 @@ def test_discovery_argument_beats_env(tmp_path, monkeypatch):
     assert find_chrome_binary(chrome_path=flag_binary) == flag_binary
 
 
+def test_discovery_standard_locations_win_over_path(tmp_path, monkeypatch):
+    """A browser at a standard location beats a different one on PATH.
+
+    Pins the resolution order itself: PATH is the last resort, so adding it
+    cannot change which browser an already-working host launches.
+    """
+    candidate = _fake_chrome(tmp_path / "standard")
+    _fake_chrome(tmp_path / "path")
+    monkeypatch.delenv("CHROME_PATH", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "path"))
+    monkeypatch.setattr(
+        "chrome_agent.launcher._platform_candidates", lambda: [candidate]
+    )
+
+    assert find_chrome_binary() == candidate
+
+
 def test_discovery_searches_path_when_no_standard_install(tmp_path, monkeypatch):
     """Chrome reachable only via PATH is found (Playwright/Nix/rootless hosts).
 
@@ -125,6 +143,16 @@ def test_discovery_searches_path_when_no_standard_install(tmp_path, monkeypatch)
     Playwright-managed chromium, a Nix store path -- could not launch at all.
     """
     binary = _fake_chrome(tmp_path, name="chromium")
+    monkeypatch.delenv("CHROME_PATH", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [])
+
+    assert find_chrome_binary() == binary
+
+
+def test_discovery_finds_a_plain_chrome_on_path(tmp_path, monkeypatch):
+    """A binary named `chrome` is found -- the name no candidate list carries."""
+    binary = _fake_chrome(tmp_path, name="chrome")
     monkeypatch.delenv("CHROME_PATH", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [])
@@ -142,12 +170,38 @@ def test_discovery_falls_back_to_platform_candidates(tmp_path, monkeypatch):
     assert find_chrome_binary() == binary
 
 
-def test_discovery_override_does_not_fall_back(tmp_path, monkeypatch):
-    """A wrong override fails instead of silently launching a different browser."""
+def test_discovery_flag_override_does_not_fall_back(tmp_path, monkeypatch):
+    """A wrong --chrome-path fails instead of launching a different browser."""
     _fake_chrome(tmp_path)
     monkeypatch.setenv("PATH", str(tmp_path))
 
     assert find_chrome_binary(chrome_path=str(tmp_path / "nonexistent")) is None
+
+
+def test_discovery_stale_env_override_falls_through(tmp_path, monkeypatch, caplog):
+    """A stale CHROME_PATH warns and keeps searching, rather than failing.
+
+    The variable is ambient -- other tools (Lighthouse's chrome-launcher) read
+    the same name -- so a leftover value pointing at a moved browser must not
+    stop a host that would otherwise launch.
+    """
+    candidate = _fake_chrome(tmp_path / "standard")
+    monkeypatch.setenv("CHROME_PATH", str(tmp_path / "moved-away"))
+    monkeypatch.setattr(
+        "chrome_agent.launcher._platform_candidates", lambda: [candidate]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="chrome_agent.launcher"):
+        assert find_chrome_binary() == candidate
+    assert "CHROME_PATH" in caplog.text
+
+
+def test_discovery_expands_a_tilde_in_an_override(tmp_path, monkeypatch):
+    """`~` in an override is expanded -- env files and unit files do not."""
+    binary = _fake_chrome(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert find_chrome_binary(chrome_path="~/google-chrome") == binary
 
 
 def test_discovery_error_names_the_escape_hatches():
@@ -156,7 +210,22 @@ def test_discovery_error_names_the_escape_hatches():
 
     assert "CHROME_PATH" in message
     assert "--chrome-path" in message
-    assert "PATH" in message
+    assert "on PATH" in message
+
+
+def test_discovery_error_for_a_bad_override_says_what_is_wrong(tmp_path):
+    """The override branch names the unusable path instead of re-advising the flag.
+
+    Suggesting PATH or CHROME_PATH there is inert -- an override suppresses
+    both searches -- and the user just set the thing being suggested.
+    """
+    missing = str(tmp_path / "nonexistent")
+
+    message = str(BrowserNotFoundError(searched_paths=[missing], override=missing))
+
+    assert missing in message
+    assert "does not name an executable" in message
+    assert "put Chrome/Chromium on PATH" not in message
 
 
 def test_discovery_launch_rejects_a_bad_chrome_path(tmp_path):
