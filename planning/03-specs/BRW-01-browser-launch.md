@@ -20,7 +20,9 @@ As an AI agent, I want the browser launch to automatically allocate a free port 
 
 This feature finds the Chrome or Chromium binary on the system, launches it as a subprocess with remote debugging enabled on a specified port, and waits for the CDP port to become available before returning. The browser continues running after chrome-agent exits -- it is a fire-and-forget launch.
 
-The binary discovery searches platform-specific standard paths. On Linux, it looks for google-chrome, chromium-browser, and chromium in standard locations. On macOS, it looks in the Applications directory. On Windows, it looks in Program Files. If no binary is found, it fails with a helpful error listing the paths it searched.
+The binary discovery resolves in three steps, most explicit first. An **override** -- the `--chrome-path` flag, else the `CHROME_PATH` environment variable -- wins outright; because it is explicit, an override that does not resolve to an executable fails the launch rather than falling through to the later steps, so a typo never silently starts a different browser. With no override, discovery **searches PATH** for the usual command names (google-chrome, google-chrome-stable, chromium-browser, chromium, chrome). Failing that, it falls back to the **platform-specific standard paths**: on Linux google-chrome, chromium-browser, and chromium in standard locations; on macOS the Applications directory; on Windows Program Files. If no binary is found, it fails with an error listing what it searched and naming CHROME_PATH, --chrome-path, and PATH as the ways to fix it.
+
+The override and PATH steps exist because the standard paths are unreachable in a growing number of environments: a Playwright-managed chromium under `~/.cache/ms-playwright/`, a Nix store path, or an unprivileged container where `/usr/bin` cannot be written. Before them, such a host could not launch a browser at all.
 
 The browser is launched with a temporary user data directory (so it doesn't conflict with the user's normal Chrome profile), with remote debugging on the requested port, and with flags to suppress first-run prompts and default browser checks.
 
@@ -136,12 +138,35 @@ cleanup_sessions():
                 remove_directory(session_dir)
 
 
-find_chrome_binary():
-    candidates = platform_specific_candidates()
-    for path in candidates:
+find_chrome_binary(chrome_path=None):
+    // Resolution order: explicit override, then PATH, then standard paths.
+    override = chrome_path or env("CHROME_PATH")
+    if override:
+        // which() checks a value with a path component directly instead of
+        // searching PATH, so one call accepts both an absolute path and a
+        // bare command name. No fallback: an explicit override is honored
+        // or the launch fails.
+        return which(override)
+
+    for command in ["google-chrome", "google-chrome-stable",
+                    "chromium-browser", "chromium", "chrome"]:
+        found = which(command)
+        if found:
+            return found
+
+    for path in platform_specific_candidates():
         if file_exists(path) and is_executable(path):
             return path
     return None
+
+searched_locations(chrome_path=None):
+    // What the not-found error reports: just the override when one was
+    // given, since nothing else was tried.
+    override = chrome_path or env("CHROME_PATH")
+    if override:
+        return [override]
+    return [command + " (PATH)" for command in PATH_COMMANDS]
+           + platform_specific_candidates()
 
 platform_specific_candidates():
     if linux:
@@ -202,7 +227,9 @@ class BrowserNotFoundError(Exception):
         self.searched_paths = searched_paths
         paths_str = "\n  ".join(searched_paths)
         super().__init__(
-            f"Chrome/Chromium not found. Searched:\n  {paths_str}"
+            f"Chrome/Chromium not found. Searched:\n  {paths_str}\n"
+            f"Set {CHROME_PATH_ENV} or pass --chrome-path to name the binary, "
+            f"or put Chrome/Chromium on PATH."
         )
 
 
@@ -230,10 +257,16 @@ async def launch_browser(
     ...
 
 
-def find_chrome_binary() -> str | None:
-    """Search platform-specific paths for Chrome/Chromium.
+def find_chrome_binary(chrome_path: str | None = None) -> str | None:
+    """Resolve the Chrome/Chromium binary to launch.
 
-    Returns the path to the first found executable, or None.
+    Tries an explicit override first (`chrome_path`, else the CHROME_PATH
+    environment variable), then a PATH search, then the platform's standard
+    install locations. Returns the path to the first usable executable, or
+    None.
+
+    An override that does not resolve returns None rather than falling back,
+    so a typo surfaces instead of quietly launching a different browser.
     """
     ...
 
@@ -255,7 +288,12 @@ Happy path:
 - Given Chrome is installed on the system, launch_browser starts a browser on the specified port and the port is accessible via check_cdp_port afterward.
 
 Binary not found:
-- Given Chrome is not installed (or not in any searched path), launch_browser raises BrowserNotFoundError listing the paths it searched.
+- Given Chrome is not installed (or not in any searched path), launch_browser raises BrowserNotFoundError listing the paths it searched and naming CHROME_PATH, --chrome-path and PATH.
+
+Binary outside the standard locations:
+- Given no browser at any platform candidate and one reachable on PATH, find_chrome_binary returns the PATH-resolved binary (the Playwright/Nix/rootless case).
+- Given CHROME_PATH or --chrome-path naming an executable, that binary is used ahead of PATH and the platform candidates; --chrome-path wins over CHROME_PATH.
+- Given an override that names nothing executable, find_chrome_binary returns None even when a browser is on PATH, and the error reports the override alone.
 
 Port already in use:
 - Given something is already listening on the requested port, Chrome fails to bind and the launch times out. No pre-check is performed (see Scoping Decisions).

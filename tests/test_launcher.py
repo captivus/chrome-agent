@@ -79,6 +79,95 @@ def test_find_chrome_binary():
     assert os.access(binary, os.X_OK)
 
 
+def _fake_chrome(directory, name="google-chrome"):
+    """Write an executable stand-in for a Chrome binary and return its path."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text("#!/bin/sh\nexit 0\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_discovery_prefers_explicit_argument(tmp_path, monkeypatch):
+    """The chrome_path argument wins over every other source."""
+    binary = _fake_chrome(tmp_path)
+    monkeypatch.delenv("CHROME_PATH", raising=False)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [])
+
+    assert find_chrome_binary(chrome_path=binary) == binary
+
+
+def test_discovery_honors_chrome_path_env(tmp_path, monkeypatch):
+    """CHROME_PATH points at a browser the standard locations do not have."""
+    binary = _fake_chrome(tmp_path)
+    monkeypatch.setenv("CHROME_PATH", binary)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [])
+
+    assert find_chrome_binary() == binary
+
+
+def test_discovery_argument_beats_env(tmp_path, monkeypatch):
+    """--chrome-path overrides CHROME_PATH."""
+    flag_binary = _fake_chrome(tmp_path / "flag", name="google-chrome")
+    env_binary = _fake_chrome(tmp_path / "env", name="google-chrome")
+    monkeypatch.setenv("CHROME_PATH", env_binary)
+
+    assert find_chrome_binary(chrome_path=flag_binary) == flag_binary
+
+
+def test_discovery_searches_path_when_no_standard_install(tmp_path, monkeypatch):
+    """Chrome reachable only via PATH is found (Playwright/Nix/rootless hosts).
+
+    Regression: discovery probed a fixed list of absolute paths, so an
+    unprivileged environment whose browser lives outside /usr/bin -- a
+    Playwright-managed chromium, a Nix store path -- could not launch at all.
+    """
+    binary = _fake_chrome(tmp_path, name="chromium")
+    monkeypatch.delenv("CHROME_PATH", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [])
+
+    assert find_chrome_binary() == binary
+
+
+def test_discovery_falls_back_to_platform_candidates(tmp_path, monkeypatch):
+    """With no override and nothing on PATH, the standard locations still win."""
+    binary = _fake_chrome(tmp_path)
+    monkeypatch.delenv("CHROME_PATH", raising=False)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [binary])
+
+    assert find_chrome_binary() == binary
+
+
+def test_discovery_override_does_not_fall_back(tmp_path, monkeypatch):
+    """A wrong override fails instead of silently launching a different browser."""
+    _fake_chrome(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    assert find_chrome_binary(chrome_path=str(tmp_path / "nonexistent")) is None
+
+
+def test_discovery_error_names_the_escape_hatches():
+    """The not-found error tells the user how to point chrome-agent at a browser."""
+    message = str(BrowserNotFoundError(searched_paths=["/usr/bin/google-chrome"]))
+
+    assert "CHROME_PATH" in message
+    assert "--chrome-path" in message
+    assert "PATH" in message
+
+
+def test_discovery_launch_rejects_a_bad_chrome_path(tmp_path):
+    """launch_browser reports the override it was given when it does not resolve."""
+    missing = str(tmp_path / "nonexistent")
+
+    with pytest.raises(BrowserNotFoundError) as exc_info:
+        asyncio.run(launch_browser(chrome_path=missing, port_override=LAUNCH_PORT))
+    assert exc_info.value.searched_paths == [missing]
+
+
 # ---------------------------------------------------------------------------
 # Happy path -- successful launch with registry integration
 # ---------------------------------------------------------------------------
@@ -150,7 +239,7 @@ def test_browser_not_found(monkeypatch):
     """Raises BrowserNotFoundError when no Chrome binary exists."""
     monkeypatch.setattr(
         "chrome_agent.launcher.find_chrome_binary",
-        lambda: None,
+        lambda **kwargs: None,
     )
 
     async def do_launch():

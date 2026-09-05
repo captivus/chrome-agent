@@ -345,13 +345,43 @@ def test_launch_chrome_not_found_clean_error(monkeypatch, capsys):
 
     from chrome_agent import cli
 
-    monkeypatch.setattr("chrome_agent.launcher.find_chrome_binary", lambda: None)
+    monkeypatch.setattr("chrome_agent.launcher.find_chrome_binary", lambda **kwargs: None)
     with pytest.raises(SystemExit) as exc_info:
         asyncio.run(cli._run_launch(args=[]))
     assert exc_info.value.code == 1
     out = capsys.readouterr()
     assert "Traceback" not in (out.out + out.err)
     assert "not found" in out.err.lower()
+
+
+def test_launch_chrome_path_flag_reaches_the_launcher(monkeypatch):
+    """launch --chrome-path PATH is forwarded to launch_browser()."""
+    import asyncio
+
+    from chrome_agent import cli
+
+    captured = {}
+
+    async def fake_launch(**kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop before launching a real browser")
+
+    monkeypatch.setattr("chrome_agent.launcher.launch_browser", fake_launch)
+    with pytest.raises(SystemExit):
+        asyncio.run(cli._run_launch(args=["--chrome-path", "/opt/chrome/chrome"]))
+    assert captured["chrome_path"] == "/opt/chrome/chrome"
+
+
+def test_launch_chrome_path_flag_requires_a_value(capsys):
+    """A valueless --chrome-path errors like the other value-taking flags."""
+    import asyncio
+
+    from chrome_agent import cli
+
+    with pytest.raises(SystemExit) as exc_info:
+        asyncio.run(cli._run_launch(args=["--chrome-path"]))
+    assert exc_info.value.code == 1
+    assert "--chrome-path" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

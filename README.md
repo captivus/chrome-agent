@@ -42,6 +42,15 @@ uv add chrome-agent
 
 Requires Google Chrome or Chromium installed on the system. Single runtime dependency (`websockets`). No Playwright, no browser downloads.
 
+`launch` resolves the browser in this order: the `--chrome-path` flag, then the `CHROME_PATH` environment variable, then a PATH search (`google-chrome`, `chromium`, ...), then the platform's standard install locations. The first two exist for browsers that live somewhere else entirely -- a Playwright-managed chromium, a Nix store path, an unprivileged container where `/usr/bin` is not yours to write to:
+
+```bash
+export CHROME_PATH=~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome
+chrome-agent launch --headless
+```
+
+An explicit override is authoritative: if it does not point at an executable, `launch` says so instead of quietly starting a different browser.
+
 ## Quick Start
 
 ```bash
@@ -110,7 +119,7 @@ An attach session **exits on its own once it has outlived its purpose** -- when 
 ## Operational Commands
 
 ```
-chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT] [--no-window-border]
+chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT] [--no-window-border] [--chrome-path PATH]
 chrome-agent status [<instance>]
 chrome-agent attach <instance> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
 chrome-agent stop <instance> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
@@ -121,7 +130,7 @@ chrome-agent --version
 
 | Command | Description |
 |---------|-------------|
-| `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. |
+| `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. Use `--chrome-path` (or `CHROME_PATH`) for a browser outside the standard locations. |
 | `status` | List running instances with their page targets (IDs, URLs, titles). |
 | `attach` | Persistent event observation with isolated subscriptions. Use `--target` (fewer than 8 digits is a tab index, anything else a target-id prefix), `--url substring`, or the explicit `--target-id` / `--target-index` for multi-tab browsers. |
 | `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Use `--target` or `--url` to close a single tab without affecting the browser; because this closes a tab, prefer the explicit `--target-id` / `--target-index`. |
@@ -242,7 +251,7 @@ Monitor is specific to Claude Code. Agents on other harnesses can still be event
 ## Requirements
 
 - Python >= 3.11
-- Google Chrome or Chromium (system-installed)
+- Google Chrome or Chromium (system-installed, on PATH, or named by `CHROME_PATH` / `--chrome-path`)
 - Linux with xdotool (optional, for virtual desktop pinning)
 
 ## Releasing (maintainer)

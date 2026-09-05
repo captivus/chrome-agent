@@ -22,6 +22,17 @@ from .utils import process_is_ours, process_is_running, process_start_time
 logger = logging.getLogger(__name__)
 
 _SESSION_ROOT = "/tmp/chrome-agent"
+CHROME_PATH_ENV = "CHROME_PATH"
+
+# Command names to look for on PATH, for installs outside the standard
+# locations below (Playwright caches, Nix stores, unprivileged containers).
+_PATH_COMMANDS = [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium-browser",
+    "chromium",
+    "chrome",
+]
 
 
 class BrowserNotFoundError(Exception):
@@ -31,20 +42,46 @@ class BrowserNotFoundError(Exception):
         self.searched_paths = searched_paths
         paths_str = "\n  ".join(searched_paths)
         super().__init__(
-            f"Chrome/Chromium not found. Searched:\n  {paths_str}"
+            f"Chrome/Chromium not found. Searched:\n  {paths_str}\n"
+            f"Set {CHROME_PATH_ENV} or pass --chrome-path to name the binary, "
+            f"or put Chrome/Chromium on PATH."
         )
 
 
-def find_chrome_binary() -> str | None:
-    """Search platform-specific paths for Chrome/Chromium.
+def find_chrome_binary(chrome_path: str | None = None) -> str | None:
+    """Resolve the Chrome/Chromium binary to launch.
 
-    Returns the path to the first found executable, or None.
+    Tries an explicit override first (`chrome_path`, else the CHROME_PATH
+    environment variable), then a PATH search, then the platform's standard
+    install locations. Returns the path to the first usable executable, or
+    None.
+
+    An override that does not resolve returns None rather than falling back,
+    so a typo surfaces instead of quietly launching a different browser.
     """
-    candidates = _platform_candidates()
-    for path in candidates:
+    override = chrome_path or os.environ.get(CHROME_PATH_ENV)
+    if override:
+        # which() validates a value with a path component directly, so this
+        # accepts both an absolute path and a bare command name.
+        return shutil.which(override)
+
+    for command in _PATH_COMMANDS:
+        found = shutil.which(command)
+        if found:
+            return found
+
+    for path in _platform_candidates():
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
     return None
+
+
+def _searched_locations(chrome_path: str | None = None) -> list[str]:
+    """Describe, for the not-found error, where find_chrome_binary looked."""
+    override = chrome_path or os.environ.get(CHROME_PATH_ENV)
+    if override:
+        return [override]
+    return [f"{command} (PATH)" for command in _PATH_COMMANDS] + _platform_candidates()
 
 
 def _platform_candidates() -> list[str]:
@@ -79,13 +116,15 @@ async def launch_browser(
     registry_path: str | None = None,
     extra_args: list[str] | None = None,
     window_border: bool = True,
+    chrome_path: str | None = None,
 ) -> InstanceInfo:
     """Launch Chrome with CDP enabled and register as a named instance.
 
-    Finds the Chrome binary, auto-allocates a port (or uses port_override),
-    starts Chrome with --remote-debugging-port, waits for the port to be
-    ready, registers the instance in the registry, and optionally applies
-    a fingerprint profile.
+    Finds the Chrome binary (chrome_path or CHROME_PATH override, then PATH,
+    then the standard install locations), auto-allocates a port (or uses
+    port_override), starts Chrome with --remote-debugging-port, waits for the
+    port to be ready, registers the instance in the registry, and optionally
+    applies a fingerprint profile.
 
     Session data is stored under /tmp/chrome-agent/session-<id>/.
     The browser continues running after this function returns.
@@ -98,9 +137,11 @@ async def launch_browser(
     """
 
     # Phase 1: Find Chrome binary
-    binary = find_chrome_binary()
+    binary = find_chrome_binary(chrome_path=chrome_path)
     if binary is None:
-        raise BrowserNotFoundError(searched_paths=_platform_candidates())
+        raise BrowserNotFoundError(
+            searched_paths=_searched_locations(chrome_path=chrome_path)
+        )
 
     # Prune truly-dead instances first (fallback for browsers whose supervisor
     # was killed, and for headless instances which have no supervisor), and
