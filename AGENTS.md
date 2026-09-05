@@ -223,7 +223,7 @@ Length is the discriminator, **not** range: a mistyped `--target 5` against 3 ta
 chrome-agent launch                       # auto port + name (from cwd); isolated profile under /tmp/chrome-agent
 chrome-agent launch --headless            # no window (no border, no desktop pinning)
 chrome-agent launch --fingerprint p.json  # spoof UA/viewport/lang/TZ via launch flags (also suppresses the marker)
-chrome-agent launch --chrome-path /p/chrome # browser outside the standard locations (or set CHROME_AGENT_PATH)
+chrome-agent launch --chrome-path /p/chrome # browser outside the standard locations (or CHROME_AGENT_PATH)
 chrome-agent launch -- --some-chrome-flag # everything after -- passes through to Chrome
 chrome-agent status                       # all instances + their tabs
 chrome-agent stop mysite-01 [--target-index 2 | --target-id 65602889 | --url foo]  # whole browser, or one tab

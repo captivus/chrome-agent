@@ -22,13 +22,11 @@ from .utils import process_is_ours, process_is_running, process_start_time
 logger = logging.getLogger(__name__)
 
 _SESSION_ROOT = "/tmp/chrome-agent"
-# Namespaced deliberately: CHROME_PATH belongs to Lighthouse's chrome-launcher,
-# and reading it would let another tool's variable decide what we launch.
+# Namespaced: CHROME_PATH is Lighthouse's chrome-launcher's, not ours.
 CHROME_PATH_ENV = "CHROME_AGENT_PATH"
 
-# Command names to look for on PATH, after the standard locations below, for
-# installs nowhere near them (Playwright caches, Nix stores, rootless
-# containers).
+# Searched on PATH after the standard locations, for installs nowhere near
+# them (Playwright caches, Nix stores, rootless containers).
 _PATH_COMMANDS = [
     "google-chrome",
     "google-chrome-stable",
@@ -45,10 +43,9 @@ class BrowserNotFoundError(Exception):
         self.searched_paths = searched_paths
         self.override = override
         if override is not None:
-            # Advising PATH or CHROME_AGENT_PATH here would be inert: an
-            # override suppresses both searches, and the user just set one of
-            # them. `override` arrives rendered with its source, e.g.
-            # "--chrome-path /opt/chrome" or "CHROME_AGENT_PATH=/opt/chrome".
+            # No point advising PATH or CHROME_AGENT_PATH: an override skips
+            # both searches. `override` comes in with its source, e.g.
+            # "--chrome-path /opt/chrome".
             super().__init__(
                 f"Chrome/Chromium not found: {override} "
                 f"does not name an executable."
@@ -65,20 +62,14 @@ class BrowserNotFoundError(Exception):
 def find_chrome_binary(chrome_path: str | None = None) -> str | None:
     """Resolve the Chrome/Chromium binary to launch.
 
-    Order: the `chrome_path` override, then the CHROME_AGENT_PATH environment
-    variable, then the platform's standard install locations, then a PATH
-    search. Returns the path to the first usable executable, or None.
+    Order: `chrome_path`, then CHROME_AGENT_PATH, then the platform's standard
+    install locations, then PATH. Returns the first usable executable, or None.
 
-    PATH comes last so that adding it cannot change which browser an
-    already-working host launches: it is reached only where discovery used to
-    fail outright.
+    PATH is last so it only ever fires where discovery used to fail outright,
+    never changing what an already-working host launches.
 
-    An override is authoritative and never falls back. Both forms are this
-    project's own -- the flag is one invocation's intent, and the variable is
-    namespaced rather than reusing CHROME_PATH, which belongs to Lighthouse's
-    chrome-launcher -- so a value in either is an instruction to chrome-agent.
-    Honoring it or failing is right; quietly launching a different browser is
-    not.
+    An override never falls back: it was set for chrome-agent specifically, so
+    a bad one is an error rather than a reason to launch something else.
     """
     override, _ = _override_in_effect(chrome_path=chrome_path)
     if override:
@@ -96,7 +87,7 @@ def find_chrome_binary(chrome_path: str | None = None) -> str | None:
 
 
 def _override_in_effect(chrome_path: str | None = None) -> tuple[str | None, str | None]:
-    """The override discovery will use, as (path, how the user gave it)."""
+    """The override in play, as (path, how it was given)."""
     if chrome_path:
         return chrome_path, f"--chrome-path {chrome_path}"
     env_override = os.environ.get(CHROME_PATH_ENV)
@@ -108,16 +99,15 @@ def _override_in_effect(chrome_path: str | None = None) -> tuple[str | None, str
 def _resolve_executable(path: str) -> str | None:
     """Return `path` if it names an executable, else None.
 
-    which() validates a value with a path component directly instead of
-    searching PATH, so this accepts an absolute path or a bare command name.
-    `~` is expanded because an override can arrive from somewhere no shell
-    expanded it -- a container env file, a systemd unit.
+    which() checks a value with a path component directly rather than
+    searching PATH, so this takes an absolute path or a bare command name.
+    `~` is expanded -- a container env file or systemd unit never is.
     """
     return shutil.which(os.path.expanduser(path))
 
 
 def _searched_locations() -> list[str]:
-    """Describe, for the not-found error, where find_chrome_binary looked."""
+    """Where find_chrome_binary looked, for the not-found error."""
     return _platform_candidates() + [f"{c} (PATH)" for c in _PATH_COMMANDS]
 
 
@@ -157,8 +147,8 @@ async def launch_browser(
 ) -> InstanceInfo:
     """Launch Chrome with CDP enabled and register as a named instance.
 
-    Finds the Chrome binary (chrome_path or CHROME_AGENT_PATH override, then
-    the standard install locations, then PATH), auto-allocates a port (or uses
+    Finds the Chrome binary (chrome_path or CHROME_AGENT_PATH, then the
+    standard install locations, then PATH), auto-allocates a port (or uses
     port_override), starts Chrome with --remote-debugging-port, waits for the
     port to be ready, registers the instance in the registry, and optionally
     applies a fingerprint profile.

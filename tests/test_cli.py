@@ -373,10 +373,10 @@ def test_launch_chrome_path_flag_reaches_the_launcher(monkeypatch):
 
 
 def test_launch_chrome_path_takes_exactly_one_value(monkeypatch):
-    """--chrome-path consumes its value and nothing else -- later flags still parse.
+    """--chrome-path consumes its value only; later flags still parse.
 
-    A valueless --chrome-path is not worth asserting on: it lands in the
-    unknown-option branch, which is what an unrecognized flag did already.
+    A valueless --chrome-path isn't worth a test: it hits the unknown-option
+    branch, same as before the flag existed.
     """
     import asyncio
 
