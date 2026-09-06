@@ -43,9 +43,18 @@ trap cleanup EXIT
 
 # ---------------------------------------------------------------- terminal ----
 export LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe        # Xvfb has no GPU
-DISPLAY="$DISP" ZDOTDIR="$HERE/demo-zdotdir" \
-  ghostty --gtk-single-instance=false --window-width=200 --window-height=45 \
-  -e zsh -i >/dev/null 2>&1 &
+# CAPTURE_REAL=1 launches with NO ZDOTDIR, so the user's actual ~/.zshrc loads.
+# A screenshot taken inside the demo ZDOTDIR does not prove the real config
+# behaves the same -- only this does.
+if [[ "${CAPTURE_REAL:-0}" == "1" ]]; then
+  DISPLAY="$DISP" \
+    ghostty --gtk-single-instance=false --window-width=200 --window-height=45 \
+    -e zsh -i >/dev/null 2>&1 &
+else
+  DISPLAY="$DISP" ZDOTDIR="$HERE/demo-zdotdir" \
+    ghostty --gtk-single-instance=false --window-width=200 --window-height=45 \
+    -e zsh -i >/dev/null 2>&1 &
+fi
 GHOSTTY_PID=$!
 
 WID=""
