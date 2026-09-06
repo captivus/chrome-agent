@@ -90,6 +90,21 @@ chrome-agent 'myproject-0[2]' Page.navigate '{"url": "https://example.com"}'
 
 A literal name is never treated as a pattern, so `chrome-agent stop myproject-01` cannot sweep up `myproject-02`. Because `stop --target` closes one tab, combining it with a pattern that matches several instances is refused.
 
+## Tab Completion
+
+```bash
+mkdir -p ~/.config/zsh/completions          # any directory on $fpath
+chrome-agent completions zsh > ~/.config/zsh/completions/_chrome-agent
+```
+
+Or, from `.zshrc` after `compinit`: `source <(chrome-agent completions zsh)`.
+
+Completes the subcommands, their flags, and the **live instance names** -- the
+completion shells out to `chrome-agent completions instances` on every Tab
+(~60 ms), so it offers what is actually registered rather than a list baked in at
+install time. Each instance is described by its port and tab count. CDP method
+names are not completed yet.
+
 ## Two Channels
 
 chrome-agent uses a two-channel pattern for browser interaction:
@@ -135,6 +150,7 @@ chrome-agent attach <instance|glob> [+Event ...] [--target SPEC | --target-id ID
 chrome-agent stop <instance|glob> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
 chrome-agent help [<instance|glob>] [Domain | Domain.method]
 chrome-agent cleanup
+chrome-agent completions <zsh | instances>
 chrome-agent --version
 ```
 
@@ -146,6 +162,7 @@ chrome-agent --version
 | `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Accepts a glob, stopping every matching instance. Use `--target` or `--url` to close a single tab without affecting the browser; because this closes a tab, prefer the explicit `--target-id` / `--target-index`. |
 | `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |
 | `cleanup` | Remove stale instances (dead browsers) and their session directories. |
+| `completions` | `zsh` prints a shell completion; `instances` prints `name:description` lines for the registered instances (what the completion reads on each Tab). |
 | `--version` | Print the installed chrome-agent version (`-V` alias) and exit. |
 
 Instances are tracked in a registry at `/tmp/chrome-agent/registry.json`. A headed browser's instance is **automatically removed from the registry when its window is closed** (its session directory is cleaned up too), so `status` reflects what is actually running. Liveness is determined by **process identity plus port attribution**, not a bare PID-existence check: the recorded PID counts only if it is a live process of the launching user whose start time matches what was recorded at launch (so a recycled or namespace-local PID never masquerades as the browser), and a listening CDP port counts only if a process claiming that port with this instance's profile directory can be found -- so browsers started via wrapper/snap launchers (which fork the real browser into another process) are still reported correctly, while a port since claimed by a *different* browser is not mistaken for this one. A **transient connection drop does not retire a live instance**: a host suspend/resume severs the supervisor's CDP connection while Chrome keeps running, so the supervisor reconnects and keeps supervising; retirement happens only once the CDP port stops listening. `cleanup` removes any entries that remain (headless instances, or browsers that were killed abruptly).

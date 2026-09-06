@@ -14,7 +14,7 @@ import sys
 
 
 # Operational commands -- checked first during routing
-OPERATIONAL_COMMANDS = {"launch", "status", "attach", "help", "cleanup", "stop", "guide"}
+OPERATIONAL_COMMANDS = {"launch", "status", "attach", "help", "cleanup", "stop", "guide", "completions"}
 
 
 # Target-selection flags and the resolution each one forces. Bare --target maps
@@ -75,6 +75,46 @@ def _print_guide(args: list[str]) -> None:
         print(guide.read_text(encoding="utf-8"), end="")
 
 
+def _run_completions(args: list[str]) -> None:
+    """Print shell completions, or the live data the completion draws on.
+
+    `zsh` prints the completion function (ship it to a directory on $fpath as
+    _chrome-agent, or source it after compinit). `instances` prints one
+    `name:description` line per registered instance -- the format zsh's
+    _describe consumes -- and is what the completion calls on every Tab, so the
+    names offered are the ones actually registered rather than a snapshot.
+    """
+    if not args:
+        print("Error: completions requires a shell or data name", file=sys.stderr)
+        print("Usage: chrome-agent completions <zsh | instances>", file=sys.stderr)
+        sys.exit(1)
+
+    what = args[0]
+
+    if what == "zsh":
+        from importlib.resources import files
+
+        script = files("chrome_agent").joinpath("completions.zsh")
+        print(script.read_text(encoding="utf-8"), end="")
+        return
+
+    if what == "instances":
+        from .instance_status import get_instance_status
+
+        for status in get_instance_status():
+            if not status.alive:
+                description = f"port {status.port} -- DEAD"
+            else:
+                count = len(status.targets)
+                description = f"port {status.port} -- {count} tab{'' if count == 1 else 's'}"
+            print(f"{status.name}:{description}")
+        return
+
+    print(f"Error: unknown completions target: {what}", file=sys.stderr)
+    print("Usage: chrome-agent completions <zsh | instances>", file=sys.stderr)
+    sys.exit(1)
+
+
 def _print_static_usage() -> None:
     """Print static usage when no browser is available for protocol listing."""
     print("chrome-agent -- CLI for AI agents to control Chrome via CDP\n")
@@ -87,6 +127,7 @@ def _print_static_usage() -> None:
     print("  stop <instance> [TARGET]                               Stop a browser, or close one tab")
     print("  cleanup                                                Remove stale instances")
     print("  guide [--path]                                         Print this tool's agent guide")
+    print("  completions <zsh | instances>                          Shell completion, and its instance data")
     print()
     print("  --version, -V                                          Show version and exit")
     print()
@@ -546,6 +587,8 @@ def main() -> None:
             _run_cleanup()
         elif command == "guide":
             _print_guide(args=rest)
+        elif command == "completions":
+            _run_completions(args=rest)
         return
 
     # Disambiguate "instance name" vs "bare Domain.method":
