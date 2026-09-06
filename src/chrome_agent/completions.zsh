@@ -38,6 +38,27 @@ _chrome_agent_instances() {
   _describe -t instances 'instance' instances
 }
 
+# CDP methods and events come from the browser's own /json/protocol, so they
+# describe the protocol THIS Chrome implements rather than a list bundled with
+# chrome-agent. ~7 ms for the whole schema, so there is nothing to cache.
+# $_chrome_agent_instance is set by _chrome-agent when the line names one;
+# without it any live instance answers, the schema being identical across them.
+_chrome_agent_methods() {
+  local -a methods
+  methods=( ${(f)"$(_call_program chrome-agent-methods chrome-agent completions methods ${_chrome_agent_instance:-} 2>/dev/null)"} )
+  (( $#methods )) || return 1
+  _describe -t methods 'CDP method' methods
+}
+
+_chrome_agent_events() {
+  local -a events
+  events=( ${(f)"$(_call_program chrome-agent-events chrome-agent completions events ${_chrome_agent_instance:-} 2>/dev/null)"} )
+  (( $#events )) || return 1
+  # attach subscribes with a leading +, which is part of the word being
+  # completed -- prefix it so the inserted candidate is usable as typed.
+  _describe -t events 'event to subscribe to' events -P '+'
+}
+
 _chrome_agent_first() {
   _alternative \
     'commands:command:_chrome_agent_commands' \
@@ -46,6 +67,7 @@ _chrome_agent_first() {
 
 _chrome-agent() {
   local context state state_descr line ret=1
+  local _chrome_agent_instance          # read by the method/event helpers
   typeset -A opt_args
 
   # The four target selectors are mutually exclusive -- the CLI errors if more
@@ -82,9 +104,10 @@ _chrome-agent() {
       _arguments $target_specs '1:instance:_chrome_agent_instances' && ret=0
       ;;
     attach)
+      _chrome_agent_instance=$words[2]
       _arguments $target_specs \
         '1:instance:_chrome_agent_instances' \
-        '*:event to subscribe to (+Domain.event):' && ret=0
+        '*:event:_chrome_agent_events' && ret=0
       ;;
     help)
       _arguments '1:instance or Domain:_chrome_agent_instances' && ret=0
@@ -97,6 +120,8 @@ _chrome-agent() {
       what=(
         'zsh:Print this completion function'
         'instances:Print instance names and descriptions, one per line'
+        'methods:Print Domain.method names from the running browser'
+        'events:Print Domain.event names from the running browser'
       )
       _describe -t what 'what to print' what && ret=0
       ;;
@@ -106,8 +131,9 @@ _chrome-agent() {
     *)
       # The first word was an instance name, so this is the one-shot form:
       #   chrome-agent <instance> Domain.method '{"param": "value"}'
+      _chrome_agent_instance=$words[1]
       _arguments $target_specs \
-        '1:CDP method (Domain.method):' \
+        '1:CDP method:_chrome_agent_methods' \
         '2:JSON parameters:' && ret=0
       ;;
   esac

@@ -705,3 +705,158 @@ def test_completions_requires_a_target(capsys):
         cli._run_completions(args=["bash"])
     assert exc_info.value.code == 1
     assert "unknown completions target: bash" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Protocol completions (CDP methods and events)
+# ---------------------------------------------------------------------------
+
+
+SCHEMA_FIXTURE = {
+    "domains": [
+        {
+            "domain": "Page",
+            "commands": [
+                {"name": "navigate", "description": "Navigates current page to the given URL."},
+                {"name": "reload", "description": "Reloads given page:\nwith a colon and a newline."},
+                {"name": "bringToFront"},
+            ],
+            "events": [
+                {"name": "loadEventFired", "description": "Fired when the page loads."},
+            ],
+        },
+    ],
+}
+
+
+def _fake_instance(monkeypatch, *, alive=True, version="Chrome/151.0.0.1"):
+    from chrome_agent.registry import InstanceInfo
+
+    info = InstanceInfo(
+        name="mysite-01", port=9222, pid=999, browser_version=version,
+        user_data_dir="", alive=alive,
+    )
+    monkeypatch.setattr("chrome_agent.registry.lookup", lambda **kw: info)
+    monkeypatch.setattr("chrome_agent.registry.enumerate_instances", lambda **kw: [info])
+    return info
+
+
+def test_completions_methods_reads_the_live_protocol(tmp_path, monkeypatch, capsys):
+    """Methods come from the running browser, one Domain.method per line."""
+    from chrome_agent import cli
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _fake_instance(monkeypatch)
+    monkeypatch.setattr("chrome_agent.protocol.fetch_protocol_schema", lambda port: SCHEMA_FIXTURE)
+
+    cli._run_completions(args=["methods", "mysite-01"])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "Page.navigate:Navigates current page to the given URL."
+    # A multi-line CDP description must collapse to one line -- each extra line
+    # would otherwise read as its own bogus candidate -- by joining rather than
+    # truncating, since CDP wraps its prose at arbitrary points and a first-line
+    # cut ends mid sentence.
+    assert lines[1] == "Page.reload:Reloads given page: with a colon and a newline."
+    # A method with no description still gets its (empty) description field.
+    assert lines[2] == "Page.bringToFront:"
+
+
+def test_completions_events_reads_the_event_list(tmp_path, monkeypatch, capsys):
+    """Events come from the same schema, from the events key rather than commands."""
+    from chrome_agent import cli
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _fake_instance(monkeypatch)
+    monkeypatch.setattr("chrome_agent.protocol.fetch_protocol_schema", lambda port: SCHEMA_FIXTURE)
+
+    cli._run_completions(args=["events", "mysite-01"])
+
+    assert capsys.readouterr().out == "Page.loadEventFired:Fired when the page loads.\n"
+
+
+def test_completions_methods_cache_avoids_a_second_fetch(tmp_path, monkeypatch, capsys):
+    """The second call is served from disk without contacting the browser.
+
+    zsh runs completion on every keystroke when autosuggestions use the
+    completion strategy, so an uncached lookup is an HTTP round trip per
+    character typed.
+    """
+    from chrome_agent import cli
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _fake_instance(monkeypatch)
+
+    calls = []
+
+    def _fetch(port):
+        calls.append(port)
+        return SCHEMA_FIXTURE
+
+    monkeypatch.setattr("chrome_agent.protocol.fetch_protocol_schema", _fetch)
+
+    cli._run_completions(args=["methods", "mysite-01"])
+    first = capsys.readouterr().out
+    cli._run_completions(args=["methods", "mysite-01"])
+    second = capsys.readouterr().out
+
+    assert calls == [9222], "the cached call still fetched from the browser"
+    assert second == first, "the cache served different bytes than the fetch"
+    cached = tmp_path / "chrome-agent" / "protocol-Chrome-151.0.0.1-commands.txt"
+    assert cached.exists()
+
+
+def test_completions_methods_cache_key_follows_the_browser_version(tmp_path, monkeypatch, capsys):
+    """A Chrome upgrade changes the key, so the stale protocol is never served."""
+    from chrome_agent import cli
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr("chrome_agent.protocol.fetch_protocol_schema", lambda port: SCHEMA_FIXTURE)
+
+    _fake_instance(monkeypatch, version="Chrome/151.0.0.1")
+    cli._run_completions(args=["methods", "mysite-01"])
+    capsys.readouterr()
+
+    _fake_instance(monkeypatch, version="Chrome/152.0.0.1")
+    cli._run_completions(args=["methods", "mysite-01"])
+    capsys.readouterr()
+
+    names = sorted(p.name for p in (tmp_path / "chrome-agent").iterdir())
+    assert names == [
+        "protocol-Chrome-151.0.0.1-commands.txt",
+        "protocol-Chrome-152.0.0.1-commands.txt",
+    ]
+
+
+def test_completions_methods_silent_when_no_browser(tmp_path, monkeypatch, capsys):
+    """No live instance means no candidates -- not an error mid-command-line."""
+    from chrome_agent import cli
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr("chrome_agent.registry.enumerate_instances", lambda **kw: [])
+
+    cli._run_completions(args=["methods"])
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_completions_methods_silent_when_the_named_instance_is_dead(tmp_path, monkeypatch, capsys):
+    """A dead instance cannot answer, and saying so at Tab time would be noise."""
+    from chrome_agent import cli
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _fake_instance(monkeypatch, alive=False)
+
+    cli._run_completions(args=["methods", "mysite-01"])
+
+    assert capsys.readouterr().out == ""
+
+
+def test_protocol_cache_is_skipped_without_a_version(monkeypatch):
+    """No recorded browser version means no cache key -- re-fetch rather than
+    serve one browser's protocol under another's name."""
+    from chrome_agent import cli
+
+    assert cli._protocol_cache_path(browser_version="", kind="commands") is None

@@ -10,6 +10,7 @@ Usage: chrome-agent <command> [args...]
 
 import asyncio
 import json
+import os
 import sys
 
 
@@ -98,6 +99,13 @@ def _run_completions(args: list[str]) -> None:
         print(script.read_text(encoding="utf-8"), end="")
         return
 
+    if what in ("methods", "events"):
+        _print_protocol_completions(
+            kind="commands" if what == "methods" else "events",
+            instance_name=args[1] if len(args) > 1 else None,
+        )
+        return
+
     if what == "instances":
         from .instance_status import get_instance_status
 
@@ -111,8 +119,118 @@ def _run_completions(args: list[str]) -> None:
         return
 
     print(f"Error: unknown completions target: {what}", file=sys.stderr)
-    print("Usage: chrome-agent completions <zsh | instances>", file=sys.stderr)
+    print(
+        "Usage: chrome-agent completions <zsh | instances | methods | events> [<instance>]",
+        file=sys.stderr,
+    )
     sys.exit(1)
+
+
+def _print_protocol_completions(*, kind: str, instance_name: str | None) -> None:
+    """Print `Domain.member:description` lines for the live protocol.
+
+    Read from the running browser rather than a bundled list, so the candidates
+    match the protocol *this* Chrome implements -- including surface newer than
+    any snapshot shipped with chrome-agent. Any live instance answers, since the
+    schema is identical across instances of the same browser.
+
+    The result is cached on disk, keyed by the browser version the registry
+    already records -- so a hit needs no browser contact at all, and a Chrome
+    upgrade invalidates it by changing the key. The fetch itself is only ~7 ms
+    and would not justify a cache for Tab alone; what does is that zsh runs
+    completion on every *keystroke* when autosuggestions use the completion
+    strategy, so an uncached lookup means a process spawn and an HTTP round
+    trip per character typed.
+
+    Prints nothing and exits 0 when no browser is reachable -- at Tab time the
+    right answer is no candidates, not an error in the middle of a command line.
+    """
+    from .protocol import fetch_protocol_schema
+
+    resolved = _resolve_instance_for_protocol(instance_name=instance_name)
+    if resolved is None:
+        return
+    port, browser_version = resolved
+
+    cache = _protocol_cache_path(browser_version=browser_version, kind=kind)
+    if cache is not None and cache.exists():
+        try:
+            sys.stdout.write(cache.read_text(encoding="utf-8"))
+            return
+        except OSError:
+            pass  # unreadable cache is not a reason to fail; re-fetch below
+
+    try:
+        schema = fetch_protocol_schema(port=port)
+    except (ConnectionError, RuntimeError, OSError):
+        return
+
+    lines = []
+    for domain in schema.get("domains", []):
+        name = domain.get("domain", "")
+        for member in domain.get(kind, []):
+            # _describe splits each line on its FIRST colon, so colons inside a
+            # description are harmless; newlines are not -- a CDP description
+            # can run to several lines, and each would read as its own bogus
+            # candidate. Join rather than truncate to the first line: CDP wraps
+            # its prose at arbitrary points, so a first-line cut ends mid
+            # sentence and reads as a bug in the menu.
+            description = " ".join((member.get("description") or "").split())
+            lines.append(f"{name}.{member.get('name', '')}:{description}")
+
+    text = "".join(f"{line}\n" for line in lines)
+    sys.stdout.write(text)
+
+    if cache is not None:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            # Write via a temp file in the same directory and rename, so a
+            # completion racing this one never reads a half-written cache.
+            temp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+            temp.write_text(text, encoding="utf-8")
+            os.replace(temp, cache)
+        except OSError:
+            pass  # a cache we cannot write is not an error worth surfacing
+
+
+def _resolve_instance_for_protocol(
+    *, instance_name: str | None
+) -> tuple[int, str] | None:
+    """Resolve to (port, browser_version), or None when nothing can answer.
+
+    Any live instance will do when none is named: the protocol schema is a
+    property of the browser build, not of the instance.
+    """
+    from .registry import enumerate_instances, lookup
+
+    try:
+        if instance_name is not None:
+            info = lookup(instance_name=instance_name)
+            return (info.port, info.browser_version) if info.alive else None
+        for info in enumerate_instances():
+            if info.alive:
+                return info.port, info.browser_version
+    except Exception:
+        return None
+    return None
+
+
+def _protocol_cache_path(*, browser_version: str, kind: str):
+    """Where the protocol completions for this browser build are cached.
+
+    None when the registry has no version to key on -- better to re-fetch every
+    time than to serve one browser's protocol under another's name.
+    """
+    import re
+    from pathlib import Path
+
+    if not browser_version:
+        return None
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache"
+    )
+    safe = re.sub(r"[^A-Za-z0-9._-]", "-", browser_version)
+    return Path(base) / "chrome-agent" / f"protocol-{safe}-{kind}.txt"
 
 
 def _print_static_usage() -> None:
@@ -127,7 +245,7 @@ def _print_static_usage() -> None:
     print("  stop <instance> [TARGET]                               Stop a browser, or close one tab")
     print("  cleanup                                                Remove stale instances")
     print("  guide [--path]                                         Print this tool's agent guide")
-    print("  completions <zsh | instances>                          Shell completion, and its instance data")
+    print("  completions <zsh|instances|methods|events> [<instance>]  Shell completion and its data")
     print()
     print("  --version, -V                                          Show version and exit")
     print()

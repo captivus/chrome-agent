@@ -10,7 +10,19 @@ source "$HOME/.zshrc"
 
 # $0 is "zsh" inside a ZDOTDIR .zshrc, not this file's path -- $ZDOTDIR is
 # the only reliable handle on where this rc lives.
-path=( "${ZDOTDIR:A}/../demo-bin" $path )
+demo_bin="${ZDOTDIR:A}/../.venv/bin"
+if [[ ! -x $demo_bin/chrome-agent ]]; then
+  print -u2 "Run ${ZDOTDIR:A}/../setup.sh first to build the demo's chrome-agent."
+  return 1
+fi
+path=( "$demo_bin" $path )
+# Pin the hash entry as well as the path. Measured: inside a completion widget
+# this shell resolved `chrome-agent` to ~/.local/bin (the globally installed
+# tool) even with $demo_bin first on $path and `which -a` reporting the demo
+# build -- so the completion silently exercised the wrong binary. A real
+# install has only one chrome-agent on PATH; pinning reproduces that.
+hash -r
+hash chrome-agent="$demo_bin/chrome-agent"
 
 source <(chrome-agent completions zsh)
 

@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# Demo shim: run chrome-agent from this checkout, so the demo shell exercises
-# the working-tree build rather than whatever is installed on PATH.
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-exec uv run --quiet --project "$REPO" chrome-agent "$@"

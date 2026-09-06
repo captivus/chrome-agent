@@ -116,4 +116,19 @@ reset_line; type_str "chrome-agent taleb-01 "; sleep 1; tab; sleep 4
 shot 07-one-shot-method-position
 DISPLAY="$DISP" xdotool key Escape; sleep 1
 
+# 8. CDP methods in the one-shot position, filtered by what is typed
+reset_line; type_str "chrome-agent taleb-01 Page.nav"; sleep 1; tab; sleep 5
+shot 08-cdp-method-filtered
+DISPLAY="$DISP" xdotool key Escape; sleep 1
+
+# 9. the whole method surface -- 669 candidates, grouped and described
+reset_line; type_str "chrome-agent taleb-01 "; sleep 1; tab; sleep 6
+shot 09-cdp-method-all
+DISPLAY="$DISP" xdotool key Escape; sleep 1
+
+# 10. attach events -- the + prefix must survive onto the inserted candidate
+reset_line; type_str "chrome-agent attach taleb-01 +Page.load"; sleep 1; tab; sleep 5
+shot 10-attach-events
+DISPLAY="$DISP" xdotool key Escape; sleep 1
+
 echo "captures in $OUT"

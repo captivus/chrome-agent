@@ -189,7 +189,7 @@ chrome-agent attach <instance|glob> [+Event ...] [--target SPEC | --target-id ID
 chrome-agent stop <instance|glob> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
 chrome-agent help [<instance|glob>] [Domain | Domain.method]
 chrome-agent cleanup
-chrome-agent completions <zsh | instances>
+chrome-agent completions <zsh | instances | methods | events> [<instance>]
 chrome-agent --version
 chrome-agent <instance|glob> Domain.method '{"param": "value"}'
 ```
@@ -252,7 +252,7 @@ chrome-agent cleanup                      # drop dead instances + stale session 
 
 Headed launches are marked (colored border + `🤖 <instance>` title prefix) so a human can tell an agent-driven window from their own; `--no-window-border` disables it. Closing a headed window **auto-retires** its instance from the registry in real time (a transient CDP drop does not); `status` is real-time truth (port-based liveness). On Linux/X11 the window is pinned to the launching terminal's desktop (needs `xdotool`).
 
-**Tab completion.** `chrome-agent completions zsh` prints a zsh completion for the subcommands, their flags, and the **live instance names** — it calls `chrome-agent completions instances` on every Tab, so the names offered are the ones actually registered. Install it as `_chrome-agent` in a directory on `$fpath`, or `source <(chrome-agent completions zsh)` after `compinit`. `completions instances` prints `name:description` lines and is useful on its own as a cheap machine-readable instance list.
+**Tab completion.** `chrome-agent completions zsh` prints a zsh completion for the subcommands, their flags, and the **live instance names** — it calls `chrome-agent completions instances` on every Tab, so the names offered are the ones actually registered. Install it as `_chrome-agent` in a directory on `$fpath`, or `source <(chrome-agent completions zsh)` after `compinit`. `completions instances`, `methods` and `events` print `name:description` lines and are useful on their own as cheap machine-readable lists. Methods and events are read from the **running browser's** own `/json/protocol`, so they describe the protocol *this* Chrome implements -- including surface newer than any list bundled with chrome-agent -- and are cached on disk under the browser version, since zsh runs completion on every keystroke when autosuggestions use the completion strategy.
 
 **Fingerprint** spoofs user agent, viewport, language, and timezone via Chrome launch flags (no JS injection). It deliberately does **not** patch `navigator.webdriver`/`window.chrome` — an empirical audit (bot.sannysoft.com / CreepJS) found those overrides make Chrome *more* detectable, not less. WebRTC can still leak the real public IP via STUN regardless. Schema + audit: see the README.
 

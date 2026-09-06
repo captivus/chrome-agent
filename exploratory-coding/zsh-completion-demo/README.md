@@ -27,8 +27,14 @@ chrome-agent stop reader<TAB>     mid-word substring match on instance names
 chrome-agent stop ensor<TAB><TAB> prefix fills, second Tab opens the fzf-tab menu
 chrome-agent launch --<TAB>       flags for that subcommand
 chrome-agent stop taleb-01 --<TAB> the four target selectors
-chrome-agent taleb-01 <TAB>       the one-shot position (no CDP methods yet)
+chrome-agent taleb-01 Page.nav<TAB>          a CDP method, from the live protocol
+chrome-agent taleb-01 <TAB>                 all 669 methods, described
+chrome-agent attach taleb-01 +Page.load<TAB> a CDP event, + prefix preserved
 ```
+
+Run `./setup.sh` once first -- it builds a real `chrome-agent` entry point for
+the demo from this checkout, editable, so edits to the completion take effect
+without reinstalling.
 
 ## Observed environment facts
 
@@ -66,19 +72,40 @@ PNG means the window had not painted yet.
 | `04-target-flags` | the four mutually-exclusive target selectors |
 | `05-instance-midword-substring` | `stop reader`<kbd>Tab</kbd> reaches `ensorcell-reader-0*` |
 | `06-instance-menu-second-tab` | second Tab opens the fzf-tab menu, ports and tab counts shown |
-| `07-one-shot-method-position` | the one-shot slot, where CDP methods would go |
+| `07-one-shot-method-position` | the one-shot slot |
+| `08-cdp-method-filtered` | `Page.nav`<kbd>Tab</kbd> completes to `Page.navigate` |
+| `09-cdp-method-all` | all 669 methods, each described, from the live protocol |
+| `10-attach-events` | `+Page.load`<kbd>Tab</kbd> completes, keeping the `+` |
+
+## The harness bug that made this hard
+
+Three verification runs showed an empty method menu, and the completion was not
+at fault. Inside a completion widget, the demo shell resolved `chrome-agent` to
+the **globally installed v0.5.8 tool** -- not the demo build -- even though the
+demo directory was first on `$path` and `which -a` reported the demo build.
+Logging `which chrome-agent` from inside the completion function is what caught
+it. The original demo used a `uv run` wrapper *named* `chrome-agent`, which is
+the aggravating factor; it now installs a real console script into `.venv` and
+pins `hash chrome-agent=...`, which is also what a real install looks like --
+exactly one chrome-agent on PATH.
+
+Worth keeping in mind generally: a demo harness that shadows the tool under test
+can silently test the wrong binary, and every symptom looks like a bug in the
+thing you are testing.
+
+## Why the cache exists
+
+Not for Tab latency. The whole protocol schema fetches in ~7 ms, invisible next
+to process startup, so the cache was initially ruled out on measurement. What
+brought it back was instrumenting the completion in a live shell: with
+`ZSH_AUTOSUGGEST_STRATEGY=(history completion)` -- which this configuration sets
+-- **zsh runs the completion function on every keystroke**, not on Tab. Uncached,
+that is a process spawn and an HTTP round trip per character typed. The cache is
+keyed on the browser version the registry already records, so a hit contacts no
+browser and a Chrome upgrade invalidates it.
 
 ## Not done yet
 
-- **CDP method names** (`chrome-agent taleb-01 Page.nav<TAB>`). The mechanism is
-  the same as instances: a `chrome-agent completions methods [<instance>]` that
-  dumps `Domain.method:description` lines read from the live browser
-  (`help` already does this by querying the running Chrome, so the protocol is
-  version-correct rather than a bundled list). The one design question is
-  caching -- the schema is ~668 methods and identical across instances, so it
-  wants a cache file keyed by browser version rather than a CDP round trip on
-  every Tab.
-- **`+Event` names for `attach`** -- same source, same caching question.
 - **Target values**: `--url`<kbd>Tab</kbd> completing that instance's live tab
   URLs, `--target-index`<kbd>Tab</kbd> its indices. Needs the instance name from
   earlier in the line, which the completion already has.
