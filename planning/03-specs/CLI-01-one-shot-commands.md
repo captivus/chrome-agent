@@ -854,3 +854,44 @@ Updated tactile workflow: `chrome-agent launch --port 9333`, `chrome-agent statu
 - **`--no-window-border`** -- a `launch` option that disables the window-border marker (BRW-06), which is on by default for headed launches. Parsed in `_run_launch` and passed as `window_border=False` to `launch_browser`.
 
 Documented in `README.md` and `AGENTS.md`.
+
+## 13. Iteration 3 Update -- Instance Patterns and Shell Completions
+
+**Status:** Complete (2026-09-06).
+
+### Instance patterns
+
+Every command that takes an instance name accepts a glob (resolution: BRW-04 §13). What a multi-match means is decided per command, by what the command can coherently do with several browsers:
+
+| command | multi-match |
+|---|---|
+| `stop` | **fans out** -- stops each match |
+| `status` | **fans out** -- lists each match (BRW-05 §13) |
+| `attach` | error, candidates listed (CDP-04 §12) |
+| `help` | error, candidates listed (CDP-03 §12) |
+| one-shot `<instance> Domain.method` | error, candidates listed |
+
+**`stop` fan-out.** `_run_stop` resolves first, and on more than one match prints `Pattern '<p>' matched N instances:` followed by the names **before** stopping any of them, so a broad pattern leaves a record of what it swept up even if a later stop fails. Each stop is attempted independently; a failure prints to stderr and the command exits 1 after trying them all. No confirmation prompt -- the CLI must stay non-interactive for agent use -- and no dry-run mode; the match summary plus `status '<p>'` beforehand cover the same ground without a second invocation.
+
+**`stop --target` with a multi-match is refused.** A target selector closes one tab; applying "close tab index 1" to each of several browsers is not a coherent reading of the command, so it errors rather than guessing.
+
+**Routing.** `main()`'s instance-vs-`Domain.method` disambiguation gains one clause: `is_known_instance = command in known_instances or is_pattern(command)`. CDP method names are not globbable, so a wildcard in the first argument is unambiguous intent to select instances and is never misread as a method. This composes with the existing dotted-name handling (a pattern like `aroundchicago.tech-*` already failed `looks_like_method` on the lowercase first segment).
+
+**Tests added** (`tests/test_cli.py`): `test_stop_pattern_stops_every_match`, `test_stop_pattern_prints_matches_before_acting`, `test_stop_pattern_with_target_selector_is_refused`, `test_stop_pattern_no_match_exits_nonzero`, `test_status_pattern_lists_only_matches`, `test_one_shot_pattern_matching_several_errors_with_candidates`, `test_pattern_first_arg_routes_as_instance_not_method`.
+
+### `completions` command
+
+New operational command, `chrome-agent completions <zsh | instances>`:
+
+- **`zsh`** prints the packaged completion (`src/chrome_agent/completions.zsh`, read via `importlib.resources`; verified present in the built wheel). It is installed as `_chrome-agent` in a directory on `$fpath`, or sourced after `compinit` -- the file's trailing `funcstack` guard makes both paths work from one artifact.
+- **`instances`** prints one `name:description` line per registered instance (`ensorcell-reader-01:port 9226 -- 1 tab`), the colon-separated shape zsh's `_describe` consumes. Dead instances are listed with `DEAD` -- you may want to `stop` one to clear it.
+
+The completion calls `completions instances` on **every Tab** rather than baking a list in at install time, so the names offered are the ones actually registered. Measured cost: ~60 ms with 9 live instances, including the per-instance HTTP call to each browser's `/json`.
+
+Completed: subcommands (described), live instance names, per-subcommand flags, and the four mutually-exclusive target selectors. **Not** completed: CDP method names, `+Event` names, and target *values*. Those all read from the live browser and want a cache keyed by browser version rather than a CDP round trip per Tab -- see `exploratory-coding/zsh-completion-demo/README.md`.
+
+**Why native zsh completion rather than a carapace spec.** Measured on this machine: carapace has 2690 completers and does not own `chrome-agent`. That matters because carapace prefix-filters its own candidate set before zsh sees it, which defeats the user's `matcher-list` substring matching (see `~/Documents/99_learning-records/2026-05-30-fuzzy-zsh-completion-stack-fzf-tab-carapace-matcher-list.md`). Native completion keeps it: `chrome-agent stop reader<TAB>` reaches `ensorcell-reader-01`, verified in a real terminal.
+
+**Tests added** (`tests/test_cli.py`): `test_completions_zsh_prints_a_loadable_completion`, `test_completions_zsh_is_valid_zsh` (runs `zsh -n` over the generated script -- a syntax error there is invisible to every other test), `test_completions_instances_emits_describe_format`, `test_completions_instances_counts_tabs`, `test_completions_requires_a_target`.
+
+**Verified visually.** `exploratory-coding/zsh-completion-demo/capture.sh` renders the completion in ghostty on an allocated Xvfb display and screenshots each case; the seven frames in that directory's `captures/` are the evidence, indexed in its README.
