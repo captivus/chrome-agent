@@ -69,7 +69,26 @@ chrome-agent help myproject-01 Page.navigate
 
 # Stop the browser when done
 chrome-agent stop myproject-01
+
+# Or stop a whole related set at once (quote the pattern -- see Instance Patterns)
+chrome-agent stop 'myproject-*'
 ```
+
+## Instance Patterns
+
+Anywhere an instance name is accepted, a glob works instead -- `*`, `?`, `[abc]`, matched case-sensitively against the registered names.
+
+```bash
+chrome-agent stop 'myproject-*'      # stops every match, printing the names first
+chrome-agent status 'myproject-*'    # lists every match
+chrome-agent 'myproject-0[2]' Page.navigate '{"url": "https://example.com"}'
+```
+
+`stop` and `status` act on every match. The single-browser commands -- `attach`, `help` and one-shot CDP calls -- resolve a pattern that matches exactly one instance and otherwise error with the candidates listed, rather than picking one. A pattern matching nothing is an error, not a silent no-op.
+
+**Quote the pattern.** Your shell expands an unquoted glob before chrome-agent sees it, and zsh aborts the command outright when nothing in the working directory matches (`zsh: no matches found: myproject-*`).
+
+A literal name is never treated as a pattern, so `chrome-agent stop myproject-01` cannot sweep up `myproject-02`. Because `stop --target` closes one tab, combining it with a pattern that matches several instances is refused.
 
 ## Two Channels
 
@@ -111,10 +130,10 @@ An attach session **exits on its own once it has outlived its purpose** -- when 
 
 ```
 chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT] [--no-window-border]
-chrome-agent status [<instance>]
-chrome-agent attach <instance> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
-chrome-agent stop <instance> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
-chrome-agent help [<instance>] [Domain | Domain.method]
+chrome-agent status [<instance|glob>]
+chrome-agent attach <instance|glob> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
+chrome-agent stop <instance|glob> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
+chrome-agent help [<instance|glob>] [Domain | Domain.method]
 chrome-agent cleanup
 chrome-agent --version
 ```
@@ -122,9 +141,9 @@ chrome-agent --version
 | Command | Description |
 |---------|-------------|
 | `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. |
-| `status` | List running instances with their page targets (IDs, URLs, titles). |
+| `status` | List running instances with their page targets (IDs, URLs, titles). Accepts a glob to list a matching subset. |
 | `attach` | Persistent event observation with isolated subscriptions. Use `--target` (fewer than 8 digits is a tab index, anything else a target-id prefix), `--url substring`, or the explicit `--target-id` / `--target-index` for multi-tab browsers. |
-| `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Use `--target` or `--url` to close a single tab without affecting the browser; because this closes a tab, prefer the explicit `--target-id` / `--target-index`. |
+| `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Accepts a glob, stopping every matching instance. Use `--target` or `--url` to close a single tab without affecting the browser; because this closes a tab, prefer the explicit `--target-id` / `--target-index`. |
 | `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |
 | `cleanup` | Remove stale instances (dead browsers) and their session directories. |
 | `--version` | Print the installed chrome-agent version (`-V` alias) and exit. |

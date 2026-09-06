@@ -184,13 +184,13 @@ Output is JSON on stdout. A one-shot prints the CDP method's **raw result object
 
 ```bash
 chrome-agent launch [--port PORT] [--headless] [--fingerprint profile.json] [--no-window-border]
-chrome-agent status [<instance>]
-chrome-agent attach <instance> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
-chrome-agent stop <instance> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
-chrome-agent help [<instance>] [Domain | Domain.method]
+chrome-agent status [<instance|glob>]
+chrome-agent attach <instance|glob> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
+chrome-agent stop <instance|glob> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
+chrome-agent help [<instance|glob>] [Domain | Domain.method]
 chrome-agent cleanup
 chrome-agent --version
-chrome-agent <instance> Domain.method '{"param": "value"}'
+chrome-agent <instance|glob> Domain.method '{"param": "value"}'
 ```
 
 - `launch` → `{"name","port","pid","browser_version"}`
@@ -217,6 +217,23 @@ Length is the discriminator, **not** range: a mistyped `--target 5` against 3 ta
 
 **`--target-id`, `--target-index` and `--url` skip the inference entirely.** Worth it for `stop --target`, which closes a tab, and required for an **all-digit** id prefix shorter than 8 characters — a short prefix containing any letter (`--target 956F`) is unambiguous and needs no flag.
 
+## Selecting instances by pattern
+
+Anywhere an instance name is taken, a **glob** works instead — `*`, `?`, `[abc]`, matched case-sensitively against the registered names. What a multi-match means depends on the command:
+
+```bash
+chrome-agent stop 'mysite-*'              # stops EVERY match, after printing which
+chrome-agent status 'mysite-*'            # lists every match
+chrome-agent 'mysite-0[2]' Page.navigate '{"url":"..."}'   # one match: acts on it
+chrome-agent 'mysite-*' Page.navigate '{"url":"..."}'      # several: error listing them
+```
+
+`stop` and `status` **fan out** over every match — `stop` prints `Pattern 'mysite-*' matched N instances:` and the names before it starts, so a broad pattern leaves a record of what it swept up, and exits non-zero if any stop failed. The single-browser commands (`attach`, `help`, one-shots) resolve a **one-match** pattern transparently and otherwise error with the candidate list, the same shape as the ambiguous-*tab* error. A pattern matching nothing is an error, not a silent no-op.
+
+**Quote the pattern.** The shell expands an unquoted glob first, and zsh *aborts the command* when nothing in the working directory matches it (`zsh: no matches found: mysite-*`) — chrome-agent never runs. `chrome-agent stop mysite-*` is not the same command as `chrome-agent stop 'mysite-*'`.
+
+Two more edges: a **literal** name is never globbed, so `stop mysite-01` cannot sweep up `mysite-02`; and a **glob is always an instance argument**, never a method name (methods aren't globbable), so a wildcard first argument is never misread as `Domain.method`. `stop --target` closes one tab, which is meaningless across several browsers — combining it with a multi-match pattern is refused rather than applied to each.
+
 ## Managing instances
 
 ```bash
@@ -226,10 +243,11 @@ chrome-agent launch --fingerprint p.json  # spoof UA/viewport/lang/TZ via launch
 chrome-agent launch -- --some-chrome-flag # everything after -- passes through to Chrome
 chrome-agent status                       # all instances + their tabs
 chrome-agent stop mysite-01 [--target-index 2 | --target-id 65602889 | --url foo]  # whole browser, or one tab
+chrome-agent stop 'mysite-*'              # every instance matching the glob (quote it)
 chrome-agent cleanup                      # drop dead instances + stale session dirs
 ```
 
-**Instances outlive your task — stopping them is part of the workflow, not optional cleanup.** A launched instance is a full Chrome process that keeps running (and accumulating memory) until stopped. When you're done with an instance you launched: `chrome-agent stop <instance>`, then **verify with `chrome-agent status`** that the instances you started are gone — the stop's return is not the verification; the status read is. If dead instances or stale session dirs linger, `chrome-agent cleanup`. Keep an instance alive only deliberately (e.g. its login session is wanted for later work) — never by omission.
+**Instances outlive your task — stopping them is part of the workflow, not optional cleanup.** A launched instance is a full Chrome process that keeps running (and accumulating memory) until stopped. When you're done with the instances you launched: `chrome-agent stop <instance>` (or `chrome-agent stop '<glob>'` to take a whole related set down at once), then **verify with `chrome-agent status`** that the instances you started are gone — the stop's return is not the verification; the status read is. If dead instances or stale session dirs linger, `chrome-agent cleanup`. Keep an instance alive only deliberately (e.g. its login session is wanted for later work) — never by omission.
 
 Headed launches are marked (colored border + `🤖 <instance>` title prefix) so a human can tell an agent-driven window from their own; `--no-window-border` disables it. Closing a headed window **auto-retires** its instance from the registry in real time (a transient CDP drop does not); `status` is real-time truth (port-based liveness). On Linux/X11 the window is pinned to the launching terminal's desktop (needs `xdotool`).
 

@@ -90,6 +90,11 @@ def _print_static_usage() -> None:
     print()
     print("  --version, -V                                          Show version and exit")
     print()
+    print("Instance patterns (quote them -- the shell expands an unquoted glob first):")
+    print("  '<glob>'               Any instance argument may be a glob (*, ?, [abc])")
+    print("                         status and stop act on every match;")
+    print("                         attach, help and one-shots require it to match exactly one")
+    print()
     print("Target selectors (TARGET -- pick one; usable on attach, stop and one-shots):")
     print("  --target SPEC          Tab index if SPEC is fewer than 8 digits, else a target-id prefix")
     print("  --target-id ID         Always a target-id prefix (the `id` or `full_id` from status)")
@@ -106,6 +111,7 @@ def _print_static_usage() -> None:
     print("  chrome-agent attach mysite-01 +Page.loadEventFired")
     print("  chrome-agent mysite-01 Page.navigate '{\"url\": \"https://example.com\"}'")
     print("  chrome-agent help Page.navigate")
+    print("  chrome-agent stop 'mysite-*'")
 
 
 async def _run_launch(args: list[str]) -> None:
@@ -205,7 +211,18 @@ async def _run_attach(args: list[str], target_spec: str | None, target_by: str |
         print("Usage: chrome-agent attach <instance> [+Event ...]", file=sys.stderr)
         sys.exit(1)
 
-    instance_name = args[0]
+    from .registry import (
+        AmbiguousInstanceError,
+        InstanceNotFoundError,
+        resolve_instance_name,
+    )
+
+    try:
+        instance_name = resolve_instance_name(name_or_pattern=args[0])
+    except (AmbiguousInstanceError, InstanceNotFoundError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     subscriptions = [arg[1:] for arg in args[1:] if arg.startswith("+")]
 
     try:
@@ -239,12 +256,17 @@ def _run_help(args: list[str]) -> None:
     instance_name = None
     query = None
 
+    from .registry import AmbiguousInstanceError, resolve_instance_name
+
     try:
-        from .registry import lookup
-        lookup(instance_name=args[0])
-        # It's a registered instance name
-        instance_name = args[0]
+        # Resolves a literal name or a single-match glob; a pattern matching
+        # several instances is an error rather than a silent pick, even though
+        # the protocol schema is identical across them.
+        instance_name = resolve_instance_name(name_or_pattern=args[0])
         query = args[1] if len(args) > 1 else None
+    except AmbiguousInstanceError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     except Exception:
         # Not in registry -- treat as domain query
         query = args[0]
@@ -270,15 +292,50 @@ def _run_help(args: list[str]) -> None:
 
 
 def _run_stop(args: list[str], target_spec: str | None, target_by: str | None) -> None:
-    """Stop a browser instance or close a specific tab."""
-    from .registry import InstanceNotFoundError, stop
+    """Stop one or more browser instances, or close a specific tab.
+
+    The instance argument may be a glob pattern, in which case every matching
+    instance is stopped -- the matched names are printed first, so a broad
+    pattern leaves a record of what it swept up. A target selector closes one
+    tab, which is only meaningful against a single browser, so it is refused
+    when the pattern matches several.
+    """
+    from .registry import InstanceNotFoundError, resolve_instance_names, stop
 
     if not args:
         print("Error: stop requires an instance name", file=sys.stderr)
         print("Usage: chrome-agent stop <instance> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]", file=sys.stderr)
         sys.exit(1)
 
-    instance_name = args[0]
+    try:
+        matched = resolve_instance_names(name_or_pattern=args[0])
+    except InstanceNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if len(matched) > 1:
+        if target_spec is not None:
+            names = ", ".join(matched)
+            print(
+                f"Error: a target selector closes one tab, but pattern "
+                f"'{args[0]}' matches {len(matched)} instances: {names}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"Pattern '{args[0]}' matched {len(matched)} instances:")
+        print(f"  {', '.join(matched)}")
+        failures = 0
+        for name in matched:
+            try:
+                print(stop(instance_name=name))
+            except Exception as exc:
+                print(f"Error stopping {name}: {exc}", file=sys.stderr)
+                failures += 1
+        if failures:
+            sys.exit(1)
+        return
+
+    instance_name = matched[0]
 
     # If a target specifier was provided, resolve it to a target ID
     resolved_target_id = None
@@ -355,10 +412,16 @@ async def _run_cdp_one_shot(
 
     # Resolve instance
     if instance_name is not None:
-        from .registry import InstanceNotFoundError, lookup
+        from .registry import (
+            AmbiguousInstanceError,
+            InstanceNotFoundError,
+            lookup,
+            resolve_instance_name,
+        )
         try:
-            info = lookup(instance_name=instance_name)
-        except InstanceNotFoundError as exc:
+            resolved = resolve_instance_name(name_or_pattern=instance_name)
+            info = lookup(instance_name=resolved)
+        except (AmbiguousInstanceError, InstanceNotFoundError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         port = info.port
@@ -492,10 +555,12 @@ def main() -> None:
     #   - Resolve by checking the registry first. If the first arg matches a
     #     known instance, route as instance. Otherwise, apply the
     #     Domain.method heuristic (PascalCase domain + dot + camelCase method).
-    from .registry import enumerate_instances
+    #   - A glob pattern is always an instance argument: method names are not
+    #     globbable, so a wildcard is unambiguous intent to select instances.
+    from .registry import enumerate_instances, is_pattern
 
     known_instances = {i.name for i in enumerate_instances()}
-    is_known_instance = command in known_instances
+    is_known_instance = command in known_instances or is_pattern(command)
     looks_like_method = (
         "." in command
         and command.count(".") == 1

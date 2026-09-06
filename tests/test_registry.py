@@ -12,16 +12,21 @@ import threading
 import pytest
 
 from chrome_agent.registry import (
+    AmbiguousInstanceError,
     InstanceInfo,
     InstanceNotFoundError,
+    NoMatchingInstancesError,
     allocate_port,
     cleanup,
     deregister,
     enumerate_instances,
     instance_is_alive,
     lookup,
+    is_pattern,
     register,
     registration_status,
+    resolve_instance_name,
+    resolve_instance_names,
 )
 
 
@@ -466,3 +471,113 @@ def test_instance_is_alive_false_for_dead_pid_and_dead_port(tmp_path):
         pid_start=None,
     )
     assert instance_is_alive(info) is False
+
+
+# ---------------------------------------------------------------------------
+# Instance patterns -- resolving a glob to the instances it designates
+# ---------------------------------------------------------------------------
+
+
+def _seed(tmp_path, *names: str) -> str:
+    """Write a registry file containing the given instance names."""
+    reg_path = str(tmp_path / "registry.json")
+    registry = {
+        name: {
+            "port": 9222 + index,
+            "pid": 999000 + index,
+            "browser_version": "Chrome/151",
+            "user_data_dir": str(tmp_path / name),
+            "pid_start": "0",
+        }
+        for index, name in enumerate(names)
+    }
+    with open(reg_path, "w") as f:
+        json.dump(registry, f)
+    return reg_path
+
+
+def test_is_pattern_recognises_glob_characters():
+    """Only *, ? and [ make an instance argument a pattern."""
+    assert is_pattern("mysite-*") is True
+    assert is_pattern("mysite-0?") is True
+    assert is_pattern("mysite-0[12]") is True
+    assert is_pattern("mysite-01") is False
+    assert is_pattern("aroundchicago.tech-01") is False
+
+
+def test_resolve_literal_name_never_globs(tmp_path):
+    """A literal name resolves to itself, even when it prefixes other names."""
+    reg_path = _seed(tmp_path, "mysite-01", "mysite-02")
+
+    assert resolve_instance_names("mysite-01", registry_path=reg_path) == ["mysite-01"]
+
+
+def test_resolve_literal_name_unknown_raises(tmp_path):
+    """An unregistered literal name keeps the existing not-found error."""
+    reg_path = _seed(tmp_path, "mysite-01")
+
+    with pytest.raises(InstanceNotFoundError) as exc_info:
+        resolve_instance_names("nosuch", registry_path=reg_path)
+
+    assert "nosuch" in str(exc_info.value)
+    assert "mysite-01" in str(exc_info.value)
+
+
+def test_resolve_pattern_returns_every_match_sorted(tmp_path):
+    """A glob returns all matching names in name order, and nothing else."""
+    reg_path = _seed(tmp_path, "mysite-02", "other-01", "mysite-01")
+
+    matches = resolve_instance_names("mysite-*", registry_path=reg_path)
+
+    assert matches == ["mysite-01", "mysite-02"]
+
+
+def test_resolve_pattern_supports_question_mark_and_class(tmp_path):
+    """? and [...] work, not just *."""
+    reg_path = _seed(tmp_path, "mysite-01", "mysite-02", "mysite-03")
+
+    assert resolve_instance_names("mysite-0?", registry_path=reg_path) == [
+        "mysite-01", "mysite-02", "mysite-03",
+    ]
+    assert resolve_instance_names("mysite-0[13]", registry_path=reg_path) == [
+        "mysite-01", "mysite-03",
+    ]
+
+
+def test_resolve_pattern_is_case_sensitive(tmp_path):
+    """Matching is case-sensitive, so a wrong-case pattern matches nothing."""
+    reg_path = _seed(tmp_path, "mysite-01")
+
+    with pytest.raises(NoMatchingInstancesError):
+        resolve_instance_names("MYSITE-*", registry_path=reg_path)
+
+
+def test_resolve_pattern_no_match_names_it_as_a_pattern(tmp_path):
+    """A no-match glob reports as a pattern, and stays an InstanceNotFoundError."""
+    reg_path = _seed(tmp_path, "mysite-01")
+
+    with pytest.raises(NoMatchingInstancesError) as exc_info:
+        resolve_instance_names("nosuch-*", registry_path=reg_path)
+
+    assert isinstance(exc_info.value, InstanceNotFoundError)
+    assert "Pattern 'nosuch-*' matched no instances" in str(exc_info.value)
+    assert "mysite-01" in str(exc_info.value)
+
+
+def test_resolve_single_accepts_one_match(tmp_path):
+    """A pattern matching exactly one instance resolves transparently."""
+    reg_path = _seed(tmp_path, "mysite-01", "other-01")
+
+    assert resolve_instance_name("mysite-*", registry_path=reg_path) == "mysite-01"
+    assert resolve_instance_name("mysite-01", registry_path=reg_path) == "mysite-01"
+
+
+def test_resolve_single_rejects_several_matches_listing_them(tmp_path):
+    """Where one instance is required, a multi-match errors with the candidates."""
+    reg_path = _seed(tmp_path, "mysite-01", "mysite-02")
+
+    with pytest.raises(AmbiguousInstanceError) as exc_info:
+        resolve_instance_name("mysite-*", registry_path=reg_path)
+
+    assert exc_info.value.matches == ["mysite-01", "mysite-02"]
+    assert "mysite-01, mysite-02" in str(exc_info.value)

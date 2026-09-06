@@ -15,6 +15,7 @@ from .registry import (
     InstanceNotFoundError,
     enumerate_instances,
     lookup,
+    resolve_instance_names,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,18 +77,25 @@ def get_instance_status(
     instance_name: str | None = None,
     registry_path: str | None = None,
 ) -> list[InstanceStatus]:
-    """Get status for all instances or a single named instance.
+    """Get status for all instances, one named instance, or a matched set.
 
-    When instance_name is provided, returns a single-element list for
-    that instance (raises InstanceNotFoundError if not found).
+    When instance_name is provided it may be a literal name (returning a
+    single-element list, raising InstanceNotFoundError if not found) or a glob
+    pattern, which returns every matching instance in name order.
     When instance_name is None, returns all registered instances.
 
     Each instance is enriched with live page target data from Chrome.
     Dead instances have empty target lists.
     """
     if instance_name is not None:
-        info = lookup(instance_name=instance_name, registry_path=registry_path)
-        instances = [info]
+        names = resolve_instance_names(
+            name_or_pattern=instance_name,
+            registry_path=registry_path,
+        )
+        instances = [
+            lookup(instance_name=name, registry_path=registry_path)
+            for name in names
+        ]
     else:
         instances = enumerate_instances(registry_path=registry_path)
 

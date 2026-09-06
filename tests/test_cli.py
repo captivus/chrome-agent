@@ -304,7 +304,13 @@ def test_one_shot_ambiguous_target_clean_error(browser_session, monkeypatch, cap
                 except Exception:
                     pass
 
-    # Resolve the CLI's instance lookup to the fixture browser, whatever name is passed.
+    # Resolve the CLI's instance lookup to the fixture browser, whatever name is
+    # passed -- including the pattern resolution the one-shot now runs first, so
+    # this test stays about ambiguous TABS rather than ambiguous instances.
+    monkeypatch.setattr(
+        "chrome_agent.registry.resolve_instance_name",
+        lambda name_or_pattern, registry_path=None: name_or_pattern,
+    )
     monkeypatch.setattr(
         "chrome_agent.registry.lookup",
         lambda instance_name, registry_path=None: InstanceInfo(
@@ -448,3 +454,162 @@ def test_unregistered_dotted_first_arg_routes_as_method(monkeypatch):
     # Auto-select path: instance_name is None, method is the dotted first arg
     assert captured["instance_name"] is None
     assert captured["method"] == "Runtime.evaluate"
+
+
+# ---------------------------------------------------------------------------
+# Instance patterns -- fan-out where it is unambiguous, refusal where it isn't
+# ---------------------------------------------------------------------------
+
+
+def _seed_registry(tmp_path, monkeypatch, *names: str) -> str:
+    """Point the registry at a temp file holding the given instance names."""
+    import json as _json
+
+    reg_path = str(tmp_path / "registry.json")
+    with open(reg_path, "w") as f:
+        _json.dump({
+            name: {
+                "port": 9222 + index,
+                "pid": 999000 + index,
+                "browser_version": "Chrome/151",
+                "user_data_dir": str(tmp_path / name),
+                "pid_start": "0",
+            }
+            for index, name in enumerate(names)
+        }, f)
+    monkeypatch.setattr("chrome_agent.registry.REGISTRY_PATH", reg_path)
+    return reg_path
+
+
+def test_stop_pattern_stops_every_match(tmp_path, monkeypatch, capsys):
+    """`stop '<glob>'` stops each matching instance and leaves the rest alone."""
+    from chrome_agent import cli, registry
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01", "mysite-02", "other-01")
+
+    stopped = []
+    monkeypatch.setattr(
+        registry,
+        "stop",
+        lambda instance_name, **kwargs: stopped.append(instance_name) or f"Stopped {instance_name}",
+    )
+
+    cli._run_stop(args=["mysite-*"], target_spec=None, target_by=None)
+
+    assert stopped == ["mysite-01", "mysite-02"]
+    out = capsys.readouterr().out
+    assert "matched 2 instances" in out
+    assert "mysite-01, mysite-02" in out
+    assert "other-01" not in out
+
+
+def test_stop_pattern_prints_matches_before_acting(tmp_path, monkeypatch, capsys):
+    """The match summary is printed before the first stop, so a broad pattern
+    leaves a record of what it swept up even if a later stop fails."""
+    from chrome_agent import cli, registry
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01", "mysite-02")
+
+    def _boom(instance_name, **kwargs):
+        raise RuntimeError("browser gone")
+
+    monkeypatch.setattr(registry, "stop", _boom)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._run_stop(args=["mysite-*"], target_spec=None, target_by=None)
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "mysite-01, mysite-02" in captured.out
+    assert "Error stopping mysite-01" in captured.err
+    assert "Error stopping mysite-02" in captured.err
+
+
+def test_stop_pattern_with_target_selector_is_refused(tmp_path, monkeypatch, capsys):
+    """Closing one tab across several browsers is meaningless, so it errors."""
+    from chrome_agent import cli, registry
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01", "mysite-02")
+    monkeypatch.setattr(registry, "stop", lambda **kwargs: pytest.fail("must not stop"))
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._run_stop(args=["mysite-*"], target_spec="1", target_by="index")
+
+    assert exc_info.value.code == 1
+    assert "target selector closes one tab" in capsys.readouterr().err
+
+
+def test_stop_pattern_no_match_exits_nonzero(tmp_path, monkeypatch, capsys):
+    """A glob that matches nothing is an error, not a silent no-op."""
+    from chrome_agent import cli, registry
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01")
+    monkeypatch.setattr(registry, "stop", lambda **kwargs: pytest.fail("must not stop"))
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._run_stop(args=["nosuch-*"], target_spec=None, target_by=None)
+
+    assert exc_info.value.code == 1
+    assert "matched no instances" in capsys.readouterr().err
+
+
+def test_status_pattern_lists_only_matches(tmp_path, monkeypatch, capsys):
+    """`status '<glob>'` filters the listing to the matching instances."""
+    from chrome_agent import cli
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01", "mysite-02", "other-01")
+    monkeypatch.setattr(
+        "chrome_agent.registry._instance_is_alive",
+        lambda *a, **k: False,
+    )
+
+    cli._run_status(args=["mysite-*"])
+
+    listed = [entry["name"] for entry in json.loads(capsys.readouterr().out)]
+    assert listed == ["mysite-01", "mysite-02"]
+
+
+def test_one_shot_pattern_matching_several_errors_with_candidates(tmp_path, monkeypatch, capsys):
+    """A one-shot acts on one browser, so a multi-match names the candidates."""
+    import asyncio
+
+    from chrome_agent import cli
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01", "mysite-02")
+
+    with pytest.raises(SystemExit) as exc_info:
+        asyncio.run(cli._run_cdp_one_shot(
+            instance_name="mysite-*",
+            method="Page.navigate",
+            params_str='{"url": "https://example.com"}',
+            target_spec=None,
+            target_by=None,
+        ))
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "matches 2 instances" in err
+    assert "mysite-01, mysite-02" in err
+
+
+def test_pattern_first_arg_routes_as_instance_not_method(tmp_path, monkeypatch):
+    """A glob is always an instance argument -- method names are not globbable."""
+    from chrome_agent import cli
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01")
+
+    captured = {}
+
+    async def fake_one_shot(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli, "_run_cdp_one_shot", fake_one_shot)
+    monkeypatch.setattr(sys, "argv", [
+        "chrome-agent", "Runtime.eval*", "Page.navigate", '{"url": "https://example.com"}',
+    ])
+
+    cli.main()
+
+    assert captured["instance_name"] == "Runtime.eval*"
+    assert captured["method"] == "Page.navigate"
+
