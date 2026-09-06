@@ -92,12 +92,45 @@ A literal name is never treated as a pattern, so `chrome-agent stop myproject-01
 
 ## Tab Completion
 
+zsh only, for now. Two ways to install it; pick one.
+
+**Sourced from `.zshrc`** -- one line, works anywhere, costs one subprocess
+(~60 ms) at shell startup. It must come *after* `compinit`:
+
 ```bash
-mkdir -p ~/.config/zsh/completions          # any directory on $fpath
+source <(chrome-agent completions zsh)
+```
+
+**Installed as a file** -- no startup cost, but the directory has to be on
+`$fpath` *before* `compinit` runs, which is the step that is easy to miss:
+
+```bash
+mkdir -p ~/.config/zsh/completions
 chrome-agent completions zsh > ~/.config/zsh/completions/_chrome-agent
 ```
 
-Or, from `.zshrc` after `compinit`: `source <(chrome-agent completions zsh)`.
+```bash
+fpath=(~/.config/zsh/completions $fpath)
+autoload -Uz compinit && compinit
+```
+
+That second block goes in `.zshrc`, in that order. If the directory is not on
+`$fpath`, the file is simply never read and Tab does nothing -- there is no
+error to tell you so.
+
+Either way, open a new shell and check it took:
+
+```bash
+chrome-agent <TAB>
+```
+
+You should get the subcommands and your running instances, each with a
+description. If nothing happens, `echo $_comps[chrome-agent]` should print
+`_chrome-agent`; an empty result means the completion was never registered.
+
+The generated file is a snapshot of the completion logic, so regenerate it after
+upgrading chrome-agent (the *candidates* it offers are always read live; the
+function itself is not). Sourcing from `.zshrc` avoids that entirely.
 
 Completes the subcommands, their flags, the **live instance names**, and **CDP
 method and event names**:
@@ -114,6 +147,10 @@ events come from the running browser's own `/json/protocol` -- the protocol
 *this* Chrome implements, not a snapshot shipped with chrome-agent -- cached on
 disk under the browser version, so a Chrome upgrade invalidates it. Without a
 running browser you simply get no candidates.
+
+The protocol cache lives under `$XDG_CACHE_HOME/chrome-agent` (default
+`~/.cache/chrome-agent`), one file per browser version; deleting it is safe and
+costs one 7 ms refetch.
 
 ## Two Channels
 
