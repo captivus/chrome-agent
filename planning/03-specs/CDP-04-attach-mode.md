@@ -619,3 +619,15 @@ Not kept for this feature.
 ## 11. Review Notes
 
 [Filled during the Implementation Loop]
+
+## 12. Iteration 3 Update -- Instance Patterns (Single-Match Requirement)
+
+**Status:** Complete (2026-09-06).
+
+`attach` accepts a glob for its instance argument, resolved through `resolve_instance_name` (BRW-04 §13) in `cli._run_attach` before `run_attach` is called. A pattern matching exactly one instance resolves transparently; one matching several exits 1 with the candidates listed.
+
+**Why not fan out.** An attach session holds one CDP connection and streams to one stdout. Merging N browsers' streams would need an instance label on every JSON line -- a change to the output contract that downstream consumers (Monitor, `cdp-wait.py`, any `jq` filter) parse. The single-match rule keeps the contract and mirrors the *ambiguous-target* error this spec already defines for tabs: same shape, one level up.
+
+**Tests:** covered at the CLI level -- `tests/test_cli.py::test_one_shot_pattern_matching_several_errors_with_candidates` exercises the shared resolver; `test_one_shot_ambiguous_target_clean_error` was updated to stub `resolve_instance_name` so it still tests ambiguous *tabs* rather than ambiguous instances.
+
+**Related:** BRW-04 §13, CLI-01 §13.

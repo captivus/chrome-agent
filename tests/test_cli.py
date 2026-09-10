@@ -6,6 +6,7 @@ Uses subprocess invocations for integration tests.
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 
@@ -304,7 +305,13 @@ def test_one_shot_ambiguous_target_clean_error(browser_session, monkeypatch, cap
                 except Exception:
                     pass
 
-    # Resolve the CLI's instance lookup to the fixture browser, whatever name is passed.
+    # Resolve the CLI's instance lookup to the fixture browser, whatever name is
+    # passed -- including the pattern resolution the one-shot now runs first, so
+    # this test stays about ambiguous TABS rather than ambiguous instances.
+    monkeypatch.setattr(
+        "chrome_agent.registry.resolve_instance_name",
+        lambda name_or_pattern, registry_path=None: name_or_pattern,
+    )
     monkeypatch.setattr(
         "chrome_agent.registry.lookup",
         lambda instance_name, registry_path=None: InstanceInfo(
@@ -491,3 +498,408 @@ def test_unregistered_dotted_first_arg_routes_as_method(monkeypatch):
     # Auto-select path: instance_name is None, method is the dotted first arg
     assert captured["instance_name"] is None
     assert captured["method"] == "Runtime.evaluate"
+
+
+# ---------------------------------------------------------------------------
+# Instance patterns -- fan-out where it is unambiguous, refusal where it isn't
+# ---------------------------------------------------------------------------
+
+
+def _seed_registry(tmp_path, monkeypatch, *names: str) -> str:
+    """Point the registry at a temp file holding the given instance names."""
+    import json as _json
+
+    reg_path = str(tmp_path / "registry.json")
+    with open(reg_path, "w") as f:
+        _json.dump({
+            name: {
+                "port": 9222 + index,
+                "pid": 999000 + index,
+                "browser_version": "Chrome/151",
+                "user_data_dir": str(tmp_path / name),
+                "pid_start": "0",
+            }
+            for index, name in enumerate(names)
+        }, f)
+    monkeypatch.setattr("chrome_agent.registry.REGISTRY_PATH", reg_path)
+    return reg_path
+
+
+def test_stop_pattern_stops_every_match(tmp_path, monkeypatch, capsys):
+    """`stop '<glob>'` stops each matching instance and leaves the rest alone."""
+    from chrome_agent import cli, registry
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01", "mysite-02", "other-01")
+
+    stopped = []
+    monkeypatch.setattr(
+        registry,
+        "stop",
+        lambda instance_name, **kwargs: stopped.append(instance_name) or f"Stopped {instance_name}",
+    )
+
+    cli._run_stop(args=["mysite-*"], target_spec=None, target_by=None)
+
+    assert stopped == ["mysite-01", "mysite-02"]
+    out = capsys.readouterr().out
+    assert "matched 2 instances" in out
+    assert "mysite-01, mysite-02" in out
+    assert "other-01" not in out
+
+
+def test_stop_pattern_prints_matches_before_acting(tmp_path, monkeypatch, capsys):
+    """The match summary is printed before the first stop, so a broad pattern
+    leaves a record of what it swept up even if a later stop fails."""
+    from chrome_agent import cli, registry
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01", "mysite-02")
+
+    def _boom(instance_name, **kwargs):
+        raise RuntimeError("browser gone")
+
+    monkeypatch.setattr(registry, "stop", _boom)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._run_stop(args=["mysite-*"], target_spec=None, target_by=None)
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "mysite-01, mysite-02" in captured.out
+    assert "Error stopping mysite-01" in captured.err
+    assert "Error stopping mysite-02" in captured.err
+
+
+def test_stop_pattern_with_target_selector_is_refused(tmp_path, monkeypatch, capsys):
+    """Closing one tab across several browsers is meaningless, so it errors."""
+    from chrome_agent import cli, registry
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01", "mysite-02")
+    monkeypatch.setattr(registry, "stop", lambda **kwargs: pytest.fail("must not stop"))
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._run_stop(args=["mysite-*"], target_spec="1", target_by="index")
+
+    assert exc_info.value.code == 1
+    assert "target selector closes one tab" in capsys.readouterr().err
+
+
+def test_stop_pattern_no_match_exits_nonzero(tmp_path, monkeypatch, capsys):
+    """A glob that matches nothing is an error, not a silent no-op."""
+    from chrome_agent import cli, registry
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01")
+    monkeypatch.setattr(registry, "stop", lambda **kwargs: pytest.fail("must not stop"))
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._run_stop(args=["nosuch-*"], target_spec=None, target_by=None)
+
+    assert exc_info.value.code == 1
+    assert "matched no instances" in capsys.readouterr().err
+
+
+def test_status_pattern_lists_only_matches(tmp_path, monkeypatch, capsys):
+    """`status '<glob>'` filters the listing to the matching instances."""
+    from chrome_agent import cli
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01", "mysite-02", "other-01")
+    monkeypatch.setattr(
+        "chrome_agent.registry._instance_is_alive",
+        lambda *a, **k: False,
+    )
+
+    cli._run_status(args=["mysite-*"])
+
+    listed = [entry["name"] for entry in json.loads(capsys.readouterr().out)]
+    assert listed == ["mysite-01", "mysite-02"]
+
+
+def test_one_shot_pattern_matching_several_errors_with_candidates(tmp_path, monkeypatch, capsys):
+    """A one-shot acts on one browser, so a multi-match names the candidates."""
+    import asyncio
+
+    from chrome_agent import cli
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01", "mysite-02")
+
+    with pytest.raises(SystemExit) as exc_info:
+        asyncio.run(cli._run_cdp_one_shot(
+            instance_name="mysite-*",
+            method="Page.navigate",
+            params_str='{"url": "https://example.com"}',
+            target_spec=None,
+            target_by=None,
+        ))
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "matches 2 instances" in err
+    assert "mysite-01, mysite-02" in err
+
+
+def test_pattern_first_arg_routes_as_instance_not_method(tmp_path, monkeypatch):
+    """A glob is always an instance argument -- method names are not globbable."""
+    from chrome_agent import cli
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01")
+
+    captured = {}
+
+    async def fake_one_shot(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli, "_run_cdp_one_shot", fake_one_shot)
+    monkeypatch.setattr(sys, "argv", [
+        "chrome-agent", "Runtime.eval*", "Page.navigate", '{"url": "https://example.com"}',
+    ])
+
+    cli.main()
+
+    assert captured["instance_name"] == "Runtime.eval*"
+    assert captured["method"] == "Page.navigate"
+
+
+# ---------------------------------------------------------------------------
+# Shell completions
+# ---------------------------------------------------------------------------
+
+
+def test_completions_zsh_prints_a_loadable_completion():
+    """`completions zsh` prints the packaged completion, compdef header first."""
+    result = _run_cli("completions", "zsh")
+
+    assert result.returncode == 0
+    assert result.stdout.startswith("#compdef chrome-agent")
+    assert "_chrome-agent() {" in result.stdout
+    assert "compdef _chrome-agent chrome-agent" in result.stdout
+
+
+def test_completions_zsh_is_valid_zsh():
+    """The shipped completion parses as zsh -- a syntax error would ship broken.
+
+    Guards the file that every user's shell sources; a typo in it is invisible
+    to the Python tests that never execute it.
+    """
+    zsh = shutil.which("zsh")
+    if zsh is None:
+        pytest.skip("zsh not installed")
+
+    script = _run_cli("completions", "zsh").stdout
+    check = subprocess.run([zsh, "-n"], input=script, capture_output=True, text=True, timeout=15)
+
+    assert check.returncode == 0, f"zsh -n rejected the completion:\n{check.stderr}"
+
+
+def test_completions_instances_emits_describe_format(tmp_path, monkeypatch, capsys):
+    """`completions instances` prints one `name:description` line per instance.
+
+    That colon-separated shape is what zsh's _describe consumes, so the
+    completion menu shows a description beside each instance name.
+    """
+    from chrome_agent import cli
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01", "other-01")
+    monkeypatch.setattr("chrome_agent.registry._instance_is_alive", lambda *a, **k: False)
+
+    cli._run_completions(args=["instances"])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 2
+    for line in lines:
+        name, _, description = line.partition(":")
+        assert name in ("mysite-01", "other-01")
+        assert description.startswith("port ")
+        assert "DEAD" in description
+
+
+def test_completions_instances_counts_tabs(tmp_path, monkeypatch, capsys):
+    """A live instance is described by its port and tab count, singular or plural."""
+    from chrome_agent import cli
+    from chrome_agent.instance_status import PageTarget
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01", "other-01")
+    monkeypatch.setattr("chrome_agent.registry._instance_is_alive", lambda *a, **k: True)
+
+    def _targets(*, port):
+        count = 1 if port == 9222 else 3
+        return [
+            PageTarget(target_id="T" * 32, short_id="TTTTTTTT", index=i, url="", title="")
+            for i in range(1, count + 1)
+        ]
+
+    monkeypatch.setattr("chrome_agent.instance_status.query_targets", _targets)
+
+    cli._run_completions(args=["instances"])
+
+    out = capsys.readouterr().out
+    assert "mysite-01:port 9222 -- 1 tab\n" in out
+    assert "other-01:port 9223 -- 3 tabs\n" in out
+
+
+def test_completions_requires_a_target(capsys):
+    """Bare `completions`, and an unknown target, both error with the usage."""
+    from chrome_agent import cli
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._run_completions(args=[])
+    assert exc_info.value.code == 1
+    assert "completions <zsh | instances>" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._run_completions(args=["bash"])
+    assert exc_info.value.code == 1
+    assert "unknown completions target: bash" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Protocol completions (CDP methods and events)
+# ---------------------------------------------------------------------------
+
+
+SCHEMA_FIXTURE = {
+    "domains": [
+        {
+            "domain": "Page",
+            "commands": [
+                {"name": "navigate", "description": "Navigates current page to the given URL."},
+                {"name": "reload", "description": "Reloads given page:\nwith a colon and a newline."},
+                {"name": "bringToFront"},
+            ],
+            "events": [
+                {"name": "loadEventFired", "description": "Fired when the page loads."},
+            ],
+        },
+    ],
+}
+
+
+def _fake_instance(monkeypatch, *, alive=True, version="Chrome/151.0.0.1"):
+    from chrome_agent.registry import InstanceInfo
+
+    info = InstanceInfo(
+        name="mysite-01", port=9222, pid=999, browser_version=version,
+        user_data_dir="", alive=alive,
+    )
+    monkeypatch.setattr("chrome_agent.registry.lookup", lambda **kw: info)
+    monkeypatch.setattr("chrome_agent.registry.enumerate_instances", lambda **kw: [info])
+    return info
+
+
+def test_completions_methods_reads_the_live_protocol(tmp_path, monkeypatch, capsys):
+    """Methods come from the running browser, one Domain.method per line."""
+    from chrome_agent import cli
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _fake_instance(monkeypatch)
+    monkeypatch.setattr("chrome_agent.protocol.fetch_protocol_schema", lambda port: SCHEMA_FIXTURE)
+
+    cli._run_completions(args=["methods", "mysite-01"])
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "Page.navigate:Navigates current page to the given URL."
+    # A multi-line CDP description must collapse to one line -- each extra line
+    # would otherwise read as its own bogus candidate -- by joining rather than
+    # truncating, since CDP wraps its prose at arbitrary points and a first-line
+    # cut ends mid sentence.
+    assert lines[1] == "Page.reload:Reloads given page: with a colon and a newline."
+    # A method with no description still gets its (empty) description field.
+    assert lines[2] == "Page.bringToFront:"
+
+
+def test_completions_events_reads_the_event_list(tmp_path, monkeypatch, capsys):
+    """Events come from the same schema, from the events key rather than commands."""
+    from chrome_agent import cli
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _fake_instance(monkeypatch)
+    monkeypatch.setattr("chrome_agent.protocol.fetch_protocol_schema", lambda port: SCHEMA_FIXTURE)
+
+    cli._run_completions(args=["events", "mysite-01"])
+
+    assert capsys.readouterr().out == "Page.loadEventFired:Fired when the page loads.\n"
+
+
+def test_completions_methods_cache_avoids_a_second_fetch(tmp_path, monkeypatch, capsys):
+    """The second call is served from disk without contacting the browser.
+
+    zsh runs completion on every keystroke when autosuggestions use the
+    completion strategy, so an uncached lookup is an HTTP round trip per
+    character typed.
+    """
+    from chrome_agent import cli
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _fake_instance(monkeypatch)
+
+    calls = []
+
+    def _fetch(port):
+        calls.append(port)
+        return SCHEMA_FIXTURE
+
+    monkeypatch.setattr("chrome_agent.protocol.fetch_protocol_schema", _fetch)
+
+    cli._run_completions(args=["methods", "mysite-01"])
+    first = capsys.readouterr().out
+    cli._run_completions(args=["methods", "mysite-01"])
+    second = capsys.readouterr().out
+
+    assert calls == [9222], "the cached call still fetched from the browser"
+    assert second == first, "the cache served different bytes than the fetch"
+    cached = tmp_path / "chrome-agent" / "protocol-Chrome-151.0.0.1-commands.txt"
+    assert cached.exists()
+
+
+def test_completions_methods_cache_key_follows_the_browser_version(tmp_path, monkeypatch, capsys):
+    """A Chrome upgrade changes the key, so the stale protocol is never served."""
+    from chrome_agent import cli
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr("chrome_agent.protocol.fetch_protocol_schema", lambda port: SCHEMA_FIXTURE)
+
+    _fake_instance(monkeypatch, version="Chrome/151.0.0.1")
+    cli._run_completions(args=["methods", "mysite-01"])
+    capsys.readouterr()
+
+    _fake_instance(monkeypatch, version="Chrome/152.0.0.1")
+    cli._run_completions(args=["methods", "mysite-01"])
+    capsys.readouterr()
+
+    names = sorted(p.name for p in (tmp_path / "chrome-agent").iterdir())
+    assert names == [
+        "protocol-Chrome-151.0.0.1-commands.txt",
+        "protocol-Chrome-152.0.0.1-commands.txt",
+    ]
+
+
+def test_completions_methods_silent_when_no_browser(tmp_path, monkeypatch, capsys):
+    """No live instance means no candidates -- not an error mid-command-line."""
+    from chrome_agent import cli
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr("chrome_agent.registry.enumerate_instances", lambda **kw: [])
+
+    cli._run_completions(args=["methods"])
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_completions_methods_silent_when_the_named_instance_is_dead(tmp_path, monkeypatch, capsys):
+    """A dead instance cannot answer, and saying so at Tab time would be noise."""
+    from chrome_agent import cli
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _fake_instance(monkeypatch, alive=False)
+
+    cli._run_completions(args=["methods", "mysite-01"])
+
+    assert capsys.readouterr().out == ""
+
+
+def test_protocol_cache_is_skipped_without_a_version(monkeypatch):
+    """No recorded browser version means no cache key -- re-fetch rather than
+    serve one browser's protocol under another's name."""
+    from chrome_agent import cli
+
+    assert cli._protocol_cache_path(browser_version="", kind="commands") is None

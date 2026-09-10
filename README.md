@@ -78,7 +78,88 @@ chrome-agent help myproject-01 Page.navigate
 
 # Stop the browser when done
 chrome-agent stop myproject-01
+
+# Or stop a whole related set at once (quote the pattern -- see Instance Patterns)
+chrome-agent stop 'myproject-*'
 ```
+
+## Instance Patterns
+
+Anywhere an instance name is accepted, a glob works instead -- `*`, `?`, `[abc]`, matched case-sensitively against the registered names.
+
+```bash
+chrome-agent stop 'myproject-*'      # stops every match, printing the names first
+chrome-agent status 'myproject-*'    # lists every match
+chrome-agent 'myproject-0[2]' Page.navigate '{"url": "https://example.com"}'
+```
+
+`stop` and `status` act on every match. The single-browser commands -- `attach`, `help` and one-shot CDP calls -- resolve a pattern that matches exactly one instance and otherwise error with the candidates listed, rather than picking one. A pattern matching nothing is an error, not a silent no-op.
+
+**Quote the pattern.** Your shell expands an unquoted glob before chrome-agent sees it, and zsh aborts the command outright when nothing in the working directory matches (`zsh: no matches found: myproject-*`).
+
+A literal name is never treated as a pattern, so `chrome-agent stop myproject-01` cannot sweep up `myproject-02`. Because `stop --target` closes one tab, combining it with a pattern that matches several instances is refused.
+
+## Tab Completion
+
+zsh only, for now. Two ways to install it; pick one.
+
+**Sourced from `.zshrc`** -- one line, works anywhere, costs one subprocess
+(~60 ms) at shell startup. It must come *after* `compinit`:
+
+```bash
+source <(chrome-agent completions zsh)
+```
+
+**Installed as a file** -- no startup cost, but the directory has to be on
+`$fpath` *before* `compinit` runs, which is the step that is easy to miss:
+
+```bash
+mkdir -p ~/.config/zsh/completions
+chrome-agent completions zsh > ~/.config/zsh/completions/_chrome-agent
+```
+
+```bash
+fpath=(~/.config/zsh/completions $fpath)
+autoload -Uz compinit && compinit
+```
+
+That second block goes in `.zshrc`, in that order. If the directory is not on
+`$fpath`, the file is simply never read and Tab does nothing -- there is no
+error to tell you so.
+
+Either way, open a new shell and check it took:
+
+```bash
+chrome-agent <TAB>
+```
+
+You should get the subcommands and your running instances, each with a
+description. If nothing happens, `echo $_comps[chrome-agent]` should print
+`_chrome-agent`; an empty result means the completion was never registered.
+
+The generated file is a snapshot of the completion logic, so regenerate it after
+upgrading chrome-agent (the *candidates* it offers are always read live; the
+function itself is not). Sourcing from `.zshrc` avoids that entirely.
+
+Completes the subcommands, their flags, the **live instance names**, and **CDP
+method and event names**:
+
+```
+chrome-agent stop reader<TAB>              -> ensorcell-reader-01, described by port and tab count
+chrome-agent taleb-01 Page.nav<TAB>        -> Page.navigate
+chrome-agent attach taleb-01 +Page.load<TAB> -> +Page.loadEventFired
+```
+
+Instance names are read from the registry as you type, so they are what is
+actually registered rather than a list baked in at install time. Methods and
+events come from the running browser's own `/json/protocol` -- the protocol
+*this* Chrome implements, not a snapshot shipped with chrome-agent -- cached on
+disk under the browser version, so a Chrome upgrade invalidates it. Without a
+running browser you simply get no candidates.
+
+The protocol cache lives under `$XDG_CACHE_HOME/chrome-agent` (default
+`~/.cache/chrome-agent`), one file per browser version; deleting it is safe and
+costs one 7 ms refetch.
 
 ## Two Channels
 
@@ -120,22 +201,24 @@ An attach session **exits on its own once it has outlived its purpose** -- when 
 
 ```
 chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT] [--no-window-border] [--chrome-path PATH]
-chrome-agent status [<instance>]
-chrome-agent attach <instance> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
-chrome-agent stop <instance> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
-chrome-agent help [<instance>] [Domain | Domain.method]
+chrome-agent status [<instance|glob>]
+chrome-agent attach <instance|glob> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
+chrome-agent stop <instance|glob> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
+chrome-agent help [<instance|glob>] [Domain | Domain.method]
 chrome-agent cleanup
+chrome-agent completions <zsh | instances | methods | events> [<instance>]
 chrome-agent --version
 ```
 
 | Command | Description |
 |---------|-------------|
 | `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. Use `--chrome-path` or `CHROME_AGENT_PATH` for a browser outside the standard locations. |
-| `status` | List running instances with their page targets (IDs, URLs, titles). |
+| `status` | List running instances with their page targets (IDs, URLs, titles). Accepts a glob to list a matching subset. |
 | `attach` | Persistent event observation with isolated subscriptions. Use `--target` (fewer than 8 digits is a tab index, anything else a target-id prefix), `--url substring`, or the explicit `--target-id` / `--target-index` for multi-tab browsers. |
-| `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Use `--target` or `--url` to close a single tab without affecting the browser; because this closes a tab, prefer the explicit `--target-id` / `--target-index`. |
+| `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Accepts a glob, stopping every matching instance. Use `--target` or `--url` to close a single tab without affecting the browser; because this closes a tab, prefer the explicit `--target-id` / `--target-index`. |
 | `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |
 | `cleanup` | Remove stale instances (dead browsers) and their session directories. |
+| `completions` | `zsh` prints a shell completion; `instances`, `methods` and `events` print `name:description` lines for the registered instances and for the running browser's CDP protocol (what the completion reads as you type). |
 | `--version` | Print the installed chrome-agent version (`-V` alias) and exit. |
 
 Instances are tracked in a registry at `/tmp/chrome-agent/registry.json`. A headed browser's instance is **automatically removed from the registry when its window is closed** (its session directory is cleaned up too), so `status` reflects what is actually running. Liveness is determined by **process identity plus port attribution**, not a bare PID-existence check: the recorded PID counts only if it is a live process of the launching user whose start time matches what was recorded at launch (so a recycled or namespace-local PID never masquerades as the browser), and a listening CDP port counts only if a process claiming that port with this instance's profile directory can be found -- so browsers started via wrapper/snap launchers (which fork the real browser into another process) are still reported correctly, while a port since claimed by a *different* browser is not mistaken for this one. A **transient connection drop does not retire a live instance**: a host suspend/resume severs the supervisor's CDP connection while Chrome keeps running, so the supervisor reconnects and keeps supervising; retirement happens only once the CDP port stops listening. `cleanup` removes any entries that remain (headless instances, or browsers that were killed abruptly).

@@ -9,6 +9,7 @@ All public functions accept an optional registry_path parameter for test
 isolation.
 """
 
+import fnmatch
 import json
 import logging
 import os
@@ -24,6 +25,11 @@ from .utils import process_is_ours
 logger = logging.getLogger(__name__)
 
 REGISTRY_PATH = "/tmp/chrome-agent/registry.json"
+
+# Characters that make an instance argument a glob pattern rather than a
+# literal name. Instance names are derived from directory basenames, which
+# never contain these, so the distinction is unambiguous.
+GLOB_CHARS = "*?["
 BASE_PORT = 9222
 MAX_PORT = BASE_PORT + 100
 
@@ -55,6 +61,103 @@ class InstanceNotFoundError(Exception):
                 f"Instance '{name}' not found. No instances registered. "
                 f"Launch one with: chrome-agent launch"
             )
+
+
+class NoMatchingInstancesError(InstanceNotFoundError):
+    """A glob pattern matched no registered instance.
+
+    Subclasses InstanceNotFoundError so existing handlers keep working; only
+    the message differs, naming the argument as a pattern rather than a name.
+    """
+    def __init__(self, pattern: str, available: list[str]):
+        Exception.__init__(self)
+        self.name = pattern
+        self.available = available
+        if available:
+            avail_str = ", ".join(available)
+            self.args = (
+                f"Pattern '{pattern}' matched no instances. Available: {avail_str}",
+            )
+        else:
+            self.args = (
+                f"Pattern '{pattern}' matched no instances. No instances "
+                f"registered. Launch one with: chrome-agent launch",
+            )
+
+
+class AmbiguousInstanceError(Exception):
+    """A glob pattern matched several instances where one was required."""
+    def __init__(self, pattern: str, matches: list[str]):
+        self.pattern = pattern
+        self.matches = matches
+        match_str = ", ".join(matches)
+        super().__init__(
+            f"Pattern '{pattern}' matches {len(matches)} instances: {match_str}. "
+            f"Narrow the pattern, or name one instance."
+        )
+
+
+def is_pattern(name: str) -> bool:
+    """Whether an instance argument should be read as a glob rather than a name."""
+    return any(char in name for char in GLOB_CHARS)
+
+
+def resolve_instance_names(
+    name_or_pattern: str,
+    registry_path: str | None = None,
+) -> list[str]:
+    """Resolve an instance argument to the registered names it designates.
+
+    A literal name resolves to itself (raising InstanceNotFoundError when it is
+    not registered, exactly as lookup does). A glob pattern -- any argument
+    containing *, ? or [ -- is matched case-sensitively against every
+    registered name with fnmatch, and every match is returned, sorted.
+
+    Note for interactive use: a shell expands an unquoted glob before
+    chrome-agent ever sees it (zsh aborts the command outright when nothing in
+    the working directory matches), so patterns must be quoted.
+    """
+    path = _resolve_path(registry_path)
+    registry = _load_registry(path)
+
+    if not is_pattern(name_or_pattern):
+        if name_or_pattern not in registry:
+            raise InstanceNotFoundError(
+                name=name_or_pattern,
+                available=list(registry.keys()),
+            )
+        return [name_or_pattern]
+
+    matches = sorted(
+        name for name in registry
+        if fnmatch.fnmatchcase(name, name_or_pattern)
+    )
+    if not matches:
+        raise NoMatchingInstancesError(
+            pattern=name_or_pattern,
+            available=list(registry.keys()),
+        )
+    return matches
+
+
+def resolve_instance_name(
+    name_or_pattern: str,
+    registry_path: str | None = None,
+) -> str:
+    """Resolve an instance argument that must designate exactly one instance.
+
+    Used by the commands that act on a single browser (attach, one-shot CDP,
+    help). Raises AmbiguousInstanceError, listing the candidates, when a
+    pattern matches more than one -- the same shape as the ambiguous-target
+    error a bare one-shot gives across multiple instances.
+    """
+    matches = resolve_instance_names(
+        name_or_pattern=name_or_pattern,
+        registry_path=registry_path,
+    )
+    if len(matches) > 1:
+        raise AmbiguousInstanceError(pattern=name_or_pattern, matches=matches)
+    return matches[0]
 
 
 def _resolve_path(registry_path: str | None) -> str:

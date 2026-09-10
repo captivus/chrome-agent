@@ -1,6 +1,6 @@
 [project]
 name = "chrome-agent"
-version = "0.5.8"
+version = "0.6.0"
 description = "CLI tool for AI agents to observe and interact with Chrome via CDP"
 readme = "README.md"
 license = "MIT"
@@ -12,7 +12,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -34,7 +33,7 @@ Repository = "https://github.com/captivus/chrome-agent"
 Issues = "https://github.com/captivus/chrome-agent/issues"
 
 [build-system]
-requires = ["uv_build>=0.9.17,<0.10.0"]
+requires = ["uv_build>=0.12.6,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]

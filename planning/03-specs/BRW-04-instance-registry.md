@@ -634,3 +634,26 @@ Exercise the full lifecycle: register two instances from different directories, 
 **Tests added** (`tests/test_registry.py`): `test_alive_when_pid_dead_but_cdp_port_listening`, `test_cleanup_keeps_instance_with_live_port`, `test_deregister_removes_entry_and_session_dir`. Dead-instance tests now use a guaranteed-free port (liveness consults the port, so a hardcoded low port could collide with a real browser).
 
 **Related:** BRW-07 (Instance Supervisor) consumes `deregister`; BRW-05 (Instance Status) inherits the port-based liveness.
+
+## 13. Iteration 3 Update -- Instance Patterns (Glob Resolution)
+
+**Status:** Complete (2026-09-06).
+
+Instance arguments may now be **glob patterns** rather than exact names. Resolution moved out of the callers and into the registry, which owns naming:
+
+- **`is_pattern(name)`** -- true when the argument contains any of `GLOB_CHARS` (`*`, `?`, `[`). Instance names derive from directory basenames (`_derive_base_name` strips to `[a-z0-9.-]`), so none can contain these characters and the distinction is unambiguous.
+- **`resolve_instance_names(name_or_pattern, registry_path)` -> `list[str]`** -- a literal name resolves to itself, raising `InstanceNotFoundError` when unregistered exactly as `lookup` does; a pattern is matched against every registered name with `fnmatch.fnmatchcase` (case-**sensitive**, deliberately: names are lowercased at registration, so a case-folding match would only ever mask a typo) and every match is returned sorted by name.
+- **`resolve_instance_name(...)` -> `str`** -- the same, for the commands that act on exactly one browser; raises `AmbiguousInstanceError` listing the candidates when a pattern matches more than one.
+
+Two new error types:
+
+- **`NoMatchingInstancesError(InstanceNotFoundError)`** -- a pattern matched nothing. It **subclasses** `InstanceNotFoundError` so every existing `except InstanceNotFoundError` handler keeps working unchanged; only the message differs, naming the argument as a pattern (`Pattern 'x-*' matched no instances. Available: ...`).
+- **`AmbiguousInstanceError`** -- a pattern matched several where one was required. Carries `.pattern` and `.matches`.
+
+A no-match is an error, never a silent no-op: a `stop` whose pattern matched nothing must not exit 0 having done nothing.
+
+**Not handled, deliberately:** the shell expands an unquoted glob before chrome-agent is invoked, and zsh *aborts the command* when nothing in the working directory matches. There is no in-process fix -- the process never runs -- so the requirement to quote is documented in `AGENTS.md` and `README.md` rather than worked around.
+
+**Tests added** (`tests/test_registry.py`): `test_is_pattern_recognises_glob_characters`, `test_resolve_literal_name_never_globs` (a literal `mysite-01` cannot sweep up `mysite-02`), `test_resolve_literal_name_unknown_raises`, `test_resolve_pattern_returns_every_match_sorted`, `test_resolve_pattern_supports_question_mark_and_class`, `test_resolve_pattern_is_case_sensitive`, `test_resolve_pattern_no_match_names_it_as_a_pattern`, `test_resolve_single_accepts_one_match`, `test_resolve_single_rejects_several_matches_listing_them`.
+
+**Related:** BRW-05 §13 (`status` fan-out), CLI-01 §13 (routing and `stop` fan-out), CDP-04 §12 (attach requires a single match), CDP-03 §12 (`help` requires a single match).

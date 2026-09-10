@@ -10,11 +10,12 @@ Usage: chrome-agent <command> [args...]
 
 import asyncio
 import json
+import os
 import sys
 
 
 # Operational commands -- checked first during routing
-OPERATIONAL_COMMANDS = {"launch", "status", "attach", "help", "cleanup", "stop", "guide"}
+OPERATIONAL_COMMANDS = {"launch", "status", "attach", "help", "cleanup", "stop", "guide", "completions"}
 
 
 # Target-selection flags and the resolution each one forces. Bare --target maps
@@ -75,6 +76,163 @@ def _print_guide(args: list[str]) -> None:
         print(guide.read_text(encoding="utf-8"), end="")
 
 
+def _run_completions(args: list[str]) -> None:
+    """Print shell completions, or the live data the completion draws on.
+
+    `zsh` prints the completion function (ship it to a directory on $fpath as
+    _chrome-agent, or source it after compinit). `instances` prints one
+    `name:description` line per registered instance -- the format zsh's
+    _describe consumes -- and is what the completion calls on every Tab, so the
+    names offered are the ones actually registered rather than a snapshot.
+    """
+    if not args:
+        print("Error: completions requires a shell or data name", file=sys.stderr)
+        print("Usage: chrome-agent completions <zsh | instances>", file=sys.stderr)
+        sys.exit(1)
+
+    what = args[0]
+
+    if what == "zsh":
+        from importlib.resources import files
+
+        script = files("chrome_agent").joinpath("completions.zsh")
+        print(script.read_text(encoding="utf-8"), end="")
+        return
+
+    if what in ("methods", "events"):
+        _print_protocol_completions(
+            kind="commands" if what == "methods" else "events",
+            instance_name=args[1] if len(args) > 1 else None,
+        )
+        return
+
+    if what == "instances":
+        from .instance_status import get_instance_status
+
+        for status in get_instance_status():
+            if not status.alive:
+                description = f"port {status.port} -- DEAD"
+            else:
+                count = len(status.targets)
+                description = f"port {status.port} -- {count} tab{'' if count == 1 else 's'}"
+            print(f"{status.name}:{description}")
+        return
+
+    print(f"Error: unknown completions target: {what}", file=sys.stderr)
+    print(
+        "Usage: chrome-agent completions <zsh | instances | methods | events> [<instance>]",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _print_protocol_completions(*, kind: str, instance_name: str | None) -> None:
+    """Print `Domain.member:description` lines for the live protocol.
+
+    Read from the running browser rather than a bundled list, so the candidates
+    match the protocol *this* Chrome implements -- including surface newer than
+    any snapshot shipped with chrome-agent. Any live instance answers, since the
+    schema is identical across instances of the same browser.
+
+    The result is cached on disk, keyed by the browser version the registry
+    already records -- so a hit needs no browser contact at all, and a Chrome
+    upgrade invalidates it by changing the key. The fetch itself is only ~7 ms
+    and would not justify a cache for Tab alone; what does is that zsh runs
+    completion on every *keystroke* when autosuggestions use the completion
+    strategy, so an uncached lookup means a process spawn and an HTTP round
+    trip per character typed.
+
+    Prints nothing and exits 0 when no browser is reachable -- at Tab time the
+    right answer is no candidates, not an error in the middle of a command line.
+    """
+    from .protocol import fetch_protocol_schema
+
+    resolved = _resolve_instance_for_protocol(instance_name=instance_name)
+    if resolved is None:
+        return
+    port, browser_version = resolved
+
+    cache = _protocol_cache_path(browser_version=browser_version, kind=kind)
+    if cache is not None and cache.exists():
+        try:
+            sys.stdout.write(cache.read_text(encoding="utf-8"))
+            return
+        except OSError:
+            pass  # unreadable cache is not a reason to fail; re-fetch below
+
+    try:
+        schema = fetch_protocol_schema(port=port)
+    except (ConnectionError, RuntimeError, OSError):
+        return
+
+    lines = []
+    for domain in schema.get("domains", []):
+        name = domain.get("domain", "")
+        for member in domain.get(kind, []):
+            # _describe splits each line on its FIRST colon, so colons inside a
+            # description are harmless; newlines are not -- a CDP description
+            # can run to several lines, and each would read as its own bogus
+            # candidate. Join rather than truncate to the first line: CDP wraps
+            # its prose at arbitrary points, so a first-line cut ends mid
+            # sentence and reads as a bug in the menu.
+            description = " ".join((member.get("description") or "").split())
+            lines.append(f"{name}.{member.get('name', '')}:{description}")
+
+    text = "".join(f"{line}\n" for line in lines)
+    sys.stdout.write(text)
+
+    if cache is not None:
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            # Write via a temp file in the same directory and rename, so a
+            # completion racing this one never reads a half-written cache.
+            temp = cache.with_name(f"{cache.name}.{os.getpid()}.tmp")
+            temp.write_text(text, encoding="utf-8")
+            os.replace(temp, cache)
+        except OSError:
+            pass  # a cache we cannot write is not an error worth surfacing
+
+
+def _resolve_instance_for_protocol(
+    *, instance_name: str | None
+) -> tuple[int, str] | None:
+    """Resolve to (port, browser_version), or None when nothing can answer.
+
+    Any live instance will do when none is named: the protocol schema is a
+    property of the browser build, not of the instance.
+    """
+    from .registry import enumerate_instances, lookup
+
+    try:
+        if instance_name is not None:
+            info = lookup(instance_name=instance_name)
+            return (info.port, info.browser_version) if info.alive else None
+        for info in enumerate_instances():
+            if info.alive:
+                return info.port, info.browser_version
+    except Exception:
+        return None
+    return None
+
+
+def _protocol_cache_path(*, browser_version: str, kind: str):
+    """Where the protocol completions for this browser build are cached.
+
+    None when the registry has no version to key on -- better to re-fetch every
+    time than to serve one browser's protocol under another's name.
+    """
+    import re
+    from pathlib import Path
+
+    if not browser_version:
+        return None
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache"
+    )
+    safe = re.sub(r"[^A-Za-z0-9._-]", "-", browser_version)
+    return Path(base) / "chrome-agent" / f"protocol-{safe}-{kind}.txt"
+
+
 def _print_static_usage() -> None:
     """Print static usage when no browser is available for protocol listing."""
     print("chrome-agent -- CLI for AI agents to control Chrome via CDP\n")
@@ -88,8 +246,14 @@ def _print_static_usage() -> None:
     print("  stop <instance> [TARGET]                               Stop a browser, or close one tab")
     print("  cleanup                                                Remove stale instances")
     print("  guide [--path]                                         Print this tool's agent guide")
+    print("  completions <zsh|instances|methods|events> [<instance>]  Shell completion and its data")
     print()
     print("  --version, -V                                          Show version and exit")
+    print()
+    print("Instance patterns (quote them -- the shell expands an unquoted glob first):")
+    print("  '<glob>'               Any instance argument may be a glob (*, ?, [abc])")
+    print("                         status and stop act on every match;")
+    print("                         attach, help and one-shots require it to match exactly one")
     print()
     print("Target selectors (TARGET -- pick one; usable on attach, stop and one-shots):")
     print("  --target SPEC          Tab index if SPEC is fewer than 8 digits, else a target-id prefix")
@@ -108,6 +272,7 @@ def _print_static_usage() -> None:
     print("  chrome-agent attach mysite-01 +Page.loadEventFired")
     print("  chrome-agent mysite-01 Page.navigate '{\"url\": \"https://example.com\"}'")
     print("  chrome-agent help Page.navigate")
+    print("  chrome-agent stop 'mysite-*'")
 
 
 async def _run_launch(args: list[str]) -> None:
@@ -212,7 +377,18 @@ async def _run_attach(args: list[str], target_spec: str | None, target_by: str |
         print("Usage: chrome-agent attach <instance> [+Event ...]", file=sys.stderr)
         sys.exit(1)
 
-    instance_name = args[0]
+    from .registry import (
+        AmbiguousInstanceError,
+        InstanceNotFoundError,
+        resolve_instance_name,
+    )
+
+    try:
+        instance_name = resolve_instance_name(name_or_pattern=args[0])
+    except (AmbiguousInstanceError, InstanceNotFoundError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     subscriptions = [arg[1:] for arg in args[1:] if arg.startswith("+")]
 
     try:
@@ -246,12 +422,17 @@ def _run_help(args: list[str]) -> None:
     instance_name = None
     query = None
 
+    from .registry import AmbiguousInstanceError, resolve_instance_name
+
     try:
-        from .registry import lookup
-        lookup(instance_name=args[0])
-        # It's a registered instance name
-        instance_name = args[0]
+        # Resolves a literal name or a single-match glob; a pattern matching
+        # several instances is an error rather than a silent pick, even though
+        # the protocol schema is identical across them.
+        instance_name = resolve_instance_name(name_or_pattern=args[0])
         query = args[1] if len(args) > 1 else None
+    except AmbiguousInstanceError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     except Exception:
         # Not in registry -- treat as domain query
         query = args[0]
@@ -277,15 +458,50 @@ def _run_help(args: list[str]) -> None:
 
 
 def _run_stop(args: list[str], target_spec: str | None, target_by: str | None) -> None:
-    """Stop a browser instance or close a specific tab."""
-    from .registry import InstanceNotFoundError, stop
+    """Stop one or more browser instances, or close a specific tab.
+
+    The instance argument may be a glob pattern, in which case every matching
+    instance is stopped -- the matched names are printed first, so a broad
+    pattern leaves a record of what it swept up. A target selector closes one
+    tab, which is only meaningful against a single browser, so it is refused
+    when the pattern matches several.
+    """
+    from .registry import InstanceNotFoundError, resolve_instance_names, stop
 
     if not args:
         print("Error: stop requires an instance name", file=sys.stderr)
         print("Usage: chrome-agent stop <instance> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]", file=sys.stderr)
         sys.exit(1)
 
-    instance_name = args[0]
+    try:
+        matched = resolve_instance_names(name_or_pattern=args[0])
+    except InstanceNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if len(matched) > 1:
+        if target_spec is not None:
+            names = ", ".join(matched)
+            print(
+                f"Error: a target selector closes one tab, but pattern "
+                f"'{args[0]}' matches {len(matched)} instances: {names}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"Pattern '{args[0]}' matched {len(matched)} instances:")
+        print(f"  {', '.join(matched)}")
+        failures = 0
+        for name in matched:
+            try:
+                print(stop(instance_name=name))
+            except Exception as exc:
+                print(f"Error stopping {name}: {exc}", file=sys.stderr)
+                failures += 1
+        if failures:
+            sys.exit(1)
+        return
+
+    instance_name = matched[0]
 
     # If a target specifier was provided, resolve it to a target ID
     resolved_target_id = None
@@ -362,10 +578,16 @@ async def _run_cdp_one_shot(
 
     # Resolve instance
     if instance_name is not None:
-        from .registry import InstanceNotFoundError, lookup
+        from .registry import (
+            AmbiguousInstanceError,
+            InstanceNotFoundError,
+            lookup,
+            resolve_instance_name,
+        )
         try:
-            info = lookup(instance_name=instance_name)
-        except InstanceNotFoundError as exc:
+            resolved = resolve_instance_name(name_or_pattern=instance_name)
+            info = lookup(instance_name=resolved)
+        except (AmbiguousInstanceError, InstanceNotFoundError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         port = info.port
@@ -490,6 +712,8 @@ def main() -> None:
             _run_cleanup()
         elif command == "guide":
             _print_guide(args=rest)
+        elif command == "completions":
+            _run_completions(args=rest)
         return
 
     # Disambiguate "instance name" vs "bare Domain.method":
@@ -499,10 +723,12 @@ def main() -> None:
     #   - Resolve by checking the registry first. If the first arg matches a
     #     known instance, route as instance. Otherwise, apply the
     #     Domain.method heuristic (PascalCase domain + dot + camelCase method).
-    from .registry import enumerate_instances
+    #   - A glob pattern is always an instance argument: method names are not
+    #     globbable, so a wildcard is unambiguous intent to select instances.
+    from .registry import enumerate_instances, is_pattern
 
     known_instances = {i.name for i in enumerate_instances()}
-    is_known_instance = command in known_instances
+    is_known_instance = command in known_instances or is_pattern(command)
     looks_like_method = (
         "." in command
         and command.count(".") == 1

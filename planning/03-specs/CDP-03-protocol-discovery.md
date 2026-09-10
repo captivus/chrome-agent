@@ -591,3 +591,15 @@ Use the discovery output to compose a CDP command you haven't used before. If th
 ### User Review Notes
 
 [To be filled by user]
+
+## 12. Iteration 3 Update -- Instance Patterns (Single-Match Requirement)
+
+**Status:** Complete (2026-09-06).
+
+`help`'s instance/domain disambiguation now runs through `resolve_instance_name` (BRW-04 §13) instead of a bare `lookup`. The three outcomes:
+
+- resolves to one instance -> that instance answers, remaining args are the domain query (unchanged behaviour for a literal name);
+- matches several -> exit 1 with the candidates listed, rather than silently picking one. The protocol schema *is* identical across instances, so a silent pick would be harmless in practice -- but a rule that is uniform across commands is easier to trust than one with an invisible exception;
+- matches nothing -> falls through to the existing "treat it as a domain query" path, preserving `chrome-agent help Page.navigate`.
+
+**Related:** BRW-04 §13, CLI-01 §13.

@@ -616,3 +616,15 @@ Exercise the full workflow as an agent would: launch two browser instances using
 `get_instance_status` no longer overrides liveness with a PID-only check; it uses the registry's port-OR-PID liveness (`_instance_is_alive`, see BRW-04 §12). Effect: `status` correctly reports a browser as alive when its CDP port is reachable even if the launched PID has exited -- the case for snap/wrapper Chrome installs that fork the real browser into another process. Previously such an instance showed `alive: false` with no targets immediately after a successful launch.
 
 **Tests updated** (`tests/test_instance_status.py`): dead-instance fixtures use a guaranteed-free port (since liveness now consults the port, a hardcoded low port like 9222 could read as alive if a real browser is listening on it).
+
+## 13. Iteration 3 Update -- Instance Patterns (status Fan-Out)
+
+**Status:** Complete (2026-09-06).
+
+`get_instance_status(instance_name=...)` now accepts a glob as well as a literal name. It resolves through `resolve_instance_names` (BRW-04 §13) and returns one `InstanceStatus` per match, in name order, each enriched with live targets as before. A literal name still returns a single-element list and still raises `InstanceNotFoundError` when unregistered; `instance_name=None` still returns everything.
+
+Effect: `chrome-agent status 'mysite-*'` lists exactly the matching instances -- the filtered listing that makes a broad `stop` pattern checkable *before* running it.
+
+**Tests added** (`tests/test_cli.py`): `test_status_pattern_lists_only_matches`.
+
+**Related:** BRW-04 §13 (resolution), CLI-01 §13.
