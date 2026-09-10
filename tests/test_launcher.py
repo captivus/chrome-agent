@@ -79,6 +79,169 @@ def test_find_chrome_binary():
     assert os.access(binary, os.X_OK)
 
 
+def _fake_chrome(directory, name="google-chrome"):
+    """Write an executable stand-in for a Chrome binary, return its path."""
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text("#!/bin/sh\nexit 0\n")
+    path.chmod(0o755)
+    return str(path)
+
+
+def test_discovery_prefers_explicit_argument(tmp_path, monkeypatch):
+    """The chrome_path argument beats every other source."""
+    binary = _fake_chrome(tmp_path)
+    monkeypatch.delenv("CHROME_AGENT_PATH", raising=False)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [])
+
+    assert find_chrome_binary(chrome_path=binary) == binary
+
+
+def test_discovery_honors_chrome_path_env(tmp_path, monkeypatch):
+    """CHROME_AGENT_PATH alone is enough to find a browser."""
+    binary = _fake_chrome(tmp_path)
+    monkeypatch.setenv("CHROME_AGENT_PATH", binary)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [])
+
+    assert find_chrome_binary() == binary
+
+
+def test_discovery_argument_beats_env(tmp_path, monkeypatch):
+    """--chrome-path overrides CHROME_AGENT_PATH."""
+    flag_binary = _fake_chrome(tmp_path / "flag", name="google-chrome")
+    env_binary = _fake_chrome(tmp_path / "env", name="google-chrome")
+    monkeypatch.setenv("CHROME_AGENT_PATH", env_binary)
+
+    assert find_chrome_binary(chrome_path=flag_binary) == flag_binary
+
+
+def test_discovery_standard_locations_win_over_path(tmp_path, monkeypatch):
+    """A standard-location browser beats a different one on PATH."""
+    candidate = _fake_chrome(tmp_path / "standard")
+    _fake_chrome(tmp_path / "path")
+    monkeypatch.delenv("CHROME_AGENT_PATH", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path / "path"))
+    monkeypatch.setattr(
+        "chrome_agent.launcher._platform_candidates", lambda: [candidate]
+    )
+
+    assert find_chrome_binary() == candidate
+
+
+def test_discovery_searches_path_when_no_standard_install(tmp_path, monkeypatch):
+    """A browser reachable only via PATH is found (Playwright, Nix, rootless)."""
+    binary = _fake_chrome(tmp_path, name="chromium")
+    monkeypatch.delenv("CHROME_AGENT_PATH", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [])
+
+    assert find_chrome_binary() == binary
+
+
+def test_discovery_finds_a_plain_chrome_on_path(tmp_path, monkeypatch):
+    """`chrome`, a name no standard location uses, is found on PATH."""
+    binary = _fake_chrome(tmp_path, name="chrome")
+    monkeypatch.delenv("CHROME_AGENT_PATH", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [])
+
+    assert find_chrome_binary() == binary
+
+
+def test_discovery_falls_back_to_platform_candidates(tmp_path, monkeypatch):
+    """With no override and an empty PATH, the standard locations still win."""
+    binary = _fake_chrome(tmp_path)
+    monkeypatch.delenv("CHROME_AGENT_PATH", raising=False)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("chrome_agent.launcher._platform_candidates", lambda: [binary])
+
+    assert find_chrome_binary() == binary
+
+
+def test_discovery_flag_override_does_not_fall_back(tmp_path, monkeypatch):
+    """A wrong --chrome-path fails instead of launching something else."""
+    _fake_chrome(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    assert find_chrome_binary(chrome_path=str(tmp_path / "nonexistent")) is None
+
+
+def test_discovery_env_override_does_not_fall_back(tmp_path, monkeypatch):
+    """A wrong CHROME_AGENT_PATH fails, like a wrong --chrome-path."""
+    _fake_chrome(tmp_path)
+    monkeypatch.setenv("CHROME_AGENT_PATH", str(tmp_path / "moved-away"))
+    monkeypatch.setattr(
+        "chrome_agent.launcher._platform_candidates", lambda: [_fake_chrome(tmp_path / "standard")]
+    )
+
+    assert find_chrome_binary() is None
+
+
+def test_discovery_ignores_the_unnamespaced_chrome_path(tmp_path, monkeypatch):
+    """CHROME_PATH, chrome-launcher's variable, is never read."""
+    candidate = _fake_chrome(tmp_path / "standard")
+    monkeypatch.delenv("CHROME_AGENT_PATH", raising=False)
+    monkeypatch.setenv("CHROME_PATH", _fake_chrome(tmp_path / "lighthouse"))
+    monkeypatch.setattr(
+        "chrome_agent.launcher._platform_candidates", lambda: [candidate]
+    )
+
+    assert find_chrome_binary() == candidate
+
+
+def test_discovery_expands_a_tilde_in_an_override(tmp_path, monkeypatch):
+    """`~` in an override is expanded -- env files and unit files don't."""
+    binary = _fake_chrome(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    assert find_chrome_binary(chrome_path="~/google-chrome") == binary
+
+
+def test_discovery_error_names_the_escape_hatches():
+    """The not-found error says how to point chrome-agent at a browser."""
+    message = str(BrowserNotFoundError(searched_paths=["/usr/bin/google-chrome"]))
+
+    assert "CHROME_AGENT_PATH" in message
+    assert "--chrome-path" in message
+    assert "on PATH" in message
+
+
+def test_discovery_error_for_a_bad_override_says_what_is_wrong(tmp_path):
+    """A bad override is named; the searches it skipped are not advised."""
+    missing = str(tmp_path / "nonexistent")
+
+    message = str(BrowserNotFoundError(
+        searched_paths=[missing], override=f"--chrome-path {missing}"
+    ))
+
+    assert missing in message
+    assert "does not name an executable" in message
+    assert "install Chrome/Chromium on PATH" not in message
+
+
+def test_discovery_error_for_a_bad_env_override_names_the_variable(tmp_path):
+    """The env override branch names CHROME_AGENT_PATH, not the flag."""
+    missing = str(tmp_path / "nonexistent")
+
+    message = str(BrowserNotFoundError(
+        searched_paths=[missing], override=f"CHROME_AGENT_PATH={missing}"
+    ))
+
+    assert f"CHROME_AGENT_PATH={missing}" in message
+    assert "--chrome-path" not in message
+
+
+def test_discovery_launch_rejects_a_bad_chrome_path(tmp_path):
+    """launch_browser reports the override it was given when it won't resolve."""
+    missing = str(tmp_path / "nonexistent")
+
+    with pytest.raises(BrowserNotFoundError) as exc_info:
+        asyncio.run(launch_browser(chrome_path=missing, port_override=LAUNCH_PORT))
+    assert exc_info.value.searched_paths == [missing]
+
+
 # ---------------------------------------------------------------------------
 # Happy path -- successful launch with registry integration
 # ---------------------------------------------------------------------------
@@ -150,7 +313,7 @@ def test_browser_not_found(monkeypatch):
     """Raises BrowserNotFoundError when no Chrome binary exists."""
     monkeypatch.setattr(
         "chrome_agent.launcher.find_chrome_binary",
-        lambda: None,
+        lambda **kwargs: None,
     )
 
     async def do_launch():
