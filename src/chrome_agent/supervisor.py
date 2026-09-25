@@ -125,6 +125,15 @@ async def _setup_session(cdp: CDPClient, session_id: str, source: str) -> None:
             params={"source": source, "worldName": ISOLATED_WORLD},
             session_id=session_id,
         )
+    except Exception:
+        pass  # tab may close mid-setup; the guard keeps running for other tabs
+    # Always release the target, even if setup failed: Chrome holds a new tab
+    # opened from a page (target=_blank / window.open) until the auto-attached
+    # session runs it, despite waitForDebuggerOnStart=False. Left held, the new
+    # tab sits on about:blank and its opener, which shares its renderer, freezes
+    # under "Debugger paused in another tab".
+    await _release_target(cdp, session_id)
+    try:
         # The already-loaded document needs a one-time injection.
         await cdp.send(
             method="Runtime.evaluate",
@@ -132,7 +141,15 @@ async def _setup_session(cdp: CDPClient, session_id: str, source: str) -> None:
             session_id=session_id,
         )
     except Exception:
-        pass  # tab may close mid-setup; the guard keeps running for other tabs
+        pass
+
+
+async def _release_target(cdp: CDPClient, session_id: str) -> None:
+    """Let an auto-attached target run (see ``_setup_session``)."""
+    try:
+        await cdp.send(method="Runtime.runIfWaitingForDebugger", session_id=session_id)
+    except Exception:
+        pass  # target may already be gone or not waiting
 
 
 async def _supervise_connection(
@@ -157,7 +174,12 @@ async def _supervise_connection(
         def on_attached(params: dict) -> None:
             info = params.get("targetInfo", {})
             session_id = params.get("sessionId")
-            if info.get("type") != "page" or not session_id or session_id in handled:
+            if not session_id or session_id in handled:
+                return
+            if info.get("type") != "page":
+                # Not ours to mark, but auto-attach still holds it until released.
+                handled.add(session_id)
+                loop.create_task(_release_target(cdp, session_id))
                 return
             handled.add(session_id)
             loop.create_task(_setup_session(cdp, session_id, source))
