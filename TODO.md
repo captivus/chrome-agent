@@ -18,3 +18,6 @@ Create prompthub/browsing/chrome-agent.md (private real file); symlink chrome-ag
 
 # Annotate the refuted save-page-as learning record
 ~/Documents/99_learning-records/2026-04-28-save-page-as-complete-as-forensic-capture.md's "no CDP equivalent captures subresources" claim is refuted by research/cdp-forensic-capture-capability-analysis.md (Chrome 149): the agent CAN script capture -- Network.getResponseBody before the destructive action, or Page.getResourceTree + getResourceContent; MHTML omits <script>. Update the record in place.
+
+# Stop persistent profiles from downloading Chrome's on-device AI model (~4.3 GB each)
+Long-lived profiles (aie-notifier, linkedin-connect) each picked up a 4.3 GB Gemini Nano copy in `OptGuideOnDeviceModel/`; short-lived /tmp sessions exit before Chrome fetches it. The system-wide `GenAILocalFoundationalModelSettings: 1` managed policy was installed 2026-09-24 and the copies deleted; what's left here is the optional in-code fallback, a `--disable-features` flag in launcher.py (needs testing on Chrome 151). Full findings and to-do: ~/Documents/10_system-analysis/chrome-profile-ai-model-bloat/README.md
