@@ -20,7 +20,9 @@ As an AI agent, I want the browser launch to automatically allocate a free port 
 
 This feature finds the Chrome or Chromium binary on the system, launches it as a subprocess with remote debugging enabled on a specified port, and waits for the CDP port to become available before returning. The browser continues running after chrome-agent exits -- it is a fire-and-forget launch.
 
-The binary discovery searches platform-specific standard paths. On Linux, it looks for google-chrome, chromium-browser, and chromium in standard locations. On macOS, it looks in the Applications directory. On Windows, it looks in Program Files. If no binary is found, it fails with a helpful error listing the paths it searched.
+Binary discovery is most-explicit-first: the `--chrome-path` flag, then `CHROME_AGENT_PATH`, then the platform-specific standard paths (on Linux google-chrome, chromium-browser and chromium in standard locations; on macOS the Applications directory; on Windows Program Files), then a PATH search for the usual command names (google-chrome, google-chrome-stable, chromium-browser, chromium, chrome). If nothing is found it fails with an error listing what it searched and naming the overrides and PATH as the fixes.
+
+PATH comes last so it only fires where discovery used to fail outright -- a Playwright chromium under `~/.cache/ms-playwright/`, a Nix store, a container where `/usr/bin` is read-only -- and never changes what a working host launches (on macOS the Applications directory is not on PATH, so a Homebrew `chromium` must not displace `Google Chrome.app`). An override never falls back: a value naming no executable fails the launch, reporting the value and its source. The variable is `CHROME_AGENT_PATH`, not `CHROME_PATH`, which belongs to Lighthouse's chrome-launcher and is never read.
 
 The browser is launched with a temporary user data directory (so it doesn't conflict with the user's normal Chrome profile), with remote debugging on the requested port, and with flags to suppress first-run prompts and default browser checks.
 
@@ -136,12 +138,42 @@ cleanup_sessions():
                 remove_directory(session_dir)
 
 
-find_chrome_binary():
-    candidates = platform_specific_candidates()
-    for path in candidates:
+PATH_COMMANDS = ["google-chrome", "google-chrome-stable",
+                 "chromium-browser", "chromium", "chrome"]
+
+resolve_executable(path):
+    // which() takes an absolute path or a bare command name; "~" is
+    // expanded because env files and unit files don't.
+    return which(expanduser(path))
+
+override_in_effect(chrome_path=None):
+    // (path, how it was given) -- the second half is what the error names.
+    if chrome_path:
+        return (chrome_path, "--chrome-path " + chrome_path)
+    env_override = env("CHROME_AGENT_PATH")   // never CHROME_PATH
+    if env_override:
+        return (env_override, "CHROME_AGENT_PATH=" + env_override)
+    return (None, None)
+
+find_chrome_binary(chrome_path=None):
+    override, _ = override_in_effect(chrome_path)
+    if override:
+        return resolve_executable(override)   // no fallback
+
+    for path in platform_specific_candidates():
         if file_exists(path) and is_executable(path):
             return path
+
+    for command in PATH_COMMANDS:
+        found = which(command)
+        if found:
+            return found
     return None
+
+searched_locations():
+    // For the no-override error; with an override nothing else is searched.
+    return platform_specific_candidates()
+           + [command + " (PATH)" for command in PATH_COMMANDS]
 
 platform_specific_candidates():
     if linux:
@@ -198,11 +230,22 @@ from chrome_agent.registry import InstanceInfo
 
 class BrowserNotFoundError(Exception):
     """Chrome/Chromium binary not found on the system."""
-    def __init__(self, searched_paths: list[str]):
+    def __init__(self, searched_paths: list[str], override: str | None = None):
         self.searched_paths = searched_paths
+        self.override = override
+        if override is not None:
+            # An override skips both searches, so advising them is noise.
+            # `override` arrives with its source: "--chrome-path /opt/chrome".
+            super().__init__(
+                f"Chrome/Chromium not found: {override} "
+                f"does not name an executable."
+            )
+            return
         paths_str = "\n  ".join(searched_paths)
         super().__init__(
-            f"Chrome/Chromium not found. Searched:\n  {paths_str}"
+            f"Chrome/Chromium not found. Searched:\n  {paths_str}\n"
+            f"Set {CHROME_PATH_ENV} or pass --chrome-path to name the binary, "
+            f"or install Chrome/Chromium on PATH."
         )
 
 
@@ -230,10 +273,13 @@ async def launch_browser(
     ...
 
 
-def find_chrome_binary() -> str | None:
-    """Search platform-specific paths for Chrome/Chromium.
+def find_chrome_binary(chrome_path: str | None = None) -> str | None:
+    """Resolve the Chrome/Chromium binary to launch, or None.
 
-    Returns the path to the first found executable, or None.
+    Order: `chrome_path`, CHROME_AGENT_PATH, the standard install locations,
+    PATH. PATH is last so it cannot change what an already-working host
+    launches. An override never falls back: a bad one is an error, not a
+    reason to launch something else.
     """
     ...
 
@@ -255,7 +301,15 @@ Happy path:
 - Given Chrome is installed on the system, launch_browser starts a browser on the specified port and the port is accessible via check_cdp_port afterward.
 
 Binary not found:
-- Given Chrome is not installed (or not in any searched path), launch_browser raises BrowserNotFoundError listing the paths it searched.
+- Given Chrome is not installed (or not in any searched path), launch_browser raises BrowserNotFoundError listing the paths it searched and naming CHROME_AGENT_PATH, --chrome-path and PATH.
+
+Binary outside the standard locations:
+- Given no browser at any platform candidate and one reachable on PATH, find_chrome_binary returns the PATH-resolved binary (the Playwright/Nix/rootless case).
+- Given a browser at a platform candidate and a different one on PATH, the platform candidate wins.
+- Given CHROME_AGENT_PATH or --chrome-path naming an executable, that binary is used ahead of the platform candidates and PATH; --chrome-path wins over CHROME_AGENT_PATH.
+- Given either override naming nothing executable, find_chrome_binary returns None even when a browser is on PATH, and the error names the value and its source.
+- Given CHROME_PATH set (Lighthouse's variable) and a browser at a platform candidate, discovery ignores CHROME_PATH entirely and returns the candidate.
+- Given an override containing `~`, it is expanded before resolution.
 
 Port already in use:
 - Given something is already listening on the requested port, Chrome fails to bind and the launch times out. No pre-check is performed (see Scoping Decisions).

@@ -238,7 +238,8 @@ def _print_static_usage() -> None:
     print("chrome-agent -- CLI for AI agents to control Chrome via CDP\n")
     print("Usage: chrome-agent <command> [args...]\n")
     print("Operational commands:")
-    print("  launch [--port PORT] [--fingerprint PATH] [--headless] [--no-window-border] [-- CHROME_ARGS]  Launch Chrome")
+    print("  launch [--port PORT] [--fingerprint PATH] [--headless] [--no-window-border]")
+    print("         [--chrome-path PATH] [-- CHROME_ARGS]                     Launch Chrome")
     print("  status [<instance>]                                    List instances and targets")
     print("  attach <instance> [+Event ...] [TARGET]                Attach for events")
     print("  help [<instance>] [Domain | Domain.method]             Protocol discovery")
@@ -266,6 +267,7 @@ def _print_static_usage() -> None:
     print()
     print("Examples:")
     print("  chrome-agent launch --headless")
+    print("  chrome-agent launch --chrome-path ~/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome")
     print("  chrome-agent status")
     print("  chrome-agent attach mysite-01 +Page.loadEventFired")
     print("  chrome-agent mysite-01 Page.navigate '{\"url\": \"https://example.com\"}'")
@@ -281,6 +283,7 @@ async def _run_launch(args: list[str]) -> None:
     headless = False
     port_override = None
     window_border = True
+    chrome_path = None
     extra_args = []
     i = 0
     while i < len(args):
@@ -290,6 +293,9 @@ async def _run_launch(args: list[str]) -> None:
             break
         elif args[i] == "--fingerprint" and i + 1 < len(args):
             fingerprint_path = args[i + 1]
+            i += 2
+        elif args[i] == "--chrome-path" and i + 1 < len(args):
+            chrome_path = args[i + 1]
             i += 2
         elif args[i] == "--headless":
             headless = True
@@ -315,6 +321,7 @@ async def _run_launch(args: list[str]) -> None:
             headless=headless,
             extra_args=extra_args,
             window_border=window_border,
+            chrome_path=chrome_path,
         )
     except (BrowserNotFoundError, RuntimeError, TimeoutError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

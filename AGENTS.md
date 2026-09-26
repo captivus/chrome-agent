@@ -2,7 +2,7 @@
 
 Drive a real Chrome through the Chrome DevTools Protocol (CDP), from the terminal, for AI agents.
 
-Install: `uv tool install chrome-agent` (or `pip install chrome-agent`). Requires Google Chrome or Chromium. One runtime dependency (`websockets`); no Playwright, no browser downloads.
+Install: `uv tool install chrome-agent` (or `pip install chrome-agent`). Requires Google Chrome or Chromium (`--chrome-path` or `CHROME_AGENT_PATH` names one outside the standard locations). One runtime dependency (`websockets`); no Playwright, no browser downloads.
 
 ## What it is
 
@@ -183,7 +183,7 @@ Full technique, pitfalls, and the reproducible proof: **[docs/event-driven-witho
 Output is JSON on stdout. A one-shot prints the CDP method's **raw result object**, pretty-printed (shapes differ by method — check, don't assume). `launch`/`status` print structured JSON when stdout isn't a TTY. Errors go to **stderr** and exit non-zero, and are self-describing (an unknown instance lists the available ones; a CDP protocol error prints `CDP error <code>: <message>`).
 
 ```bash
-chrome-agent launch [--port PORT] [--headless] [--fingerprint profile.json] [--no-window-border]
+chrome-agent launch [--port PORT] [--headless] [--fingerprint profile.json] [--no-window-border] [--chrome-path PATH]
 chrome-agent status [<instance|glob>]
 chrome-agent attach <instance|glob> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
 chrome-agent stop <instance|glob> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
@@ -241,6 +241,7 @@ Two more edges: a **literal** name is never globbed, so `stop mysite-01` cannot 
 chrome-agent launch                       # auto port + name (from cwd); isolated profile under /tmp/chrome-agent
 chrome-agent launch --headless            # no window (no border, no desktop pinning)
 chrome-agent launch --fingerprint p.json  # spoof UA/viewport/lang/TZ via launch flags (also suppresses the marker)
+chrome-agent launch --chrome-path /p/chrome # browser outside the standard locations (or CHROME_AGENT_PATH)
 chrome-agent launch -- --some-chrome-flag # everything after -- passes through to Chrome
 chrome-agent status                       # all instances + their tabs
 chrome-agent stop mysite-01 [--target-index 2 | --target-id 65602889 | --url foo]  # whole browser, or one tab

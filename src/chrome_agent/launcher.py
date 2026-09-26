@@ -22,29 +22,87 @@ from .utils import process_is_ours, process_is_running, process_start_time
 logger = logging.getLogger(__name__)
 
 _SESSION_ROOT = "/tmp/chrome-agent"
+# Not CHROME_PATH: that name belongs to Lighthouse's chrome-launcher.
+CHROME_PATH_ENV = "CHROME_AGENT_PATH"
+
+# Tried on PATH once the standard locations miss.
+_PATH_COMMANDS = [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium-browser",
+    "chromium",
+    "chrome",
+]
 
 
 class BrowserNotFoundError(Exception):
     """Chrome/Chromium binary not found on the system."""
 
-    def __init__(self, searched_paths: list[str]):
+    def __init__(self, searched_paths: list[str], override: str | None = None):
         self.searched_paths = searched_paths
+        self.override = override
+        if override is not None:
+            # An override skips both searches, so advising them is noise.
+            # `override` arrives with its source: "--chrome-path /opt/chrome".
+            super().__init__(
+                f"Chrome/Chromium not found: {override} "
+                f"does not name an executable."
+            )
+            return
         paths_str = "\n  ".join(searched_paths)
         super().__init__(
-            f"Chrome/Chromium not found. Searched:\n  {paths_str}"
+            f"Chrome/Chromium not found. Searched:\n  {paths_str}\n"
+            f"Set {CHROME_PATH_ENV} or pass --chrome-path to name the binary, "
+            f"or install Chrome/Chromium on PATH."
         )
 
 
-def find_chrome_binary() -> str | None:
-    """Search platform-specific paths for Chrome/Chromium.
+def find_chrome_binary(chrome_path: str | None = None) -> str | None:
+    """Resolve the Chrome/Chromium binary to launch, or None.
 
-    Returns the path to the first found executable, or None.
+    Order: `chrome_path`, CHROME_AGENT_PATH, the standard install locations,
+    PATH. PATH is last so it cannot change what an already-working host
+    launches. An override never falls back: a bad one is an error, not a
+    reason to launch something else.
     """
-    candidates = _platform_candidates()
-    for path in candidates:
+    override, _ = _override_in_effect(chrome_path=chrome_path)
+    if override:
+        return _resolve_executable(path=override)
+
+    for path in _platform_candidates():
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
+
+    for command in _PATH_COMMANDS:
+        found = shutil.which(command)
+        if found:
+            return found
     return None
+
+
+def _override_in_effect(chrome_path: str | None = None) -> tuple[str | None, str | None]:
+    """The override in play, as (path, how it was given)."""
+    if chrome_path:
+        return chrome_path, f"--chrome-path {chrome_path}"
+    env_override = os.environ.get(CHROME_PATH_ENV)
+    if env_override:
+        return env_override, f"{CHROME_PATH_ENV}={env_override}"
+    return None, None
+
+
+def _resolve_executable(path: str) -> str | None:
+    """`path` if it names an executable, else None.
+
+    which() checks a value containing a separator directly instead of
+    searching PATH, so this accepts an absolute path or a bare command.
+    `~` is expanded: env files and unit files don't.
+    """
+    return shutil.which(os.path.expanduser(path))
+
+
+def _searched_locations() -> list[str]:
+    """Where find_chrome_binary looked, for the not-found error."""
+    return _platform_candidates() + [f"{c} (PATH)" for c in _PATH_COMMANDS]
 
 
 def _platform_candidates() -> list[str]:
@@ -79,13 +137,14 @@ async def launch_browser(
     registry_path: str | None = None,
     extra_args: list[str] | None = None,
     window_border: bool = True,
+    chrome_path: str | None = None,
 ) -> InstanceInfo:
     """Launch Chrome with CDP enabled and register as a named instance.
 
-    Finds the Chrome binary, auto-allocates a port (or uses port_override),
-    starts Chrome with --remote-debugging-port, waits for the port to be
-    ready, registers the instance in the registry, and optionally applies
-    a fingerprint profile.
+    Finds the Chrome binary (see find_chrome_binary), auto-allocates a port
+    (or uses port_override), starts Chrome with --remote-debugging-port, waits
+    for the port to be ready, registers the instance in the registry, and
+    optionally applies a fingerprint profile.
 
     Session data is stored under /tmp/chrome-agent/session-<id>/.
     The browser continues running after this function returns.
@@ -98,9 +157,14 @@ async def launch_browser(
     """
 
     # Phase 1: Find Chrome binary
-    binary = find_chrome_binary()
+    binary = find_chrome_binary(chrome_path=chrome_path)
     if binary is None:
-        raise BrowserNotFoundError(searched_paths=_platform_candidates())
+        override, description = _override_in_effect(chrome_path=chrome_path)
+        if override:
+            raise BrowserNotFoundError(
+                searched_paths=[override], override=description
+            )
+        raise BrowserNotFoundError(searched_paths=_searched_locations())
 
     # Prune truly-dead instances first (fallback for browsers whose supervisor
     # was killed, and for headless instances which have no supervisor), and
