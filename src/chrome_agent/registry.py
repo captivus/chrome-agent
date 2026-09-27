@@ -312,13 +312,14 @@ def _derive_unique_name(base_name: str, registry: dict) -> str:
         suffix += 1
 
 
-def allocate_port(registry: dict) -> int:
+def allocate_port(registry: dict, reserved: set[int] | None = None) -> int:
     """Find the next available port starting from BASE_PORT.
 
-    Skips ports used by live registry entries and ports with active
-    listeners. Raises RuntimeError if no ports available in range.
+    Skips ports used by live registry entries, ports with active listeners,
+    and ``reserved`` ports (those a saved session will be restored onto).
+    Raises RuntimeError if no ports available in range.
     """
-    used_ports = set()
+    used_ports = set(reserved or ())
     for entry in registry.values():
         # Identity check, not bare existence: a ghost entry whose namespace-local
         # PID aliases to a foreign host process must not reserve a port forever.
@@ -344,11 +345,16 @@ def register(
     port_override: int | None = None,
     registry_path: str | None = None,
     pid_start: str | None = None,
+    name_override: str | None = None,
+    launch: dict | None = None,
 ) -> InstanceInfo:
     """Register a new browser instance in the registry.
 
-    Derives the instance name from working_dir basename.
-    Auto-allocates a port unless port_override is specified.
+    Derives the instance name from working_dir basename, unless
+    ``name_override`` gives it (a restored session keeps its original name).
+    Auto-allocates a port unless port_override is specified. ``launch``
+    records how the browser was started, so a saved session can be relaunched
+    the same way.
     """
     path = _resolve_path(registry_path)
     registry = _load_registry(path)
@@ -358,8 +364,11 @@ def register(
     else:
         port = allocate_port(registry)
 
-    base_name = _derive_base_name(working_dir)
-    instance_name = _derive_unique_name(base_name, registry)
+    if name_override is not None:
+        instance_name = name_override
+    else:
+        base_name = _derive_base_name(working_dir)
+        instance_name = _derive_unique_name(base_name, registry)
 
     registry[instance_name] = {
         "port": port,
@@ -368,7 +377,10 @@ def register(
         "user_data_dir": user_data_dir,
         "launched": datetime.now(timezone.utc).isoformat(),
         "pid_start": pid_start,
+        "working_dir": working_dir,
     }
+    if launch is not None:
+        registry[instance_name]["launch"] = launch
     _save_registry(registry, path)
 
     logger.info("Registered instance %s on port %d (pid %d)", instance_name, port, pid)

@@ -25,6 +25,9 @@ _chrome_agent_commands() {
     'stop:Stop a browser, or close one of its tabs'
     'help:Query the running browser for its protocol schema'
     'cleanup:Drop dead instances and stale session directories'
+    'save:Snapshot sessions (profile, tabs, cookies) to restore later'
+    'restore:Bring saved sessions back, same name and port'
+    'snapshots:List, inspect and delete saved snapshots'
     'guide:Print the bundled agent guide'
     'completions:Print shell completions, or the data behind them'
   )
@@ -57,6 +60,14 @@ _chrome_agent_events() {
   # attach subscribes with a leading +, which is part of the word being
   # completed -- prefix it so the inserted candidate is usable as typed.
   _describe -t events 'event to subscribe to' events -P '+'
+}
+
+# Saved snapshot names, read from the store's plaintext summaries (no key needed).
+_chrome_agent_snapshots() {
+  local -a snaps
+  snaps=( ${(f)"$(_call_program chrome-agent-snapshots chrome-agent completions snapshots 2>/dev/null)"} )
+  (( $#snaps )) || return 1
+  _describe -t snapshots 'snapshot' snaps
 }
 
 _chrome_agent_first() {
@@ -127,6 +138,50 @@ _chrome-agent() {
       ;;
     cleanup)
       ret=0
+      ;;
+    save)
+      _arguments \
+        '(*)--all[Save every running instance, as a batch restore --all brings back]' \
+        '--stop[Close the browser cleanly first, for a fully consistent copy]' \
+        '--as[Save under this snapshot name]:name:' \
+        '(--keep-both)--overwrite[Replace the latest existing version without asking]' \
+        '(--overwrite)--keep-both[Keep the existing version too, without asking]' \
+        '*:instance:_chrome_agent_instances' && ret=0
+      ;;
+    restore)
+      _arguments \
+        '(*)--all[Restore the last save --all batch]' \
+        '--here[Only snapshots launched from this directory]' \
+        '--any-port[Use a new port if the saved one is taken]' \
+        '--no-reattach[Do not restart file-backed attach observers]' \
+        '--replace-profile[Move an existing custom profile dir aside]' \
+        '--start-display[Start the virtual X display (Xvfb) a snapshot ran on, if it is not running]' \
+        '--desktop[Place windows on their saved desktops or this terminal'"'"'s]:mode:(saved terminal)' \
+        '*:snapshot:_chrome_agent_snapshots' && ret=0
+      ;;
+    snapshots)
+      if (( CURRENT == 2 )); then
+        local -a subs
+        subs=(
+          'list:List saved snapshots (default)'
+          'show:Show a snapshot'"'"'s tabs, observers and launch settings'
+          'rm:Delete snapshot versions'
+          'export-key:Print the encryption key, for backup'
+          'import-key:Store a backed-up key (read from stdin)'
+        )
+        _describe -t subcommands 'subcommand' subs && ret=0
+      else
+        case $words[2] in
+          show) _arguments '1:snapshot:_chrome_agent_snapshots' && ret=0 ;;
+          rm)
+            _arguments \
+              '--older-than[Only versions older than this age]:age (e.g. 30d):' \
+              '(-y --yes)'{-y,--yes}'[Do not ask for confirmation]' \
+              '*:snapshot:_chrome_agent_snapshots' && ret=0
+            ;;
+          import-key) _arguments '--replace[Overwrite a different stored key]' && ret=0 ;;
+        esac
+      fi
       ;;
     *)
       # The first word was an instance name, so this is the one-shot form:

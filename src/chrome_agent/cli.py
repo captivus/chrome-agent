@@ -15,7 +15,10 @@ import sys
 
 
 # Operational commands -- checked first during routing
-OPERATIONAL_COMMANDS = {"launch", "status", "attach", "help", "cleanup", "stop", "guide", "completions"}
+OPERATIONAL_COMMANDS = {
+    "launch", "status", "attach", "help", "cleanup", "stop", "guide", "completions",
+    "save", "restore", "snapshots",
+}
 
 
 # Target-selection flags and the resolution each one forces. Bare --target maps
@@ -118,9 +121,20 @@ def _run_completions(args: list[str]) -> None:
             print(f"{status.name}:{description}")
         return
 
+    if what == "snapshots":
+        from .snapshot import list_versions
+
+        latest = {}
+        for version in list_versions():
+            latest[version.name] = version
+        for name, version in latest.items():
+            info = version.info
+            print(f"{name}:{info.get('tabs', 0)} tabs, port {info.get('port')}, saved {info.get('saved_at', '')[:16].replace('T', ' ')} UTC")
+        return
+
     print(f"Error: unknown completions target: {what}", file=sys.stderr)
     print(
-        "Usage: chrome-agent completions <zsh | instances | methods | events> [<instance>]",
+        "Usage: chrome-agent completions <zsh | instances | snapshots | methods | events> [<instance>]",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -244,6 +258,9 @@ def _print_static_usage() -> None:
     print("  help [<instance>] [Domain | Domain.method]             Protocol discovery")
     print("  stop <instance> [TARGET]                               Stop a browser, or close one tab")
     print("  cleanup                                                Remove stale instances")
+    print("  save <instance>... | --all [--stop] [--as NAME]        Snapshot sessions (profile, tabs, cookies)")
+    print("  restore [<name[@stamp]>...] [--all] [--any-port]       Bring saved sessions back")
+    print("  snapshots [list|show|rm|export-key|import-key]         Manage saved snapshots")
     print("  guide [--path]                                         Print this tool's agent guide")
     print("  completions <zsh|instances|methods|events> [<instance>]  Shell completion and its data")
     print()
@@ -557,6 +574,410 @@ def _run_cleanup() -> None:
         print("No stale instances found")
 
 
+# ---------------------------------------------------------------------------
+# Session snapshots: save / restore / snapshots
+# ---------------------------------------------------------------------------
+
+def _human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GB"
+
+
+def _human_age(version) -> str:
+    from .snapshot import version_age
+
+    seconds = int(version_age(version).total_seconds())
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+def _local_time(iso: str) -> str:
+    from datetime import datetime
+
+    return datetime.fromisoformat(iso).astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def _print_tabs(state: dict, indent: str = "  ") -> None:
+    windows = state.get("windows", [])
+    for w, window in enumerate(windows):
+        if len(windows) > 1:
+            print(f"{indent}window {w + 1}:")
+        for tab in window["tabs"]:
+            mark = "*" if tab.get("active") else " "
+            title = tab.get("title") or ""
+            print(f"{indent}{mark} {title[:50]:50}  {tab['url'][:90]}")
+
+
+def _confirm(prompt: str) -> bool:
+    try:
+        return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def _run_save(args: list[str]) -> None:
+    """Save running instances as snapshots."""
+    from .registry import InstanceNotFoundError, enumerate_instances, resolve_instance_names
+    from .snapcrypto import SnapshotKeyError
+    from .snapshot import (
+        SnapshotError,
+        latest_version,
+        plan_save,
+        read_state,
+        save_instance,
+        write_batch,
+    )
+
+    save_all = stop = False
+    decision = None
+    snapshot_name = None
+    patterns = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--all":
+            save_all = True
+        elif arg == "--stop":
+            stop = True
+        elif arg in ("--overwrite", "--keep-both"):
+            if decision and decision != arg:
+                print("Error: --overwrite and --keep-both are mutually exclusive", file=sys.stderr)
+                sys.exit(1)
+            decision = arg
+        elif arg == "--as" and i + 1 < len(args):
+            snapshot_name = args[i + 1]
+            i += 1
+        elif arg.startswith("-"):
+            print(f"Error: unknown save option: {arg}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            patterns.append(arg)
+        i += 1
+
+    if save_all == bool(patterns):
+        print("Error: name the instance(s) to save, or pass --all", file=sys.stderr)
+        print("Usage: chrome-agent save <instance|glob>... [--stop] [--as NAME] [--overwrite|--keep-both]", file=sys.stderr)
+        print("       chrome-agent save --all [--stop] [--overwrite|--keep-both]", file=sys.stderr)
+        sys.exit(1)
+
+    if save_all:
+        names = [i.name for i in enumerate_instances() if i.alive]
+        if not names:
+            print("No running instances to save.")
+            return
+    else:
+        names = []
+        for pattern in patterns:
+            try:
+                names += [n for n in resolve_instance_names(name_or_pattern=pattern) if n not in names]
+            except InstanceNotFoundError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
+    if snapshot_name and len(names) > 1:
+        print("Error: --as names a single snapshot, but several instances were selected", file=sys.stderr)
+        sys.exit(1)
+
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    saved, failures = [], 0
+    for name in names:
+        target_name = snapshot_name or name
+        try:
+            plan = plan_save(name)
+            existing = latest_version(target_name)
+            replace = None
+            if existing is not None:
+                if decision == "--overwrite":
+                    replace = existing
+                elif decision is None and interactive:
+                    print(f"\n{target_name} already has a snapshot, saved {_local_time(existing.info['saved_at'])} "
+                          f"({_human_age(existing)}, {existing.info.get('mode')}):")
+                    try:
+                        _print_tabs(read_state(existing), indent="    ")
+                    except (SnapshotKeyError, OSError) as exc:
+                        print(f"    (tabs unreadable: {exc})")
+                    if _confirm(f"Overwrite it? (No keeps both, as timestamped versions)"):
+                        replace = existing
+            version = save_instance(plan, stop=stop, snapshot_name=snapshot_name, replace=replace)
+        except (SnapshotError, SnapshotKeyError, InstanceNotFoundError, ConnectionError, RuntimeError) as exc:
+            print(f"Error saving {name}: {exc}", file=sys.stderr)
+            failures += 1
+            continue
+        saved.append(version)
+        info = version.info
+        what = "replaced previous" if replace else ("kept previous too" if existing else "new")
+        if sys.stdout.isatty():
+            print(f"Saved {name} -> {version.ref}  ({info['tabs']} tabs, {info['cookies']} cookies, "
+                  f"{_human_size(info['size_bytes'])}, {info['mode']}{', browser stopped' if stop else ''}; {what})")
+        else:
+            print(json.dumps({"instance": name, "snapshot": version.ref, "replaced": bool(replace),
+                              **{k: info[k] for k in ("tabs", "cookies", "size_bytes", "mode", "port")}}))
+
+    if save_all and saved:
+        write_batch(saved)
+        if sys.stdout.isatty():
+            print(f"\nSaved {len(saved)} of {len(names)} instance(s). Restore them all with: chrome-agent restore --all")
+    if failures:
+        sys.exit(1)
+
+
+def _run_restore(args: list[str]) -> None:
+    """Restore snapshots as running instances."""
+    from .snapcrypto import SnapshotKeyError
+    from .snapshot import (
+        SnapshotError,
+        batch_versions,
+        latest_batch,
+        list_versions,
+        resolve_refs,
+        restore_version,
+    )
+
+    restore_all = here = any_port = replace_profile = start_display = False
+    reattach = True
+    desktop_mode = None
+    refs = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--all":
+            restore_all = True
+        elif arg == "--here":
+            here = True
+        elif arg == "--any-port":
+            any_port = True
+        elif arg == "--no-reattach":
+            reattach = False
+        elif arg == "--replace-profile":
+            replace_profile = True
+        elif arg == "--start-display":
+            start_display = True
+        elif arg == "--desktop" and i + 1 < len(args) and args[i + 1] in ("saved", "terminal"):
+            desktop_mode = args[i + 1]
+            i += 1
+        elif arg.startswith("-"):
+            print(f"Error: unknown restore option: {arg}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            refs.append(arg)
+        i += 1
+
+    cwd = os.getcwd()
+    try:
+        if restore_all:
+            if refs:
+                print("Error: --all restores the last `save --all` batch; do not also name snapshots", file=sys.stderr)
+                sys.exit(1)
+            batch = latest_batch()
+            if batch is None:
+                print("Error: no `save --all` batch found. Restore by name: chrome-agent restore <name>", file=sys.stderr)
+                sys.exit(1)
+            versions = batch_versions(batch)
+            desktop_mode = desktop_mode or "saved"
+        elif refs:
+            versions = []
+            for ref in refs:
+                versions += [v for v in resolve_refs(ref) if v not in versions]
+            desktop_mode = desktop_mode or "terminal"
+        else:
+            here = True
+            latest = {}
+            for v in list_versions():
+                latest[v.name] = v
+            versions = list(latest.values())
+            desktop_mode = desktop_mode or "terminal"
+        if here:
+            versions = [v for v in versions if v.info.get("origin_dir") == cwd]
+    except SnapshotError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not versions:
+        print(f"Error: no snapshots {'in that batch ' if restore_all else ''}were launched from {cwd}"
+              if here else "Error: nothing to restore", file=sys.stderr)
+        print("See what is saved with: chrome-agent snapshots", file=sys.stderr)
+        sys.exit(1)
+
+    # Ascending desktop order, so dynamic workspaces fill in as they would
+    # have been (see desktop.py); windows with no recorded desktop go last.
+    versions.sort(key=lambda v: (v.info.get("desktop") is None, v.info.get("desktop") or 0, v.name))
+
+    failures = 0
+    for version in versions:
+        try:
+            report = restore_version(
+                version, any_port=any_port, desktop_mode=desktop_mode, reattach=reattach,
+                replace_profile=replace_profile, start_display=start_display,
+            )
+        except (SnapshotError, SnapshotKeyError, RuntimeError, TimeoutError, ConnectionError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            failures += 1
+            continue
+        if sys.stdout.isatty():
+            on = f", on virtual display {report['display']}" if report.get("display") else ""
+            print(f"Restored {report['snapshot']} as {report['name']} on port {report['port']} "
+                  f"({report['tabs']} tabs, {report['windows']} window(s), {report['cookies']} cookies{on})")
+            for warning in report["warnings"]:
+                print(f"  warning: {warning}")
+            for sub in report["subscriptions"]:
+                print(f"  observer {sub['status']}: {sub['command']}")
+        else:
+            print(json.dumps(report))
+    if failures:
+        sys.exit(1)
+
+
+def _run_snapshots(args: list[str]) -> None:
+    """List, inspect and delete snapshots; back up the encryption key."""
+    from .snapcrypto import SnapshotKeyError, export_key, import_key
+    from .snapshot import (
+        SnapshotError,
+        list_versions,
+        parse_age,
+        read_state,
+        remove_version,
+        resolve_refs,
+        snapshot_root,
+        version_age,
+    )
+
+    sub = args[0] if args else "list"
+    rest = args[1:]
+    if sub not in ("list", "show", "rm", "export-key", "import-key"):
+        sub, rest = "list", args  # `snapshots <glob>` lists
+
+    try:
+        if sub == "list":
+            versions = list_versions(pattern=rest[0] if rest else None)
+            if not sys.stdout.isatty():
+                print(json.dumps([{"snapshot": v.ref, **v.info} for v in versions]))
+                return
+            if not versions:
+                print("No snapshots saved. Save one with: chrome-agent save <instance>")
+                return
+            latest = {}
+            for v in versions:
+                latest[v.name] = v.stamp
+            home = os.path.expanduser("~")
+            for v in versions:
+                info = v.info
+                origin = (info.get("origin_dir") or "?").replace(home, "~", 1)
+                mark = " " if latest[v.name] == v.stamp else "-"
+                print(f"{mark} {v.ref:52} {_local_time(info['saved_at'])} ({_human_age(v):>7})  "
+                      f"{info.get('tabs', 0):>3} tabs  {_human_size(info.get('size_bytes', 0)):>9}  "
+                      f"port {info.get('port')}  {info.get('mode', '')}  {origin}")
+            total = sum(v.info.get("size_bytes", 0) for v in versions)
+            print(f"\n{len(versions)} snapshot version(s), {_human_size(total)} in {snapshot_root()}")
+            if any(latest[v.name] != v.stamp for v in versions):
+                print("('-' marks an older version; restoring by name uses the latest)")
+            return
+
+        if sub == "show":
+            if not rest:
+                print("Usage: chrome-agent snapshots show <name[@stamp]>", file=sys.stderr)
+                sys.exit(1)
+            for version in resolve_refs(rest[0]):
+                state = read_state(version)
+                info = version.info
+                print(f"{version.ref}")
+                print(f"  saved     {_local_time(info['saved_at'])} ({_human_age(version)}), {info.get('mode')}")
+                print(f"  instance  {state['instance']} on port {state['port']}, {state.get('browser_version')}")
+                print(f"  origin    {state.get('origin_dir')}")
+                if state.get("profile_override"):
+                    print(f"  profile   {state['profile_override']} (custom --user-data-dir)")
+                launch = state.get("launch", {})
+                flags = " ".join(launch.get("chrome_args", [])) or "(none)"
+                print(f"  launch    {'headless' if launch.get('headless') else 'headed'}, "
+                      f"border {'on' if launch.get('window_border') else 'off'}, flags: {flags}")
+                virtual = launch.get("virtual_display")
+                if virtual:
+                    print(f"  display   {virtual['display']} (virtual: {' '.join(virtual['server'])})")
+                desks = sorted(set(state.get("desktops", {}).values()))
+                if desks:
+                    print(f"  desktop   {', '.join(str(d + 1) for d in desks)} (1-based)")
+                print(f"  size      {_human_size(info.get('size_bytes', 0))} "
+                      f"({info.get('profile_files')} profile files, {len(state.get('cookies', []))} cookies)")
+                print("  tabs (* = active):")
+                _print_tabs(state, indent="    ")
+                subs = state.get("subscriptions", [])
+                if subs:
+                    print("  observers:")
+                    for s in subs:
+                        if s.get("wrapper"):
+                            how = f"writes {s['stdout']}" if s.get("stdout") else "output was piped"
+                            print(f"    (in a shell, {how}) {' '.join(s['wrapper']['argv'])[:200]}")
+                        else:
+                            out = f" >> {s['stdout']}" if s.get("stdout") else "  (output was piped)"
+                            print(f"    chrome-agent {' '.join(s['argv'])}{out}")
+            return
+
+        if sub == "rm":
+            yes = "--yes" in rest or "-y" in rest
+            older = None
+            refs = []
+            j = 0
+            while j < len(rest):
+                if rest[j] in ("--yes", "-y"):
+                    pass
+                elif rest[j] == "--older-than" and j + 1 < len(rest):
+                    older = parse_age(rest[j + 1])
+                    j += 1
+                else:
+                    refs.append(rest[j])
+                j += 1
+            if not refs and older is None:
+                print("Usage: chrome-agent snapshots rm <name|name@stamp|glob>... [--older-than AGE] [--yes]", file=sys.stderr)
+                sys.exit(1)
+            if refs:
+                victims = []
+                for ref in refs:
+                    name, _, stamp = ref.partition("@")
+                    matches = [v for v in list_versions(pattern=name) if not stamp or v.stamp == stamp]
+                    if not matches:
+                        raise SnapshotError(f"No snapshot matches '{ref}'")
+                    victims += [v for v in matches if v not in victims]
+            else:
+                victims = list_versions()
+            if older is not None:
+                victims = [v for v in victims if version_age(v) > older]
+            if not victims:
+                print("Nothing to delete.")
+                return
+            print(f"{'Deleting' if yes else 'Will delete'} {len(victims)} snapshot version(s):")
+            for v in victims:
+                print(f"  {v.ref}  ({_local_time(v.info['saved_at'])}, {v.info.get('tabs')} tabs, "
+                      f"{_human_size(v.info.get('size_bytes', 0))})")
+            if not yes:
+                if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                    print("Error: deleting snapshots needs --yes when not run interactively", file=sys.stderr)
+                    sys.exit(1)
+                if not _confirm("Delete these?"):
+                    print("Nothing deleted.")
+                    return
+            for v in victims:
+                remove_version(v)
+            print(f"Deleted {len(victims)} snapshot version(s).")
+            return
+
+        if sub == "export-key":
+            print(export_key())
+            return
+
+        if sub == "import-key":
+            text = sys.stdin.read()
+            import_key(text, replace="--replace" in rest)
+            print("Snapshot key stored in the OS keyring.")
+            return
+    except (SnapshotError, SnapshotKeyError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
 async def _run_cdp_one_shot(
     instance_name: str | None,
     method: str,
@@ -707,6 +1128,12 @@ def main() -> None:
             _print_guide(args=rest)
         elif command == "completions":
             _run_completions(args=rest)
+        elif command == "save":
+            _run_save(args=rest)
+        elif command == "restore":
+            _run_restore(args=rest)
+        elif command == "snapshots":
+            _run_snapshots(args=rest)
         return
 
     # Disambiguate "instance name" vs "bare Domain.method":

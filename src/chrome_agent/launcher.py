@@ -79,6 +79,10 @@ async def launch_browser(
     registry_path: str | None = None,
     extra_args: list[str] | None = None,
     window_border: bool = True,
+    profile_dir: str | None = None,
+    instance_name: str | None = None,
+    desktop: int | None = None,
+    env_overrides: dict[str, str] | None = None,
 ) -> InstanceInfo:
     """Launch Chrome with CDP enabled and register as a named instance.
 
@@ -89,6 +93,13 @@ async def launch_browser(
 
     Session data is stored under /tmp/chrome-agent/session-<id>/.
     The browser continues running after this function returns.
+
+    Restoring a saved session reuses this path with a few overrides:
+    ``profile_dir`` is an already-populated profile to launch on instead of a
+    fresh one, ``instance_name`` is the exact name to register (instead of one
+    derived from the working directory), ``desktop`` is the virtual desktop to
+    place the window on (instead of the launching terminal's), and
+    ``env_overrides`` restores environment such as a fingerprint's TZ.
 
     Returns InstanceInfo with name, port, pid, browser_version, user_data_dir.
 
@@ -108,7 +119,12 @@ async def launch_browser(
     # profile files past the supervisor's removal window). With the pid-OR-port
     # liveness check and the SingletonLock pid check, this only removes
     # genuinely-gone browsers, and it frees their names/ports for reuse.
-    cleanup_sessions(registry_path=registry_path)
+    # A restore's pre-extracted profile is not registered yet and carries no
+    # SingletonLock, so the orphan sweep must be told to leave it alone.
+    cleanup_sessions(
+        registry_path=registry_path,
+        keep={profile_dir} if profile_dir is not None else None,
+    )
 
     # Phase 2: Allocate port
     if port_override is not None:
@@ -116,23 +132,29 @@ async def launch_browser(
     else:
         reg_path = _resolve_path(registry_path)
         registry_data = _load_registry(reg_path)
-        port = allocate_port(registry=registry_data)
+        # Keep clear of the ports the last `save --all` batch will be restored
+        # onto, so a fresh launch after a reboot does not take one first.
+        from .snapshot import reserved_ports
+        port = allocate_port(registry=registry_data, reserved=reserved_ports())
 
     # Phase 3: Prepare launch arguments
     os.makedirs(_SESSION_ROOT, exist_ok=True)
-    session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
+    if profile_dir is not None:
+        session_dir = profile_dir
+    else:
+        session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
 
-    # Write Chrome preferences to disable password save prompts
-    default_dir = os.path.join(session_dir, "Default")
-    os.makedirs(default_dir, exist_ok=True)
-    prefs = {
-        "credentials_enable_service": False,
-        "profile": {
-            "password_manager_enabled": False,
-        },
-    }
-    with open(os.path.join(default_dir, "Preferences"), "w") as f:
-        json.dump(prefs, f)
+        # Write Chrome preferences to disable password save prompts
+        default_dir = os.path.join(session_dir, "Default")
+        os.makedirs(default_dir, exist_ok=True)
+        prefs = {
+            "credentials_enable_service": False,
+            "profile": {
+                "password_manager_enabled": False,
+            },
+        }
+        with open(os.path.join(default_dir, "Preferences"), "w") as f:
+            json.dump(prefs, f)
 
     args = [
         binary,
@@ -149,6 +171,7 @@ async def launch_browser(
 
     # Apply fingerprint via Chrome command-line flags (persistent)
     env = os.environ.copy()
+    env.update(env_overrides or {})
     fp_profile = None
     if fingerprint is not None:
         from .fingerprint import load_fingerprint
@@ -157,6 +180,18 @@ async def launch_browser(
         args.append(f"--window-size={fp_profile.viewport['width']},{fp_profile.viewport['height']}")
         args.append(f"--lang={fp_profile.locale}")
         env["TZ"] = fp_profile.timezone
+
+    # What a saved session needs to relaunch this browser the same way: the
+    # Chrome flags beyond the fixed base (fingerprint flags resolved, so a
+    # moved or edited fingerprint file cannot change a restore), the env it
+    # set, and whether the border was drawn.
+    draw_border = window_border and fp_profile is None
+    launch_record = {
+        "headless": headless,
+        "chrome_args": [a for a in args[6:] if a != "--headless=new"],
+        "env": {"TZ": env["TZ"]} if fp_profile is not None else dict(env_overrides or {}),
+        "window_border": draw_border,
+    }
 
     # Phase 4: Launch subprocess
     process = subprocess.Popen(
@@ -192,8 +227,10 @@ async def launch_browser(
         raise TimeoutError("Browser did not start within 30 seconds")
 
     # Phase 6: Pin to desktop (Linux/X11, best-effort)
-    if pin_to_desktop and not headless:
-        await _move_to_launching_desktop(pid=process.pid)
+    # (Not for a browser sent to another display -- a restored one on a
+    # virtual display -- which has no place on this display's desktops.)
+    if pin_to_desktop and not headless and env.get("DISPLAY") == os.environ.get("DISPLAY"):
+        await _move_to_launching_desktop(pid=process.pid, desktop=desktop)
 
     # Phase 7: Register in the instance registry
     if working_dir is None:
@@ -207,6 +244,8 @@ async def launch_browser(
         port_override=port,
         registry_path=registry_path,
         pid_start=pid_start,
+        name_override=instance_name,
+        launch=launch_record,
     )
 
     # Phase 8: Spawn the per-instance supervisor (headed launches only). It is a
@@ -227,13 +266,15 @@ async def launch_browser(
             port=port,
             name=instance_info.name,
             registry_path=_resolve_path(registry_path),
-            draw_border=window_border and fp_profile is None,
+            draw_border=draw_border,
         )
 
     return instance_info
 
 
-def cleanup_sessions(registry_path: str | None = None) -> list[str]:
+def cleanup_sessions(
+    registry_path: str | None = None, keep: set[str] | None = None,
+) -> list[str]:
     """Remove stale instances and their session directories.
 
     Delegates to the Instance Registry's cleanup() which removes stale
@@ -254,7 +295,7 @@ def cleanup_sessions(registry_path: str | None = None) -> list[str]:
     # alias to a dead or foreign process -- and the sweep would delete the
     # profile out from under a running browser.
     registry_data = _load_registry(_resolve_path(registry_path))
-    tracked_dirs = {e.get("user_data_dir") for e in registry_data.values()}
+    tracked_dirs = {e.get("user_data_dir") for e in registry_data.values()} | (keep or set())
     # The session root is shared by ALL registries: callers (tests, tools) can
     # pass an isolated registry path, but their sweep still walks the global
     # _SESSION_ROOT. Honor the default registry's instances too -- otherwise an
@@ -322,7 +363,7 @@ def _process_is_running(pid: int) -> bool:
     return process_is_running(pid=pid)
 
 
-async def _move_to_launching_desktop(pid: int) -> None:
+async def _move_to_launching_desktop(pid: int, desktop: int | None = None) -> None:
     """Move the browser window to the launching terminal's virtual desktop.
 
     Linux/X11 only. Requires xdotool. Silently does nothing if
@@ -335,9 +376,16 @@ async def _move_to_launching_desktop(pid: int) -> None:
     browser is visible on the wrong desktop.
     """
     try:
-        # Determine target desktop from the terminal's window
+        # Determine target desktop from the terminal's window, unless the
+        # caller named one (a restore putting a window back where it was)
         window_id = os.environ.get("WINDOWID", "")
-        if window_id:
+        if desktop is not None:
+            from .desktop import desktop_count
+            count = desktop_count()
+            # Dynamic workspaces: the last one that exists is as far as a
+            # window can go (see desktop.py).
+            desktop = str(min(desktop, count - 1) if count else desktop)
+        elif window_id:
             result = subprocess.run(
                 ["xdotool", "get_desktop_for_window", window_id],
                 capture_output=True, text=True,

@@ -40,7 +40,7 @@ Or add to a project:
 uv add chrome-agent
 ```
 
-Requires Google Chrome or Chromium installed on the system. Single runtime dependency (`websockets`). No Playwright, no browser downloads.
+Requires Google Chrome or Chromium installed on the system. Runtime dependencies are `websockets`, plus `cryptography` and `keyring` for encrypting saved sessions. No Playwright, no browser downloads.
 
 ## Quick Start
 
@@ -197,7 +197,10 @@ chrome-agent attach <instance|glob> [+Event ...] [--target SPEC | --target-id ID
 chrome-agent stop <instance|glob> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
 chrome-agent help [<instance|glob>] [Domain | Domain.method]
 chrome-agent cleanup
-chrome-agent completions <zsh | instances | methods | events> [<instance>]
+chrome-agent save <instance|glob>... | --all [--stop] [--as NAME] [--overwrite | --keep-both]
+chrome-agent restore [<name[@stamp]>...] | --all [--here] [--any-port] [--desktop saved|terminal] [--no-reattach] [--replace-profile] [--start-display]
+chrome-agent snapshots [list [<glob>] | show <name[@stamp]> | rm <ref>... [--older-than AGE] [--yes] | export-key | import-key [--replace]]
+chrome-agent completions <zsh | instances | snapshots | methods | events> [<instance>]
 chrome-agent --version
 ```
 
@@ -209,12 +212,59 @@ chrome-agent --version
 | `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Accepts a glob, stopping every matching instance. Use `--target` or `--url` to close a single tab without affecting the browser; because this closes a tab, prefer the explicit `--target-id` / `--target-index`. |
 | `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |
 | `cleanup` | Remove stale instances (dead browsers) and their session directories. |
+| `save` | Snapshot running instances -- profile, tabs, cookies, launch flags, desktop, observers -- so they can be restored later. See [Saving and Restoring Sessions](#saving-and-restoring-sessions). |
+| `restore` | Bring snapshots back as running instances under their original names and ports. |
+| `snapshots` | List, inspect (`show`) and delete (`rm`) saved snapshots; back up the encryption key. |
 | `completions` | `zsh` prints a shell completion; `instances`, `methods` and `events` print `name:description` lines for the registered instances and for the running browser's CDP protocol (what the completion reads as you type). |
 | `--version` | Print the installed chrome-agent version (`-V` alias) and exit. |
 
 Instances are tracked in a registry at `/tmp/chrome-agent/registry.json`. A headed browser's instance is **automatically removed from the registry when its window is closed** (its session directory is cleaned up too), so `status` reflects what is actually running. Liveness is determined by **process identity plus port attribution**, not a bare PID-existence check: the recorded PID counts only if it is a live process of the launching user whose start time matches what was recorded at launch (so a recycled or namespace-local PID never masquerades as the browser), and a listening CDP port counts only if a process claiming that port with this instance's profile directory can be found -- so browsers started via wrapper/snap launchers (which fork the real browser into another process) are still reported correctly, while a port since claimed by a *different* browser is not mistaken for this one. A **transient connection drop does not retire a live instance**: a host suspend/resume severs the supervisor's CDP connection while Chrome keeps running, so the supervisor reconnects and keeps supervising; retirement happens only once the CDP port stops listening. `cleanup` removes any entries that remain (headless instances, or browsers that were killed abruptly).
 
 Two consequences worth knowing. **Launching from inside a PID-namespaced sandbox** (a container, bubblewrap, some agent-CLI sandboxes) records the sandbox's local PID in the shared registry; the identity check recognizes such an entry as stale once its browser is gone, instead of treating the aliased host PID as a live browser forever. **`stop` verifies its target before acting**: it never sends `Browser.close` to a port that is serving a different browser (it terminates the instance's own verified process instead, or just cleans up the stale entry), and its SIGTERM fallback only ever fires at a PID verified to be the instance's own browser process.
+
+## Saving and Restoring Sessions
+
+A launched browser's profile lives under `/tmp/chrome-agent/` and is deleted when the browser closes -- and most Linux systems empty `/tmp` at boot anyway. So logins, cookies and open tabs do not survive a restart unless you save them:
+
+```bash
+chrome-agent save --all --stop     # before a reboot: close every instance cleanly and save it
+chrome-agent restore --all         # after: bring them all back
+```
+
+A snapshot holds everything needed to bring an instance back as it was:
+
+- **The profile** -- cookies, localStorage, IndexedDB, saved logins -- minus caches and components Chrome re-downloads on its own (a real profile is typically 5-20 MB saved).
+- **Every cookie the browser holds in memory**, including session cookies that are never written to disk; they are set again on restore before any tab loads.
+- **Windows and tabs**, with each window's size, position and active tab.
+- **Name, port and working directory**, so an agent or script that addresses `mysite-01` (or its port) carries on unchanged. A fresh `launch` avoids the ports the last `save --all` will restore onto.
+- **Launch settings** -- headless, extra Chrome flags, fingerprint flags and TZ, window border, and a custom `--user-data-dir` if one was given.
+- **The virtual desktop** of each window (Linux/X11), or -- for a browser kept off-screen on a virtual X display (Xvfb, Xvnc, Xephyr) -- that display and the command that started its server.
+- **`attach` observers** subscribed to the instance. One that wrote to a file (including a shell loop that re-attaches) is restarted on restore; one whose output was piped to a reader that is gone is printed as the command to run.
+
+```bash
+chrome-agent save mysite-01                  # live: the browser keeps running
+chrome-agent save mysite-01 --stop           # close it cleanly first -- fully consistent
+chrome-agent save 'mysite-*'                 # every matching instance
+chrome-agent restore mysite-01               # the latest version
+chrome-agent restore mysite-01@20260927T153000Z
+chrome-agent restore                         # everything launched from the current directory
+chrome-agent snapshots                       # list: name@stamp, saved, tabs, size, port, origin dir
+chrome-agent snapshots show mysite-01        # tabs, observers, launch flags, desktop
+chrome-agent snapshots rm mysite-01          # every version (asks first; --yes when scripted)
+chrome-agent snapshots rm --older-than 30d
+```
+
+**Versions.** Each save is a timestamped version. When one already exists, an interactive `save` shows when it was saved and its tabs and asks whether to overwrite it; answering no keeps both. Non-interactively, both are kept unless `--overwrite` is given. Nothing is ever deleted automatically -- not by a restore, not by age -- so saving and discarding credentials stays a deliberate act.
+
+**Consistency.** `--stop` closes the browser cleanly before copying, so every database is complete on disk; use it before a reboot. A live save copies the files while Chrome runs without taking any lock (Chrome holds most of its SQLite databases exclusively, and a reader's lock on the rest could make Chrome's own writes fail), re-reading any file that changes mid-copy. Cookies are captured from the running browser either way, so they do not depend on what Chrome has flushed to disk.
+
+**Encryption.** Snapshots are credential bundles, so every snapshot file except a small plaintext summary (no URLs, no cookies) is encrypted with AES-256-GCM under a key kept in the OS keyring (GNOME Keyring / KWallet, macOS Keychain, Windows Credential Locker). The keyring unlocks at login, so restores need no prompt; a snapshot that ends up in a backup or a synced folder is unreadable without the key. **If the keyring is lost, the snapshots are unrecoverable** -- back the key up with `chrome-agent snapshots export-key`, and load it on another machine with `chrome-agent snapshots import-key < keyfile`. On a host with no keyring service, set `CHROME_AGENT_SNAPSHOT_KEY` to a base64 32-byte key. Snapshots live in `~/.local/share/chrome-agent/snapshots/` (mode 0700).
+
+**Restoring safely.** `restore` refuses when the instance is already running (it was restored already, or the original never closed), when the saved port is taken by something else (`--any-port` picks a new one), or when a custom profile directory already exists (`--replace-profile` moves it aside rather than deleting it). It warns when the installed Chrome is older than the one that saved the snapshot, since an older Chrome may refuse a newer profile. Sites that bind a login to a device or IP, or expire it server-side, may still ask you to sign in again.
+
+**Virtual displays.** A browser running on a virtual X display is restored onto that same display, never onto the screen of whoever runs `restore`. A virtual display usually does not survive a reboot, so `restore` refuses while it is down and names the command that starts it; `--start-display` runs that recorded command (e.g. `Xvfb :90 -screen 0 1920x1200x24 -nolisten tcp`) first. A browser on your own desktop is not tied to a display number -- that can change across a reboot -- and follows the display `restore` runs on.
+
+**Virtual desktops.** A single restore puts the browser on the current terminal's desktop, alongside the project you just reopened. `restore --all` puts each window back on the desktop it was saved from (`--desktop` overrides either default). With dynamic workspaces (GNOME's default) a window can only go as far as the last workspace that exists -- the window manager deletes empty workspaces in the middle -- so `restore --all` works through the snapshots in desktop order: the original layout comes back where the workspaces in between are occupied, and otherwise windows are packed down, keeping the ones that shared a desktop together and in order.
 
 ## Interacting with Elements
 
