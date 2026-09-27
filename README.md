@@ -207,7 +207,7 @@ chrome-agent --version
 | Command | Description |
 |---------|-------------|
 | `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. |
-| `status` | List running instances with their page targets (IDs, URLs, titles). Accepts a glob to list a matching subset. |
+| `status` | List running instances with their page targets (IDs, URLs, titles). Accepts a glob to list a matching subset. A browser you cannot see is tagged in the header -- `[Xvfb :95]` for one on a virtual X display (Xvfb, Xvnc, Xephyr), `[headless]` for one with no window -- and the JSON form carries a `display` field for every live instance (`{"kind": "desktop" \| "virtual" \| "headless", ...}`). |
 | `attach` | Persistent event observation with isolated subscriptions. Use `--target` (fewer than 8 digits is a tab index, anything else a target-id prefix), `--url substring`, or the explicit `--target-id` / `--target-index` for multi-tab browsers. |
 | `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Accepts a glob, stopping every matching instance. Use `--target` or `--url` to close a single tab without affecting the browser; because this closes a tab, prefer the explicit `--target-id` / `--target-index`. |
 | `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |

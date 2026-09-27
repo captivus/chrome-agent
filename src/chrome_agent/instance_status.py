@@ -40,6 +40,10 @@ class InstanceStatus:
     port: int
     alive: bool
     targets: list[PageTarget] = field(default_factory=list)
+    # Where the browser renders: {"kind": "headless"}, {"kind": "virtual",
+    # "display": ":95", "server": "Xvfb"} (off the user's screen), or
+    # {"kind": "desktop", "display": ":1"}. None when dead or undeterminable.
+    placement: dict | None = None
 
 
 def query_targets(*, port: int) -> list[PageTarget]:
@@ -99,6 +103,10 @@ def get_instance_status(
     else:
         instances = enumerate_instances(registry_path=registry_path)
 
+    from .desktop import browser_placements
+
+    placements = browser_placements([info.port for info in instances if info.alive])
+
     results = []
     for info in instances:
         if info.alive:
@@ -111,9 +119,26 @@ def get_instance_status(
             port=info.port,
             alive=info.alive,
             targets=targets,
+            placement=placements.get(info.port) if info.alive else None,
         ))
 
     return results
+
+
+def placement_label(placement: dict | None) -> str | None:
+    """A short tag for a browser that is NOT on the user's screen, else None.
+
+    Only off-screen placements are worth a tag: a window on a virtual display
+    (an Xvfb) or no window at all (headless) is invisible, and easy to lose track
+    of. A browser on the user's own desktop is the unremarkable default.
+    """
+    if not placement:
+        return None
+    if placement["kind"] == "headless":
+        return "headless"
+    if placement["kind"] == "virtual":
+        return f"{placement['server']} {placement['display']}"
+    return None
 
 
 def format_status_text(statuses: list[InstanceStatus]) -> str:
@@ -123,6 +148,9 @@ def format_status_text(statuses: list[InstanceStatus]) -> str:
         header = f"{status.name}  port {status.port}"
         if not status.alive:
             header += "  DEAD"
+        label = placement_label(status.placement)
+        if label:
+            header += f"  [{label}]"
         lines.append(header)
 
         if status.alive and status.targets:
@@ -146,6 +174,7 @@ def format_status_json(statuses: list[InstanceStatus]) -> str:
             "name": status.name,
             "port": status.port,
             "alive": status.alive,
+            "display": status.placement,
             "targets": [
                 {
                     "id": t.short_id,

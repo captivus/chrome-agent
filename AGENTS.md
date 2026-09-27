@@ -242,7 +242,7 @@ chrome-agent launch                       # auto port + name (from cwd); isolate
 chrome-agent launch --headless            # no window (no border, no desktop pinning)
 chrome-agent launch --fingerprint p.json  # spoof UA/viewport/lang/TZ via launch flags (also suppresses the marker)
 chrome-agent launch -- --some-chrome-flag # everything after -- passes through to Chrome
-chrome-agent status                       # all instances + their tabs
+chrome-agent status                       # all instances + their tabs; [Xvfb :95] / [headless] mark off-screen ones
 chrome-agent stop mysite-01 [--target-index 2 | --target-id 65602889 | --url foo]  # whole browser, or one tab
 chrome-agent stop 'mysite-*'              # every instance matching the glob (quote it)
 chrome-agent cleanup                      # drop dead instances + stale session dirs

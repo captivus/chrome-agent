@@ -219,3 +219,40 @@ def test_target_id_truncation():
 
     assert targets[0].short_id == "ABCDEF12"
     assert targets[0].target_id == "abcdef1234567890"
+
+
+def test_off_screen_instances_are_tagged():
+    """A browser on a virtual display or headless is tagged; one on the user's
+    desktop is not -- the tag exists to flag windows the user cannot see."""
+    statuses = [
+        InstanceStatus(name="desk-01", port=9222, alive=True,
+                       placement={"kind": "desktop", "display": ":1"}),
+        InstanceStatus(name="xvfb-01", port=9223, alive=True,
+                       placement={"kind": "virtual", "display": ":95", "server": "Xvfb"}),
+        InstanceStatus(name="head-01", port=9224, alive=True, placement={"kind": "headless"}),
+        InstanceStatus(name="gone-01", port=9225, alive=False),
+    ]
+    text = format_status_text(statuses)
+    assert "desk-01  port 9222\n" in text + "\n"
+    assert "xvfb-01  port 9223  [Xvfb :95]" in text
+    assert "head-01  port 9224  [headless]" in text
+    assert "gone-01  port 9225  DEAD" in text
+
+    data = {entry["name"]: entry for entry in json.loads(format_status_json(statuses))}
+    assert data["xvfb-01"]["display"] == {"kind": "virtual", "display": ":95", "server": "Xvfb"}
+    assert data["gone-01"]["display"] is None
+
+
+def test_browser_placements_detects_headless(browser_session):
+    """The conftest browser is headless; the /proc scan must classify it so."""
+    from chrome_agent.desktop import browser_placements
+
+    assert browser_placements([browser_session.port]) == {
+        browser_session.port: {"kind": "headless"}
+    }
+
+
+def test_browser_placements_ignores_unknown_ports():
+    from chrome_agent.desktop import browser_placements
+
+    assert browser_placements([_free_port()]) == {}

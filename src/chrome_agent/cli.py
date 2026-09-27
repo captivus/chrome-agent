@@ -110,7 +110,7 @@ def _run_completions(args: list[str]) -> None:
         return
 
     if what == "instances":
-        from .instance_status import get_instance_status
+        from .instance_status import get_instance_status, placement_label
 
         for status in get_instance_status():
             if not status.alive:
@@ -118,6 +118,9 @@ def _run_completions(args: list[str]) -> None:
             else:
                 count = len(status.targets)
                 description = f"port {status.port} -- {count} tab{'' if count == 1 else 's'}"
+                label = placement_label(status.placement)
+                if label:
+                    description += f", {label}"
             print(f"{status.name}:{description}")
         return
 

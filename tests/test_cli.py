@@ -684,12 +684,35 @@ def test_completions_instances_counts_tabs(tmp_path, monkeypatch, capsys):
         ]
 
     monkeypatch.setattr("chrome_agent.instance_status.query_targets", _targets)
+    # The seeded ports are real ports on this machine; keep whatever browser
+    # happens to listen there from leaking its placement into the output.
+    monkeypatch.setattr("chrome_agent.desktop.browser_placements", lambda ports: {})
 
     cli._run_completions(args=["instances"])
 
     out = capsys.readouterr().out
     assert "mysite-01:port 9222 -- 1 tab\n" in out
     assert "other-01:port 9223 -- 3 tabs\n" in out
+
+
+def test_completions_instances_tags_off_screen_browsers(tmp_path, monkeypatch, capsys):
+    """An instance on a virtual display (or headless) says so in the menu."""
+    from chrome_agent import cli
+
+    _seed_registry(tmp_path, monkeypatch, "mysite-01", "other-01")
+    monkeypatch.setattr("chrome_agent.registry._instance_is_alive", lambda *a, **k: True)
+    monkeypatch.setattr("chrome_agent.instance_status.query_targets", lambda *, port: [])
+    monkeypatch.setattr(
+        "chrome_agent.desktop.browser_placements",
+        lambda ports: {9222: {"kind": "virtual", "display": ":95", "server": "Xvfb"},
+                       9223: {"kind": "desktop", "display": ":1"}},
+    )
+
+    cli._run_completions(args=["instances"])
+
+    out = capsys.readouterr().out
+    assert "mysite-01:port 9222 -- 0 tabs, Xvfb :95\n" in out
+    assert "other-01:port 9223 -- 0 tabs\n" in out
 
 
 def test_completions_requires_a_target(capsys):

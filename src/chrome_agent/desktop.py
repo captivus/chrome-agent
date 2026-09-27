@@ -154,6 +154,32 @@ def move_window(window: str, desktop: int) -> int | None:
 _VIRTUAL_SERVERS = ("Xvfb", "Xvnc", "Xephyr", "Xdummy")
 
 
+def _children(pid: int) -> list[str]:
+    """Direct child PIDs, read from /proc (no subprocess: status runs this on
+    every Tab of the shell completion)."""
+    children = []
+    try:
+        for task in os.listdir(f"/proc/{pid}/task"):
+            with open(f"/proc/{pid}/task/{task}/children") as f:
+                children += f.read().split()
+    except OSError:
+        pass
+    return children
+
+
+def _read_argv(pid: str) -> list[str]:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return [a.decode(errors="replace") for a in f.read().split(b"\0") if a]
+    except OSError:
+        return []
+
+
+def _display_key(display: str) -> str:
+    """":95.0" and ":95" name the same X server."""
+    return display.split(".", 1)[0]
+
+
 def process_display(pid: int) -> str | None:
     """The DISPLAY a browser process runs on.
 
@@ -161,14 +187,7 @@ def process_display(pid: int) -> str | None:
     the main process; its helpers are started with the same environment and
     keep it intact, so they are read first.
     """
-    try:
-        children = subprocess.run(
-            ["ps", "-o", "pid=", "--ppid", str(pid)],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.split()
-    except (OSError, subprocess.TimeoutExpired):
-        children = []
-    for candidate in [*children, str(pid)]:
+    for candidate in [*_children(pid), str(pid)]:
         try:
             with open(f"/proc/{candidate}/environ", "rb") as f:
                 items = f.read().split(b"\0")
@@ -180,19 +199,84 @@ def process_display(pid: int) -> str | None:
     return None
 
 
-def virtual_display_server(display: str) -> list[str] | None:
-    """The command line of the virtual X server serving ``display``, if any."""
-    for entry in os.listdir("/proc"):
+def virtual_display_servers() -> dict[str, list[str]]:
+    """Every running virtual X server: {":95": its command line}."""
+    servers: dict[str, list[str]] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return servers
+    for entry in entries:
         if not entry.isdigit():
             continue
-        try:
-            with open(f"/proc/{entry}/cmdline", "rb") as f:
-                argv = [a.decode(errors="replace") for a in f.read().split(b"\0") if a]
-        except OSError:
+        argv = _read_argv(entry)
+        if argv and os.path.basename(argv[0]) in _VIRTUAL_SERVERS:
+            for arg in argv[1:]:
+                if arg.startswith(":") and arg[1:].isdigit():
+                    servers[arg] = argv
+                    break
+    return servers
+
+
+def virtual_display_server(display: str) -> list[str] | None:
+    """The command line of the virtual X server serving ``display``, if any."""
+    return virtual_display_servers().get(_display_key(display))
+
+
+def browser_placements(ports: list[int]) -> dict[int, dict]:
+    """Where the browser on each CDP port renders, for `status`.
+
+    {port: {"kind": "headless"}}, {"kind": "virtual", "display": ":95",
+    "server": "Xvfb"} for a virtual X display kept off the user's screen, or
+    {"kind": "desktop", "display": ":1"}. Ports whose browser process cannot be
+    found (another user, non-Linux) are absent. One pass over /proc serves every
+    port, since this runs on each Tab of the shell completion.
+    """
+    wanted = {f"--remote-debugging-port={port}": port for port in ports}
+    mains: dict[int, tuple[int, list[str]]] = {}
+    servers: dict[str, list[str]] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return {}
+    for entry in entries:
+        if not entry.isdigit():
             continue
-        if argv and os.path.basename(argv[0]) in _VIRTUAL_SERVERS and display in argv[1:]:
-            return argv
-    return None
+        argv = _read_argv(entry)
+        if not argv:
+            continue
+        if os.path.basename(argv[0]) in _VIRTUAL_SERVERS:
+            for arg in argv[1:]:
+                if arg.startswith(":") and arg[1:].isdigit():
+                    servers[arg] = argv
+                    break
+            continue
+        # Chrome rewrites its argv into one space-joined string.
+        tokens = " ".join(argv).split()
+        if any(t.startswith("--type=") for t in tokens):
+            continue  # renderer/GPU/utility helper, not the browser process
+        for token in tokens:
+            if token in wanted:
+                mains.setdefault(wanted[token], (int(entry), tokens))
+                break
+
+    placements: dict[int, dict] = {}
+    for port, (pid, tokens) in mains.items():
+        if "--headless=new" in tokens or "--headless" in tokens:
+            placements[port] = {"kind": "headless"}
+            continue
+        display = process_display(pid)
+        if display is None:
+            continue
+        server = servers.get(_display_key(display))
+        if server:
+            placements[port] = {
+                "kind": "virtual", "display": display,
+                "server": os.path.basename(server[0]),
+            }
+        else:
+            placements[port] = {"kind": "desktop", "display": display}
+    return placements
 
 
 def display_running(display: str) -> bool:
