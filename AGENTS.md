@@ -239,7 +239,7 @@ Two more edges: a **literal** name is never globbed, so `stop mysite-01` cannot 
 
 ```bash
 chrome-agent launch                       # auto port + name (from cwd); isolated profile under /tmp/chrome-agent
-chrome-agent launch --headless            # no window (no border, no desktop pinning)
+chrome-agent launch --headless            # no window (no border, no desktop pinning); UA says "HeadlessChrome" -- see Gotchas
 chrome-agent launch --fingerprint p.json  # spoof UA/viewport/lang/TZ via launch flags (also suppresses the marker)
 chrome-agent launch -- --some-chrome-flag # everything after -- passes through to Chrome
 chrome-agent status                       # all instances + their tabs; [Xvfb :95] / [headless] mark off-screen ones
@@ -265,6 +265,21 @@ Headed launches are marked (colored border + `🤖 <instance>` title prefix) so 
 - **Event isolation.** Each `attach` session sees only its own subscriptions.
 - **Multiple live instances** disable name auto-selection for **bare one-shot methods** — they error, asking you to specify one. `help` is the exception: it auto-picks any live instance (the protocol schema is identical across them), so it never needs naming.
 - **Launching from inside a PID-namespaced sandbox** (a container, bubblewrap, some agent-CLI sandboxes) records the sandbox-local PID in the shared registry. Liveness copes — the identity check disowns the aliased host PID and falls back to attributing the CDP port — but the instance is only reachable from outside while the sandbox shares the host network, and it dies with the sandbox. Prefer launching on the host; always pick a fresh port (never reuse another instance's — two browsers given the same `--remote-debugging-port` leave the loser running CDP-less).
+- **A site that fails headless but works headed may just be sniffing the User-Agent.** Headless Chrome puts `HeadlessChrome/` in both the `User-Agent` header and `navigator.userAgent`, and some sites return 403 on that string alone. Don't switch to headed -- take the instance's own UA, change that one word, and relaunch headless with it:
+  ```bash
+  UA=$(chrome-agent <instance> Browser.getVersion | sed -n '/"userAgent"/{s/.*"userAgent": "\([^"]*\)".*/\1/;s/HeadlessChrome/Chrome/;p;}')
+  chrome-agent stop <instance>
+  chrome-agent launch --headless -- "--user-agent=$UA"
+  ```
+  (With `jq`: `jq -r '.userAgent | sub("HeadlessChrome/"; "Chrome/")'`.) On Chrome 151 / Linux, for example, the UA goes from
+  ```
+  Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.0.0 Safari/537.36
+  ```
+  to
+  ```
+  Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+  ```
+  Your version and platform token will differ (`Macintosh; Intel Mac OS X 10_15_7`, `Windows NT 10.0; Win64; x64`), which is why the string is derived from the running browser rather than copied. Verify with `chrome-agent <instance> Runtime.evaluate '{"expression":"navigator.userAgent","returnByValue":true}'`. A `--fingerprint` profile's `userAgent` sets the UA the same way.
 
 ## Further reading
 

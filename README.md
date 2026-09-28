@@ -336,6 +336,16 @@ Spoofs the user agent (HTTP header and JavaScript), viewport, language, and time
 
 It deliberately does **not** patch `navigator.webdriver`, `navigator.platform`, `navigator.vendor`, or `window.chrome`. An empirical detection audit found those JS overrides are each independently detectable and make the browser *more* detectable, not less: they flip bot.sannysoft.com's WebDriver test from pass to fail (the override makes `navigator.webdriver` an own property) and raise CreepJS's headless score. A plain CDP-attached Chrome already reports the native `navigator.webdriver === false` and keeps the genuine `window.chrome` shape, so the cleanest profile is one that leaves the JS environment untouched. A profile's `platform`/`vendor` should match the host OS (they are retained in the schema but not spoofed). Note that WebRTC can still leak the real IP regardless of profile.
 
+Headless mode has one giveaway that has nothing to do with fingerprinting: Chrome puts `HeadlessChrome/` in the User-Agent (`...HeadlessChrome/151.0.0.0 Safari/537.36`), and some sites block on that string alone. A profile's `userAgent` replaces it. For a lighter fix, derive the ordinary UA from a running headless instance and relaunch with only that flag:
+
+```bash
+UA=$(chrome-agent <instance> Browser.getVersion | sed -n '/"userAgent"/{s/.*"userAgent": "\([^"]*\)".*/\1/;s/HeadlessChrome/Chrome/;p;}')
+chrome-agent stop <instance>
+chrome-agent launch --headless -- "--user-agent=$UA"
+```
+
+Derived this way, the version and platform always match the installed Chrome; a hardcoded UA drifts out of step on the next update, and a UA claiming a different version than the browser is its own signal.
+
 ## For AI Agents
 
 See [AGENTS.md](AGENTS.md) for concise agent instructions (the standard for AI agent tool documentation). It covers the mental model (address an instance, send any CDP command), the sense ⇄ act loop, the two channels, the command reference, and gotchas.
