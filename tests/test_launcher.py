@@ -79,6 +79,21 @@ def test_find_chrome_binary():
     assert os.access(binary, os.X_OK)
 
 
+def test_find_chrome_binary_env_override(monkeypatch, tmp_path):
+    """CHROME_AGENT_BROWSER_PATH is used instead of the platform search."""
+    browser = tmp_path / "my-browser"
+    browser.write_text("#!/bin/sh\n")
+    browser.chmod(0o755)
+    monkeypatch.setenv("CHROME_AGENT_BROWSER_PATH", str(browser))
+    assert find_chrome_binary() == str(browser)
+
+
+def test_find_chrome_binary_env_override_missing(monkeypatch, tmp_path):
+    """A bad override finds nothing; it does not fall back to Chrome."""
+    monkeypatch.setenv("CHROME_AGENT_BROWSER_PATH", str(tmp_path / "missing"))
+    assert find_chrome_binary() is None
+
+
 # ---------------------------------------------------------------------------
 # Happy path -- successful launch with registry integration
 # ---------------------------------------------------------------------------
@@ -159,6 +174,19 @@ def test_browser_not_found(monkeypatch):
     with pytest.raises(BrowserNotFoundError) as exc_info:
         asyncio.run(do_launch())
     assert len(exc_info.value.searched_paths) > 0
+
+
+def test_browser_not_found_reports_override(monkeypatch, tmp_path):
+    """The error lists the override path, which is what was searched."""
+    missing = str(tmp_path / "missing")
+    monkeypatch.setenv("CHROME_AGENT_BROWSER_PATH", missing)
+
+    async def do_launch():
+        await launch_browser(port_override=LAUNCH_PORT)
+
+    with pytest.raises(BrowserNotFoundError) as exc_info:
+        asyncio.run(do_launch())
+    assert exc_info.value.searched_paths == [missing]
 
 
 # ---------------------------------------------------------------------------

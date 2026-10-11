@@ -42,6 +42,12 @@ uv add chrome-agent
 
 Requires Google Chrome or Chromium installed on the system. Runtime dependencies are `websockets`, plus `cryptography` and `keyring` for encrypting saved sessions. No Playwright, no browser downloads.
 
+To use another Chromium-based browser (Helium, Brave, Vivaldi, Edge, ...) or a Chrome in a nonstandard location, point `CHROME_AGENT_BROWSER_PATH` at its executable. When set, it is the only path tried; if it isn't an executable file, `launch` fails rather than falling back to Chrome.
+
+```
+export CHROME_AGENT_BROWSER_PATH="/Applications/Helium.app/Contents/MacOS/Helium"
+```
+
 ## Quick Start
 
 ```bash
@@ -385,7 +391,7 @@ Monitor is specific to Claude Code. Agents on other harnesses can still be event
 ## Requirements
 
 - Python >= 3.11
-- Google Chrome or Chromium (system-installed)
+- Google Chrome or Chromium (system-installed), or any Chromium-based browser via `CHROME_AGENT_BROWSER_PATH`
 - Linux with xdotool (optional, for virtual desktop pinning)
 
 ## Releasing (maintainer)
