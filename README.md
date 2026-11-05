@@ -13,34 +13,34 @@ Multiple agents and humans can share the same browser simultaneously, each with 
 
 <p align="center">
   <img src="docs/logos/microsoft.svg" alt="Microsoft" height="28">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/databricks.svg" alt="Databricks" height="32">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/red-hat.svg" alt="Red Hat" height="32">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/deutsche-telekom.svg" alt="Deutsche Telekom" height="32">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/bosch.svg" alt="Bosch" height="32">
-  <br><br>
-  <img src="docs/logos/sysco.svg" alt="Sysco" height="28">
-  &nbsp;&nbsp;&nbsp;&nbsp;
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/johns-hopkins-university.svg" alt="Johns Hopkins University" height="30">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/bosch.svg" alt="Bosch" height="28">
+  &nbsp;&nbsp;&nbsp;
   <img src="docs/logos/texas-instruments.svg" alt="Texas Instruments" height="30">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/grainger.svg" alt="Grainger" height="28">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/posthog.svg" alt="PostHog" height="32">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/nextiva.svg" alt="Nextiva" height="28">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/deutsche-telekom.svg" alt="Deutsche Telekom" height="28">
   <br><br>
-  <img src="docs/logos/parcellab.svg" alt="parcelLab" height="28">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/zuru-tech.svg" alt="ZURU Tech" height="28">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/jusbrasil.svg" alt="Jusbrasil" height="28">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/johns-hopkins-university.svg" alt="Johns Hopkins University" height="32">
-  &nbsp;&nbsp;&nbsp;&nbsp;
   <img src="docs/logos/texas-am-university.svg" alt="Texas A&amp;M University" height="30">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/red-hat.svg" alt="Red Hat" height="28">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/sysco.svg" alt="Sysco" height="28">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/databricks.svg" alt="Databricks" height="28">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/grainger.svg" alt="Grainger" height="28">
+  <br><br>
+  <img src="docs/logos/posthog.svg" alt="PostHog" height="28">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/nextiva.svg" alt="Nextiva" height="28">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/jusbrasil.svg" alt="Jusbrasil" height="28">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/parcellab.svg" alt="parcelLab" height="28">
+  &nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/zuru-tech.svg" alt="ZURU Tech" height="28">
 </p>
 
 ## Why this exists
