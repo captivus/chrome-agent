@@ -9,6 +9,40 @@ A CLI tool that gives AI coding agents the ability to observe and interact with 
 
 Multiple agents and humans can share the same browser simultaneously, each with isolated event subscriptions. One agent drives while another observes network traffic. A human browses while an agent watches for errors. Four agents run a coordinated test suite against a single browser. Each participant sees only the events they subscribed to -- no interference.
 
+<h3 align="center">Used by engineers at</h3>
+
+<p align="center">
+  <img src="docs/logos/microsoft.svg" alt="Microsoft" height="28">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/databricks.svg" alt="Databricks" height="32">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/red-hat.svg" alt="Red Hat" height="32">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/deutsche-telekom.svg" alt="Deutsche Telekom" height="32">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/bosch.svg" alt="Bosch" height="32">
+  <br><br>
+  <img src="docs/logos/sysco.svg" alt="Sysco" height="28">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/texas-instruments.svg" alt="Texas Instruments" height="30">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/grainger.svg" alt="Grainger" height="28">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/posthog.svg" alt="PostHog" height="32">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/nextiva.svg" alt="Nextiva" height="28">
+  <br><br>
+  <img src="docs/logos/parcellab.svg" alt="parcelLab" height="28">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/zuru-tech.svg" alt="ZURU Tech" height="28">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/jusbrasil.svg" alt="Jusbrasil" height="28">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/johns-hopkins-university.svg" alt="Johns Hopkins University" height="32">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/logos/texas-am-university.svg" alt="Texas A&amp;M University" height="30">
+</p>
+
 ## Why this exists
 
 AI coding agents need to see and interact with browsers -- to test their code, debug automation, inspect page state. The standard approach (browser MCP tools) uses a persistent server with protocol negotiation and verbose response formatting. `chrome-agent` takes a different approach: direct access to Chrome's DevTools Protocol with no abstraction layer.
