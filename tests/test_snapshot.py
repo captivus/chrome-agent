@@ -291,3 +291,25 @@ def test_virtual_display_blocks_restore_until_started(store, key):
     problem = snapshot.check_restorable(version, state, any_port=False)
     assert "virtual display :65000" in problem and "--start-display" in problem
     assert snapshot.check_restorable(version, state, any_port=False, start_display=True) is None
+
+
+def test_parse_procargs2_splits_argv_and_environ():
+    import sys
+    raw = (
+        (3).to_bytes(4, sys.byteorder)
+        + b"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\0\0\0\0"
+        + b"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\0"
+        + b"--remote-debugging-port=9222\0--user-data-dir=/tmp/x\0"
+        + b"TZ=UTC\0HOME=/home/u\0\0\0"
+    )
+    argv, environ = snapshot._parse_procargs2(raw)
+    assert argv == [
+        b"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        b"--remote-debugging-port=9222",
+        b"--user-data-dir=/tmp/x",
+    ]
+    assert environ == [b"TZ=UTC", b"HOME=/home/u"]
+
+
+def test_parse_procargs2_rejects_truncated_buffer():
+    assert snapshot._parse_procargs2(b"\x01") == ([], [])

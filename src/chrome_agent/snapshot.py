@@ -39,6 +39,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -283,13 +284,136 @@ def reserved_ports() -> set[int]:
 # Inspecting a running instance from outside it
 # --------------------------------------------------------------------------
 
-def _read_argv(pid: int | str) -> list[str]:
+
+# --------------------------------------------------------------------------
+# Process inspection (Linux /proc, with a macOS fallback)
+# --------------------------------------------------------------------------
+
+_HAVE_PROC = os.path.isdir("/proc/self")
+
+
+def _list_pids() -> list[str]:
+    """Every visible PID, as strings."""
+    if _HAVE_PROC:
+        return [e for e in os.listdir("/proc") if e.isdigit()]
     try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            raw = f.read()
-    except OSError:
+        out = subprocess.run(
+            ["ps", "-axo", "pid="], capture_output=True, text=True, timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
         return []
-    return [part.decode(errors="replace") for part in raw.split(b"\0") if part]
+    return [line.strip() for line in out.splitlines() if line.strip().isdigit()]
+
+
+def _darwin_procargs(pid: int | str) -> tuple[list[bytes], list[bytes]]:
+    """(argv, environ) of a process via sysctl KERN_PROCARGS2 (macOS)."""
+    import ctypes
+    import ctypes.util
+
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    CTL_KERN, KERN_ARGMAX, KERN_PROCARGS2 = 1, 8, 49
+    argmax = ctypes.c_int(0)
+    size = ctypes.c_size_t(ctypes.sizeof(argmax))
+    mib = (ctypes.c_int * 2)(CTL_KERN, KERN_ARGMAX)
+    if libc.sysctl(mib, 2, ctypes.byref(argmax), ctypes.byref(size), None, 0) != 0:
+        return [], []
+    buf = ctypes.create_string_buffer(argmax.value)
+    size = ctypes.c_size_t(argmax.value)
+    mib3 = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, int(pid))
+    if libc.sysctl(mib3, 3, buf, ctypes.byref(size), None, 0) != 0:
+        return [], []
+    return _parse_procargs2(buf.raw[: size.value])
+
+
+def _parse_procargs2(raw: bytes) -> tuple[list[bytes], list[bytes]]:
+    """Split a KERN_PROCARGS2 buffer: int argc, exec path, NUL padding,
+    argv[argc], then the environment."""
+    if len(raw) < 4:
+        return [], []
+    argc = int.from_bytes(raw[:4], sys.byteorder)
+    rest = raw[4:]
+    # Skip the exec path and the NUL padding after it.
+    end = rest.find(b"\0")
+    if end < 0:
+        return [], []
+    pos = end
+    while pos < len(rest) and rest[pos] == 0:
+        pos += 1
+    parts = rest[pos:].split(b"\0")
+    argv = parts[:argc]
+    environ = [e for e in parts[argc:] if e and b"=" in e]
+    return argv, environ
+
+
+def _read_argv_bytes(pid: int | str) -> list[bytes]:
+    if _HAVE_PROC:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                raw = f.read()
+        except OSError:
+            return []
+        return [part for part in raw.split(b"\0") if part]
+    try:
+        return [a for a in _darwin_procargs(pid)[0] if a]
+    except (OSError, ValueError):
+        return []
+
+
+def _read_environ(pid: int | str) -> list[bytes]:
+    if _HAVE_PROC:
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                return f.read().split(b"\0")
+        except OSError:
+            return []
+    try:
+        return _darwin_procargs(pid)[1]
+    except (OSError, ValueError):
+        return []
+
+
+def _lsof_fd_path(pid: int | str, fd: str) -> str | None:
+    try:
+        out = subprocess.run(
+            ["lsof", "-a", "-w", "-p", str(pid), "-d", fd, "-Fn"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        if line.startswith("n"):
+            return line[1:]
+    return None
+
+
+def _proc_cwd(pid: int | str) -> str | None:
+    if _HAVE_PROC:
+        try:
+            return os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            return None
+    return _lsof_fd_path(pid, "cwd")
+
+
+def _proc_ppid(pid: int | str) -> str | None:
+    if _HAVE_PROC:
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                return f.read().rsplit(")", 1)[1].split()[1]
+        except (OSError, IndexError):
+            return None
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out or None
+
+
+def _read_argv(pid: int | str) -> list[str]:
+    return [part.decode(errors="replace") for part in _read_argv_bytes(pid)]
 
 
 def _chrome_tokens(pid: int | str) -> list[str]:
@@ -301,9 +425,7 @@ def _chrome_tokens(pid: int | str) -> list[str]:
 def _chrome_main_pid(port: int) -> int | None:
     """The browser process (not a renderer/helper) serving CDP ``port``."""
     needle = f"--remote-debugging-port={port}"
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
+    for entry in _list_pids():
         tokens = _chrome_tokens(entry)
         if needle in tokens and not any(t.startswith("--type=") for t in tokens):
             return int(entry)
@@ -323,9 +445,7 @@ def _effective_profile_dir(tokens: list[str], registered: str) -> str:
 
 def _supervisor_pids(name: str) -> list[tuple[int, list[str]]]:
     found = []
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
+    for entry in _list_pids():
         argv = _read_argv(entry)
         if "chrome_agent.supervisor" in argv:
             i = argv.index("chrome_agent.supervisor")
@@ -346,13 +466,9 @@ def _launch_record(entry: dict, name: str, tokens: list[str], pid: int | None) -
         ]
         env = {}
         if pid is not None:
-            try:
-                with open(f"/proc/{pid}/environ", "rb") as f:
-                    for item in f.read().split(b"\0"):
-                        if item.startswith(b"TZ="):
-                            env["TZ"] = item[3:].decode(errors="replace")
-            except OSError:
-                pass
+            for item in _read_environ(pid):
+                if item.startswith(b"TZ="):
+                    env["TZ"] = item[3:].decode(errors="replace")
         supervisors = _supervisor_pids(name)
         border = supervisors[0][1][-1] == "1" if supervisors else not headless
         record = {
@@ -480,6 +596,11 @@ _TARGET_FLAGS = ("--target", "--target-id", "--target-index", "--url")
 
 
 def _fd_info(pid: int | str, fd: int) -> tuple[str | None, bool]:
+    if not _HAVE_PROC:
+        # lsof does not report O_APPEND portably; assume append so a restored
+        # observer never truncates the log it was writing to.
+        path = _lsof_fd_path(pid, str(fd))
+        return path, path is not None
     try:
         path = os.readlink(f"/proc/{pid}/fd/{fd}")
     except OSError:
@@ -520,8 +641,8 @@ def _capture_subscriptions(name: str, windows: list[dict]) -> list[dict]:
     by_sorted_id = sorted(tabs, key=lambda t: t["targetId"])
     found, seen_wrappers = [], set()
     me = os.getpid()
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit() or int(entry) == me:
+    for entry in _list_pids():
+        if int(entry) == me:
             continue
         argv = _read_argv(entry)
         i = _is_attach_argv(argv)
@@ -548,23 +669,17 @@ def _capture_subscriptions(name: str, windows: list[dict]) -> list[dict]:
 
         stdout, append = _fd_info(entry, 1)
         stderr, _ = _fd_info(entry, 2)
-        try:
-            cwd = os.readlink(f"/proc/{entry}/cwd")
-        except OSError:
-            cwd = None
+        cwd = _proc_cwd(entry)
 
         wrapper = None
-        try:
-            with open(f"/proc/{entry}/stat") as f:
-                ppid = f.read().rsplit(")", 1)[1].split()[1]
+        ppid = _proc_ppid(entry)
+        if ppid is not None:
             parent = _read_argv(ppid)
-            shell = os.path.basename(parent[0]) if parent else ""
+            shell = os.path.basename(parent[0]).lstrip("-") if parent else ""
             if shell in ("sh", "bash", "zsh", "dash") and "-c" in parent and any(
                 "attach" in part for part in parent
             ):
-                wrapper = {"argv": parent, "cwd": os.readlink(f"/proc/{ppid}/cwd")}
-        except (OSError, IndexError):
-            pass
+                wrapper = {"argv": parent, "cwd": _proc_cwd(ppid)}
         # One record per observer: a shell loop is recorded once, and an
         # attach seen twice (e.g. `uv run` and the Python it spawns) once.
         key = tuple(wrapper["argv"]) if wrapper is not None else (tuple(attach_argv), stdout)
@@ -698,10 +813,7 @@ def plan_save(instance_name: str) -> SavePlan:
     tokens = _chrome_tokens(main_pid) if main_pid else []
     working_dir = entry.get("working_dir")
     if not working_dir and main_pid:
-        try:
-            working_dir = os.readlink(f"/proc/{main_pid}/cwd")
-        except OSError:
-            working_dir = None
+        working_dir = _proc_cwd(main_pid)
     launch = _launch_record(entry, instance_name, tokens, main_pid)
 
     # The display is read from the live browser every time, never trusted from
@@ -762,8 +874,8 @@ def _stop_for_save(plan: SavePlan) -> None:
 
     def holders() -> list[int]:
         return [
-            int(e) for e in os.listdir("/proc")
-            if e.isdigit() and needle in _chrome_tokens(e)
+            int(e) for e in _list_pids()
+            if needle in _chrome_tokens(e)
         ]
 
     deadline = time.monotonic() + 20
@@ -889,8 +1001,8 @@ def save_instance(
 # --------------------------------------------------------------------------
 
 def _process_running(argv: list[str]) -> bool:
-    for entry in os.listdir("/proc"):
-        if entry.isdigit() and _read_argv(entry) == argv:
+    for entry in _list_pids():
+        if _read_argv(entry) == argv:
             return True
     return False
 
@@ -898,9 +1010,7 @@ def _process_running(argv: list[str]) -> bool:
 def _attach_running(attach_argv: list[str]) -> bool:
     """Whether an identical `chrome-agent attach ...` is already running,
     however it was invoked (installed script, python -m, uv run)."""
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
+    for entry in _list_pids():
         argv = _read_argv(entry)
         i = _is_attach_argv(argv)
         if i is not None and argv[i:] == attach_argv:
