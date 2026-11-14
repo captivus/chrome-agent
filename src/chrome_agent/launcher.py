@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 _SESSION_ROOT = "/tmp/chrome-agent"
 
+# Points chrome-agent at a specific browser executable (any Chromium-based
+# browser, or a Chrome in a nonstandard location) instead of searching.
+BROWSER_PATH_ENV = "CHROME_AGENT_BROWSER_PATH"
+
 
 class BrowserNotFoundError(Exception):
     """Chrome/Chromium binary not found on the system."""
@@ -38,13 +42,24 @@ class BrowserNotFoundError(Exception):
 def find_chrome_binary() -> str | None:
     """Search platform-specific paths for Chrome/Chromium.
 
+    If CHROME_AGENT_BROWSER_PATH is set, that path is the only candidate:
+    a bad override is an error rather than a silent fallback to another
+    browser.
+
     Returns the path to the first found executable, or None.
     """
-    candidates = _platform_candidates()
-    for path in candidates:
+    for path in _search_paths():
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
     return None
+
+
+def _search_paths() -> list[str]:
+    """Return the paths find_chrome_binary() tries, in order."""
+    override = os.environ.get(BROWSER_PATH_ENV)
+    if override:
+        return [os.path.expanduser(override)]
+    return _platform_candidates()
 
 
 def _platform_candidates() -> list[str]:
@@ -111,7 +126,7 @@ async def launch_browser(
     # Phase 1: Find Chrome binary
     binary = find_chrome_binary()
     if binary is None:
-        raise BrowserNotFoundError(searched_paths=_platform_candidates())
+        raise BrowserNotFoundError(searched_paths=_search_paths())
 
     # Prune truly-dead instances first (fallback for browsers whose supervisor
     # was killed, and for headless instances which have no supervisor), and

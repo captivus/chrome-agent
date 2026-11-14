@@ -2,7 +2,7 @@
 
 Drive a real Chrome through the Chrome DevTools Protocol (CDP), from the terminal, for AI agents.
 
-Install: `uv tool install chrome-agent` (or `pip install chrome-agent`). Requires Google Chrome or Chromium. Runtime dependencies: `websockets`, plus `cryptography` and `keyring` for encrypted session snapshots; no Playwright, no browser downloads.
+Install: `uv tool install chrome-agent` (or `pip install chrome-agent`). Requires Google Chrome or Chromium; set `CHROME_AGENT_BROWSER_PATH` to a browser executable to use another Chromium-based browser. Runtime dependencies: `websockets`, plus `cryptography` and `keyring` for encrypted session snapshots; no Playwright, no browser downloads.
 
 ## What it is
 
