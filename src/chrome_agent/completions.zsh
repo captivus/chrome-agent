@@ -157,6 +157,7 @@ _chrome-agent() {
         '--replace-profile[Move an existing custom profile dir aside]' \
         '--start-display[Start the virtual X display (Xvfb) a snapshot ran on, if it is not running]' \
         '--desktop[Place windows on their saved desktops or this terminal'"'"'s]:mode:(saved terminal)' \
+        '(--all)--as[Restore one snapshot under this new instance name]:name:' \
         '*:snapshot:_chrome_agent_snapshots' && ret=0
       ;;
     snapshots)

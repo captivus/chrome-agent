@@ -233,6 +233,7 @@ chrome-agent help [<instance|glob>] [Domain | Domain.method]
 chrome-agent cleanup
 chrome-agent save <instance|glob>... | --all [--stop] [--as NAME] [--overwrite | --keep-both]
 chrome-agent restore [<name[@stamp]>...] | --all [--here] [--any-port] [--desktop saved|terminal] [--no-reattach] [--replace-profile] [--start-display]
+chrome-agent restore <name[@stamp]> --as NEW-NAME [...]
 chrome-agent snapshots [list [<glob>] | show <name[@stamp]> | rm <ref>... [--older-than AGE] [--yes] | export-key | import-key [--replace]]
 chrome-agent completions <zsh | instances | snapshots | methods | events> [<instance>]
 chrome-agent --version
@@ -247,7 +248,7 @@ chrome-agent --version
 | `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |
 | `cleanup` | Remove stale instances (dead browsers) and their session directories. |
 | `save` | Snapshot running instances -- profile, tabs, cookies, launch flags, desktop, observers -- so they can be restored later. See [Saving and Restoring Sessions](#saving-and-restoring-sessions). |
-| `restore` | Bring snapshots back as running instances under their original names and ports. |
+| `restore` | Bring snapshots back as running instances under their original names and ports (or one under a new name, with `--as`). |
 | `snapshots` | List, inspect (`show`) and delete (`rm`) saved snapshots; back up the encryption key. |
 | `completions` | `zsh` prints a shell completion; `instances`, `methods` and `events` print `name:description` lines for the registered instances and for the running browser's CDP protocol (what the completion reads as you type). |
 | `--version` | Print the installed chrome-agent version (`-V` alias) and exit. |
@@ -282,6 +283,7 @@ chrome-agent save 'mysite-*'                 # every matching instance
 chrome-agent restore mysite-01               # the latest version
 chrome-agent restore mysite-01@20260927T153000Z
 chrome-agent restore                         # everything launched from the current directory
+chrome-agent restore mysite-04 --as mysite-01  # bring it back under a new name
 chrome-agent snapshots                       # list: name@stamp, saved, tabs, size, port, origin dir
 chrome-agent snapshots show mysite-01        # tabs, observers, launch flags, desktop
 chrome-agent snapshots rm mysite-01          # every version (asks first; --yes when scripted)
@@ -293,6 +295,8 @@ chrome-agent snapshots rm --older-than 30d
 **Consistency.** `--stop` closes the browser cleanly before copying, so every database is complete on disk; use it before a reboot. A live save copies the files while Chrome runs without taking any lock (Chrome holds most of its SQLite databases exclusively, and a reader's lock on the rest could make Chrome's own writes fail), re-reading any file that changes mid-copy. Cookies are captured from the running browser either way, so they do not depend on what Chrome has flushed to disk.
 
 **Encryption.** Snapshots are credential bundles, so every snapshot file except a small plaintext summary (no URLs, no cookies) is encrypted with AES-256-GCM under a key kept in the OS keyring (GNOME Keyring / KWallet, macOS Keychain, Windows Credential Locker). The keyring unlocks at login, so restores need no prompt; a snapshot that ends up in a backup or a synced folder is unreadable without the key. **If the keyring is lost, the snapshots are unrecoverable** -- back the key up with `chrome-agent snapshots export-key`, and load it on another machine with `chrome-agent snapshots import-key < keyfile`. On a host with no keyring service, set `CHROME_AGENT_SNAPSHOT_KEY` to a base64 32-byte key. Snapshots live in `~/.local/share/chrome-agent/snapshots/` (mode 0700).
+
+**Renaming.** `save --as NAME` names the *snapshot*, not the session: the snapshot still records the instance name it was saved from, and a plain `restore` brings that name back. To bring a session back under a different instance name, use `restore <snapshot> --as NEW-NAME`. Everything else -- tabs, logins, port, windows -- comes back as saved, and `attach` observers that named the old instance are restarted against the new one. The snapshot is left unchanged (restoring it without `--as` still gives the old name); the next `save` of the renamed browser is filed under the new name. `--as` restores exactly one snapshot, so it cannot be combined with `--all` or a glob matching several.
 
 **Restoring safely.** `restore` refuses when the instance is already running (it was restored already, or the original never closed), when the saved port is taken by something else (`--any-port` picks a new one), or when a custom profile directory already exists (`--replace-profile` moves it aside rather than deleting it). It warns when the installed Chrome is older than the one that saved the snapshot, since an older Chrome may refuse a newer profile. Sites that bind a login to a device or IP, or expire it server-side, may still ask you to sign in again.
 

@@ -920,6 +920,24 @@ def _rewrite_target(argv: list[str], flag: str, spec: str, new_id: str) -> list[
     return out
 
 
+def _rename_subscription(sub: dict, old: str, new: str) -> dict:
+    """An observer record re-addressed from instance ``old`` to ``new``.
+
+    The attach command names its instance right after ``attach``; a shell
+    loop that re-attaches names it inside its script, as a whole word. An
+    observer addressed by a glob is left as it was.
+    """
+    argv = list(sub["argv"])
+    if len(argv) > 1 and argv[1] == old:
+        argv[1] = new
+    sub = {**sub, "argv": argv}
+    wrapper = sub.get("wrapper")
+    if wrapper is not None:
+        word = re.compile(rf"(?<![\w.-]){re.escape(old)}(?![\w.-])")
+        sub["wrapper"] = {**wrapper, "argv": [word.sub(new, part) for part in wrapper["argv"]]}
+    return sub
+
+
 def _restore_subscriptions(
     subscriptions: list[dict], id_map: dict[int, str], reattach: bool,
 ) -> list[dict]:
@@ -1092,12 +1110,15 @@ async def _restore_tabs(
 
 def check_restorable(
     version: Version, state: dict, any_port: bool, replace_profile: bool = False,
-    start_display: bool = False,
+    start_display: bool = False, instance_name: str | None = None,
 ) -> str | None:
-    """Why this version cannot be restored right now, or None."""
+    """Why this version cannot be restored right now, or None.
+
+    ``instance_name`` is the name it will run under, when not the saved one.
+    """
     from .registry import InstanceNotFoundError, _port_is_listening, lookup
 
-    instance = state["instance"]
+    instance = instance_name or state["instance"]
     try:
         if lookup(instance_name=instance).alive:
             return f"{instance} is already running (stop it first, or it was already restored)"
@@ -1131,15 +1152,21 @@ def restore_version(
     reattach: bool = True,
     replace_profile: bool = False,
     start_display: bool = False,
+    instance_name: str | None = None,
     key: bytes | None = None,
 ) -> dict:
-    """Bring a saved version back as a running instance. Returns a report."""
+    """Bring a saved version back as a running instance. Returns a report.
+
+    ``instance_name`` restores it under a new name (``restore --as``); the
+    snapshot itself is unchanged, and the next save files it under the new name.
+    """
     from .launcher import _SESSION_ROOT, launch_browser
     from .registry import _port_is_listening
 
     key = key or get_key(create=False)
     state = read_state(version, key)
-    problem = check_restorable(version, state, any_port, replace_profile, start_display)
+    name = instance_name or state["instance"]
+    problem = check_restorable(version, state, any_port, replace_profile, start_display, name)
     if problem:
         raise SnapshotError(f"cannot restore {version.ref}: {problem}")
 
@@ -1212,7 +1239,7 @@ def restore_version(
         extra_args=extra_args,
         window_border=launch.get("window_border", True),
         profile_dir=None if override else profile_dir,
-        instance_name=state["instance"],
+        instance_name=name,
         desktop=target_desktop,
         env_overrides=launch.get("env") or None,
     ))
@@ -1239,7 +1266,10 @@ def restore_version(
                 offset = 0 if saved is None or primary_desktop is None else saved - primary_desktop
                 desktops.move_window(p["x_window"], base + offset)
 
-    subscriptions = _restore_subscriptions(state.get("subscriptions", []), id_map, reattach)
+    subscriptions = state.get("subscriptions", [])
+    if name != state["instance"]:
+        subscriptions = [_rename_subscription(sub, state["instance"], name) for sub in subscriptions]
+    subscriptions = _restore_subscriptions(subscriptions, id_map, reattach)
 
     return {
         "snapshot": version.ref,

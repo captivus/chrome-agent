@@ -291,3 +291,82 @@ def test_virtual_display_blocks_restore_until_started(store, key):
     problem = snapshot.check_restorable(version, state, any_port=False)
     assert "virtual display :65000" in problem and "--start-display" in problem
     assert snapshot.check_restorable(version, state, any_port=False, start_display=True) is None
+
+
+# -- restore --as -------------------------------------------------------------
+
+def test_rename_blocks_restore_when_new_name_is_running(tmp_path, monkeypatch):
+    import chrome_agent.registry as registry
+    from chrome_agent.registry import InstanceNotFoundError
+
+    alive = {"new-01"}
+
+    def fake_lookup(instance_name):
+        if instance_name in alive:
+            return type("Info", (), {"alive": True})()
+        raise InstanceNotFoundError(instance_name, [])
+
+    monkeypatch.setattr(registry, "lookup", fake_lookup)
+    monkeypatch.setattr(registry, "_port_is_listening", lambda port: False)
+    version = snapshot.Version(name="old-04", stamp="20260901T000000Z", path="/nonexistent", info={})
+    state = {"instance": "old-04", "port": 65002, "launch": {}}
+
+    assert snapshot.check_restorable(version, state, any_port=False) is None
+    problem = snapshot.check_restorable(version, state, any_port=False, instance_name="new-01")
+    assert problem.startswith("new-01 is already running")
+    assert snapshot.check_restorable(version, state, any_port=False, instance_name="other-01") is None
+
+
+def test_rename_subscription_readdresses_attach_and_wrapper():
+    sub = {
+        "argv": ["attach", "site-04", "+Page.loadEventFired", "--target", "ABCD"],
+        "wrapper": {"argv": ["bash", "-c", "while :; do chrome-agent attach site-04 +X; done # site-04x site-040"],
+                    "cwd": "/w"},
+    }
+    renamed = snapshot._rename_subscription(sub, "site-04", "site-01")
+    assert renamed["argv"] == ["attach", "site-01", "+Page.loadEventFired", "--target", "ABCD"]
+    assert renamed["wrapper"]["argv"][2] == (
+        "while :; do chrome-agent attach site-01 +X; done # site-04x site-040"
+    )
+    assert renamed["wrapper"]["cwd"] == "/w"
+    assert sub["argv"][1] == "site-04"  # the saved record is not modified
+
+    glob = {"argv": ["attach", "site-*", "+X"], "wrapper": None}
+    assert snapshot._rename_subscription(glob, "site-04", "site-01")["argv"] == ["attach", "site-*", "+X"]
+
+
+def test_restore_as_refuses_several_snapshots(store, monkeypatch, capsys):
+    from chrome_agent import cli
+
+    _fake_version(store, "a-01", "20260901T000000Z")
+    _fake_version(store, "b-01", "20260901T000000Z")
+    for args in (["*-01", "--as", "x-01"], ["--all", "--as", "x-01"], ["--as", "x-01"], ["a-01", "--as"]):
+        with pytest.raises(SystemExit):
+            cli._run_restore(args=args)
+        assert "--as" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_restore_as_new_name(tmp_path, monkeypatch, key, store):
+    """restore --as brings the session back under the new name and same port;
+    the snapshot keeps its recorded name."""
+    import chrome_agent.registry as registry
+    from chrome_agent.launcher import launch_browser
+
+    monkeypatch.setattr(registry, "REGISTRY_PATH", str(tmp_path / "registry.json"))
+    workdir = tmp_path / "renamed"
+    workdir.mkdir()
+    await launch_browser(port_override=9335, headless=True, pin_to_desktop=False, working_dir=str(workdir))
+
+    plan = await asyncio.to_thread(snapshot.plan_save, "renamed-01")
+    version = await asyncio.to_thread(snapshot.save_instance, plan, stop=True)
+
+    report = await asyncio.to_thread(snapshot.restore_version, version, instance_name="renamed-07")
+    try:
+        assert report["name"] == "renamed-07"
+        assert report["port"] == 9335
+        registered = json.loads((tmp_path / "registry.json").read_text())
+        assert "renamed-07" in registered and "renamed-01" not in registered
+        assert snapshot.read_state(version)["instance"] == "renamed-01"
+    finally:
+        await asyncio.to_thread(registry.stop, instance_name="renamed-07")

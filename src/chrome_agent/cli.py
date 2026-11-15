@@ -263,6 +263,7 @@ def _print_static_usage() -> None:
     print("  cleanup                                                Remove stale instances")
     print("  save <instance>... | --all [--stop] [--as NAME]        Snapshot sessions (profile, tabs, cookies)")
     print("  restore [<name[@stamp]>...] [--all] [--any-port]       Bring saved sessions back")
+    print("  restore <name[@stamp]> --as NEW                        Bring one back under a new name")
     print("  snapshots [list|show|rm|export-key|import-key]         Manage saved snapshots")
     print("  guide [--path]                                         Print this tool's agent guide")
     print("  completions <zsh|instances|methods|events> [<instance>]  Shell completion and its data")
@@ -744,6 +745,7 @@ def _run_restore(args: list[str]) -> None:
     restore_all = here = any_port = replace_profile = start_display = False
     reattach = True
     desktop_mode = None
+    new_name = None
     refs = []
     i = 0
     while i < len(args):
@@ -763,12 +765,22 @@ def _run_restore(args: list[str]) -> None:
         elif arg == "--desktop" and i + 1 < len(args) and args[i + 1] in ("saved", "terminal"):
             desktop_mode = args[i + 1]
             i += 1
+        elif arg == "--as":
+            if i + 1 >= len(args) or args[i + 1].startswith("-") or not args[i + 1].strip():
+                print("Error: --as needs the name to restore the session under", file=sys.stderr)
+                sys.exit(1)
+            new_name = args[i + 1]
+            i += 1
         elif arg.startswith("-"):
             print(f"Error: unknown restore option: {arg}", file=sys.stderr)
             sys.exit(1)
         else:
             refs.append(arg)
         i += 1
+
+    if new_name and (restore_all or not refs):
+        print("Error: --as renames a single session; name the snapshot to restore", file=sys.stderr)
+        sys.exit(1)
 
     cwd = os.getcwd()
     try:
@@ -796,6 +808,10 @@ def _run_restore(args: list[str]) -> None:
             desktop_mode = desktop_mode or "terminal"
         if here:
             versions = [v for v in versions if v.info.get("origin_dir") == cwd]
+        if new_name and len(versions) > 1:
+            print(f"Error: --as renames a single session, but {len(versions)} snapshots matched: "
+                  f"{', '.join(v.ref for v in versions)}", file=sys.stderr)
+            sys.exit(1)
     except SnapshotError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -816,6 +832,7 @@ def _run_restore(args: list[str]) -> None:
             report = restore_version(
                 version, any_port=any_port, desktop_mode=desktop_mode, reattach=reattach,
                 replace_profile=replace_profile, start_display=start_display,
+                instance_name=new_name,
             )
         except (SnapshotError, SnapshotKeyError, RuntimeError, TimeoutError, ConnectionError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
