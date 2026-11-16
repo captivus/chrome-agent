@@ -318,3 +318,22 @@ def test_format_status_text_separates_windows():
     ]
     entry = json.loads(format_status_json([InstanceStatus(name="x-01", port=9222, alive=True, targets=[c])]))[0]
     assert (entry["targets"][0]["window"], entry["targets"][0]["position"]) == (2, 1)
+
+
+def test_single_tab_is_window_1_position_1_without_a_lookup(tmp_path, monkeypatch):
+    from chrome_agent import instance_status
+
+    reg_path = str(tmp_path / "registry.json")
+    _write_registry(reg_path, {"solo-01": {"port": 9222, "pid": os.getpid()}})
+    monkeypatch.setattr("chrome_agent.registry._instance_is_alive", lambda *a, **k: True)
+    monkeypatch.setattr("chrome_agent.desktop.browser_placements", lambda ports: {})
+    monkeypatch.setattr(instance_status, "query_targets", lambda *, port: [_target("AAAA", 1)])
+
+    def no_lookup(targets_by_port):
+        assert not any(len(t) > 1 for t in targets_by_port.values())
+        return set()
+
+    monkeypatch.setattr(instance_status, "order_targets", no_lookup)
+    status = get_instance_status(registry_path=reg_path, order_tabs=True)[0]
+    assert status.tab_order
+    assert (status.targets[0].window, status.targets[0].position) == (1, 1)

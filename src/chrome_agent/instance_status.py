@@ -178,6 +178,9 @@ def get_instance_status(
         ordered = order_targets({s.port: s.targets for s in results if s.alive})
         for status in results:
             status.tab_order = status.port in ordered or len(status.targets) <= 1
+            if len(status.targets) == 1:
+                # A lone tab needs no lookup: it is the first tab of the only window.
+                status.targets[0].window, status.targets[0].position = 1, 1
     return results
 
 
