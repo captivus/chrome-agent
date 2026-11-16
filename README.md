@@ -12,35 +12,35 @@ Multiple agents and humans can share the same browser simultaneously, each with 
 <h3 align="center">Used by engineers at</h3>
 
 <p align="center">
-  <img src="docs/logos/microsoft.svg" alt="Microsoft" height="28">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/microsoft.svg" alt="Microsoft" height="28">
   &nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/johns-hopkins-university.svg" alt="Johns Hopkins University" height="30">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/johns-hopkins-university.svg" alt="Johns Hopkins University" height="30">
   &nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/bosch.svg" alt="Bosch" height="28">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/bosch.svg" alt="Bosch" height="28">
   &nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/texas-instruments.svg" alt="Texas Instruments" height="30">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/texas-instruments.svg" alt="Texas Instruments" height="30">
   &nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/deutsche-telekom.svg" alt="Deutsche Telekom" height="28">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/deutsche-telekom.svg" alt="Deutsche Telekom" height="28">
   <br><br>
-  <img src="docs/logos/texas-am-university.svg" alt="Texas A&amp;M University" height="30">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/texas-am-university.svg" alt="Texas A&amp;M University" height="30">
   &nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/red-hat.svg" alt="Red Hat" height="28">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/red-hat.svg" alt="Red Hat" height="28">
   &nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/sysco.svg" alt="Sysco" height="28">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/sysco.svg" alt="Sysco" height="28">
   &nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/databricks.svg" alt="Databricks" height="28">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/databricks.svg" alt="Databricks" height="28">
   &nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/grainger.svg" alt="Grainger" height="28">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/grainger.svg" alt="Grainger" height="28">
   <br><br>
-  <img src="docs/logos/posthog.svg" alt="PostHog" height="28">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/posthog.svg" alt="PostHog" height="28">
   &nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/nextiva.svg" alt="Nextiva" height="28">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/nextiva.svg" alt="Nextiva" height="28">
   &nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/jusbrasil.svg" alt="Jusbrasil" height="28">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/jusbrasil.svg" alt="Jusbrasil" height="28">
   &nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/parcellab.svg" alt="parcelLab" height="28">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/parcellab.svg" alt="parcelLab" height="28">
   &nbsp;&nbsp;&nbsp;
-  <img src="docs/logos/zuru-tech.svg" alt="ZURU Tech" height="28">
+  <img src="https://raw.githubusercontent.com/captivus/chrome-agent/main/docs/logos/zuru-tech.svg" alt="ZURU Tech" height="28">
 </p>
 
 ## Why this exists
@@ -387,7 +387,7 @@ Derived this way, the version and platform always match the installed Chrome; a 
 
 ## For AI Agents
 
-See [AGENTS.md](AGENTS.md) for concise agent instructions (the standard for AI agent tool documentation). It covers the mental model (address an instance, send any CDP command), the sense ⇄ act loop, the two channels, the command reference, and gotchas.
+See [AGENTS.md](https://github.com/captivus/chrome-agent/blob/main/AGENTS.md) for concise agent instructions (the standard for AI agent tool documentation). It covers the mental model (address an instance, send any CDP command), the sense ⇄ act loop, the two channels, the command reference, and gotchas.
 
 **The guide ships with the package**, so an agent can reach it from any install without a checkout:
 
@@ -410,16 +410,16 @@ ln -s "$(chrome-agent guide --path)" AGENTS-chrome-agent.md
 
 Multiple participants -- humans, AI agents, or both -- can share a browser simultaneously. Each participant creates an independent CDP session with isolated event subscriptions. One agent enabling Network observation does not flood another agent's event stream.
 
-See [docs/collaboration-guide.md](docs/collaboration-guide.md) for:
+See [docs/collaboration-guide.md](https://github.com/captivus/chrome-agent/blob/main/docs/collaboration-guide.md) for:
 - Human-agent collaboration patterns (you browse, agent watches)
 - Agent-driven workflows (agent drives, you supervise)
 - Multi-agent setups with isolated event subscriptions
 - The observation gap (what CDP sees vs what it misses)
 - Full interaction observation via the binding bridge
 
-For real-time observation using Claude Code's Monitor tool, see [AGENTS.md](AGENTS.md#reacting-to-events-as-they-happen-monitor) for the practical usage path (subscribing, discovering events via `help`, the gotchas), and [docs/monitor-integration.md](docs/monitor-integration.md) for the architecture and usage patterns in depth.
+For real-time observation using Claude Code's Monitor tool, see [AGENTS.md](AGENTS.md#reacting-to-events-as-they-happen-monitor) for the practical usage path (subscribing, discovering events via `help`, the gotchas), and [docs/monitor-integration.md](https://github.com/captivus/chrome-agent/blob/main/docs/monitor-integration.md) for the architecture and usage patterns in depth.
 
-Monitor is specific to Claude Code. Agents on other harnesses can still be event-driven rather than falling back to fixed sleeps -- background `attach` to a file once, then block on [`scripts/cdp-wait.py`](scripts/cdp-wait.py), which returns the instant a matching event lands and also catches events that fired before the wait began. See [docs/event-driven-without-monitor.md](docs/event-driven-without-monitor.md).
+Monitor is specific to Claude Code. Agents on other harnesses can still be event-driven rather than falling back to fixed sleeps -- background `attach` to a file once, then block on [`scripts/cdp-wait.py`](https://github.com/captivus/chrome-agent/blob/main/scripts/cdp-wait.py), which returns the instant a matching event lands and also catches events that fired before the wait began. See [docs/event-driven-without-monitor.md](https://github.com/captivus/chrome-agent/blob/main/docs/event-driven-without-monitor.md).
 
 ## Requirements
 
