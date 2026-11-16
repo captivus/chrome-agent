@@ -608,3 +608,79 @@ def test_attach_exits_when_instance_retired(tmp_path):
             pass
         import shutil
         shutil.rmtree(result.user_data_dir, ignore_errors=True)
+
+
+# -- tab numbers follow on-screen order ----------------------------------------
+
+class _FakeBrowser:
+    """Just enough of a browser-level CDPClient for target resolution."""
+
+    def __init__(self, pages):
+        self.pages = pages
+
+    async def send(self, method, params=None, session_id=None):
+        assert method == "Target.getTargets"
+        return {"targetInfos": [dict(p, type="page") for p in self.pages]}
+
+
+_PAGES = [
+    {"targetId": "AAAA0000", "url": "https://gmail.example/", "title": "Gmail"},
+    {"targetId": "BBBB0000", "url": "https://stripe.example/a", "title": "Stripe A"},
+    {"targetId": "CCCC0000", "url": "https://stripe.example/b", "title": "Stripe B"},
+]
+# On screen: Stripe B, Gmail, Stripe A
+_SCREEN = {"CCCC0000": (1, 0), "AAAA0000": (1, 1), "BBBB0000": (1, 2)}
+
+
+@pytest.fixture
+def order_reads(monkeypatch):
+    from chrome_agent import taborder
+
+    calls = []
+
+    async def fake_positions(cdp):
+        calls.append(1)
+        return _SCREEN
+
+    monkeypatch.setattr(taborder, "tab_positions", fake_positions)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_index_resolves_by_on_screen_position(order_reads):
+    cdp = _FakeBrowser(_PAGES)
+    assert await attach_mod.resolve_page_target(cdp, "1", None) == "CCCC0000"
+    assert await attach_mod.resolve_page_target(cdp, "2", "index") == "AAAA0000"
+    assert order_reads
+
+
+@pytest.mark.asyncio
+async def test_id_and_url_specs_skip_reading_the_order(order_reads):
+    cdp = _FakeBrowser(_PAGES)
+    assert await attach_mod.resolve_page_target(cdp, "BBBB", None) == "BBBB0000"
+    assert await attach_mod.resolve_page_target(cdp, "gmail", "url") == "AAAA0000"
+    assert not order_reads
+
+
+@pytest.mark.asyncio
+async def test_errors_list_tabs_with_their_on_screen_numbers(order_reads):
+    cdp = _FakeBrowser(_PAGES)
+    with pytest.raises(AmbiguousTargetError) as exc:
+        await attach_mod.resolve_page_target(cdp, "stripe", "url")
+    # each tab keeps its own number, not its place among the matches
+    assert "[3] BBBB0000" in str(exc.value) and "[1] CCCC0000" in str(exc.value)
+    with pytest.raises(TargetNotFoundError) as exc:
+        await attach_mod.resolve_page_target(cdp, "FFFF", "id")
+    assert str(exc.value).splitlines()[2].startswith("  [1] CCCC0000")
+
+
+@pytest.mark.asyncio
+async def test_index_falls_back_to_id_order_when_order_unreadable(monkeypatch):
+    from chrome_agent import taborder
+
+    async def refuse(cdp):
+        return None
+
+    monkeypatch.setattr(taborder, "tab_positions", refuse)
+    cdp = _FakeBrowser(list(reversed(_PAGES)))
+    assert await attach_mod.resolve_page_target(cdp, "1", None) == "AAAA0000"

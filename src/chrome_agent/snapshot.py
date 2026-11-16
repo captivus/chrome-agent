@@ -398,6 +398,7 @@ def _strip_marker(title: str, name: str) -> str:
 async def _capture_live(port: int, name: str) -> dict:
     """Windows, tabs (in window order, with the active one marked) and cookies."""
     from .cdp_client import CDPClient, get_ws_url
+    from .taborder import sort_key, tab_positions
 
     async with CDPClient(ws_url=get_ws_url(port=port, target_type="browser")) as cdp:
         targets = (await cdp.send(method="Target.getTargets")).get("targetInfos", [])
@@ -430,9 +431,17 @@ async def _capture_live(port: int, name: str) -> dict:
                 "active": active,
             })
         cookies = (await cdp.send(method="Storage.getCookies")).get("cookies", [])
+        # CDP lists pages in no particular order; restore reopens tabs in the
+        # order saved here, so put each window's tabs in their on-screen order.
+        positions = await tab_positions(cdp)
+        for window in windows.values():
+            window["tabs"].sort(key=lambda tab: sort_key(positions, tab["targetId"]))
 
     ordered = [windows[k] for k in sorted(windows)]
-    return {"windows": ordered, "cookies": [_cookie_param(c) for c in cookies]}
+    return {
+        "windows": ordered, "cookies": [_cookie_param(c) for c in cookies],
+        "tab_order": bool(positions),
+    }
 
 
 async def _is_visible(cdp, target_id: str) -> bool:
@@ -506,7 +515,7 @@ def _is_attach_argv(argv: list[str]) -> int | None:
     return None
 
 
-def _capture_subscriptions(name: str, windows: list[dict]) -> list[dict]:
+def _capture_subscriptions(name: str, windows: list[dict], tab_order: bool = False) -> list[dict]:
     """Every `chrome-agent attach` process observing this instance.
 
     Each is recorded with its events, its tab (as a position in the saved tab
@@ -517,7 +526,10 @@ def _capture_subscriptions(name: str, windows: list[dict]) -> list[dict]:
     from .registry import is_pattern
 
     tabs = [tab for window in windows for tab in window["tabs"]]
-    by_sorted_id = sorted(tabs, key=lambda t: t["targetId"])
+    # How --target-index numbers tabs (taborder.numbered_pages): on-screen
+    # order when it was readable -- the order ``tabs`` is already in -- and
+    # by target id otherwise.
+    by_number = tabs if tab_order else sorted(tabs, key=lambda t: t["targetId"])
     found, seen_wrappers = [], set()
     me = os.getpid()
     for entry in os.listdir("/proc"):
@@ -539,8 +551,8 @@ def _capture_subscriptions(name: str, windows: list[dict]) -> list[dict]:
                 flag, spec = arg, attach_argv[j + 1]
         if flag in ("--target-index",) or (flag == "--target" and spec.isdigit() and len(spec) < 8):
             k = int(spec) - 1
-            if 0 <= k < len(by_sorted_id):
-                tab_position = tabs.index(by_sorted_id[k])
+            if 0 <= k < len(by_number):
+                tab_position = tabs.index(by_number[k])
         elif flag in ("--target-id", "--target"):
             hits = [t for t in tabs if t["targetId"].upper().startswith(spec.upper())]
             if len(hits) == 1:
@@ -791,7 +803,7 @@ def save_instance(
     live = asyncio.run(_capture_live(plan.port, plan.name))
     on_virtual = "virtual_display" in plan.launch
     desktop_map = {} if on_virtual else _capture_desktops(plan.pid, live["windows"])
-    subscriptions = _capture_subscriptions(plan.name, live["windows"])
+    subscriptions = _capture_subscriptions(plan.name, live["windows"], live["tab_order"])
     for window in live["windows"]:
         window.pop("_title", None)
     primary = desktop_map.get(str(live["windows"][0]["windowId"])) if live["windows"] else None

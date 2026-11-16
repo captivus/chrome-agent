@@ -85,7 +85,7 @@ class AmbiguousTargetError(Exception):
     def __init__(self, targets: list[dict]):
         self.targets = targets
         lines = [
-            f"  [{i+1}] {t['targetId'][:8]}  {t['url'][:60]}  \"{t.get('title', '')}\""
+            f"  [{t.get('index', i + 1)}] {t['targetId'][:8]}  {t['url'][:60]}  \"{t.get('title', '')}\""
             for i, t in enumerate(targets)
         ]
         listing = "\n".join(lines)
@@ -97,7 +97,7 @@ class TargetNotFoundError(Exception):
     def __init__(self, message: str, targets: list[dict]):
         self.targets = targets
         lines = [
-            f"  [{i+1}] {t['targetId'][:8]}  {t['url'][:60]}  \"{t.get('title', '')}\""
+            f"  [{t.get('index', i + 1)}] {t['targetId'][:8]}  {t['url'][:60]}  \"{t.get('title', '')}\""
             for i, t in enumerate(targets)
         ]
         listing = "\n".join(lines)
@@ -224,6 +224,40 @@ def resolve_target(
     raise ValueError(f"Unknown target_by: {target_by}")
 
 
+def _uses_numbers(target_spec: str | None, target_by: str | None) -> bool:
+    """Whether resolving this spec depends on tab numbers (so on tab order)."""
+    if target_spec is None:
+        return True  # several tabs: the error lists them, numbered
+    if target_by == "index":
+        return True
+    return target_by in (None, "auto") and _reads_as_index(target_spec)
+
+
+async def resolve_page_target(cdp, target_spec: str | None, target_by: str | None) -> str:
+    """Resolve a target spec against a live browser; returns the targetId.
+
+    Tab numbers follow on-screen order (see taborder.numbered_pages). Reading
+    that order costs a moment, so a spec matched by id or URL skips it -- unless
+    it fails, when the order is read after all so the error lists the tabs
+    with the numbers ``status`` shows.
+
+    Raises NoPageError, AmbiguousTargetError or TargetNotFoundError.
+    """
+    from .taborder import numbered_pages
+
+    ordered = _uses_numbers(target_spec, target_by)
+    pages, _ = await numbered_pages(cdp, ordered=ordered)
+    if not pages:
+        raise NoPageError("No page targets in browser")
+    try:
+        return resolve_target(page_targets=pages, target_spec=target_spec, target_by=target_by)
+    except (AmbiguousTargetError, TargetNotFoundError):
+        if ordered:
+            raise
+    pages, _ = await numbered_pages(cdp, ordered=True)
+    return resolve_target(page_targets=pages, target_spec=target_spec, target_by=target_by)
+
+
 async def run_attach(
     instance_name: str,
     subscriptions: list[str] | None = None,
@@ -259,21 +293,10 @@ async def run_attach(
 
     try:
         # Phase 3: Resolve page target
-        targets_result = await cdp.send(method="Target.getTargets")
-        page_targets = sorted(
-            (t for t in targets_result.get("targetInfos", [])
-             if t.get("type") == "page"),
-            key=lambda t: t.get("targetId", ""),
-        )
-
-        if not page_targets:
-            raise NoPageError(f"No page targets in instance '{instance_name}'")
-
-        target_id = resolve_target(
-            page_targets=page_targets,
-            target_spec=target_spec,
-            target_by=target_by,
-        )
+        try:
+            target_id = await resolve_page_target(cdp, target_spec, target_by)
+        except NoPageError:
+            raise NoPageError(f"No page targets in instance '{instance_name}'") from None
 
         # Phase 4: Create isolated CDP session
         try:

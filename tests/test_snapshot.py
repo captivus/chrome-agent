@@ -370,3 +370,53 @@ async def test_restore_as_new_name(tmp_path, monkeypatch, key, store):
         assert snapshot.read_state(version)["instance"] == "renamed-01"
     finally:
         await asyncio.to_thread(registry.stop, instance_name="renamed-07")
+
+
+@pytest.mark.asyncio
+async def test_tab_order_survives_save_and_restore(tmp_path, monkeypatch, key, store):
+    """CDP lists pages in an order of its own; save records the real tab order
+    (read through the helper extension) and restore reopens tabs in it."""
+    import chrome_agent.registry as registry
+    from chrome_agent.cdp_client import CDPClient, get_ws_url
+    from chrome_agent.launcher import launch_browser
+    from chrome_agent.taborder import tab_positions
+
+    monkeypatch.setattr(registry, "REGISTRY_PATH", str(tmp_path / "registry.json"))
+    workdir = tmp_path / "ordered"
+    workdir.mkdir()
+    pages = {}
+    for n in "BCDE":
+        pages[n] = tmp_path / f"{n}.html"
+        pages[n].write_text(f"<title>Tab {n}</title>")
+    await launch_browser(port_override=9336, headless=True, pin_to_desktop=False, working_dir=str(workdir))
+
+    async def strip_order():
+        async with CDPClient(ws_url=get_ws_url(port=9336, target_type="browser")) as cdp:
+            positions = await tab_positions(cdp)
+            urls = {t["targetId"]: t["url"] for t in (await cdp.send(method="Target.getTargets"))["targetInfos"]}
+        assert positions, "the helper extension could not read the tab order"
+        return [urls[t].rsplit("/", 1)[-1] for t, _ in sorted(positions.items(), key=lambda kv: kv[1])]
+
+    async with CDPClient(ws_url=get_ws_url(port=9336, target_type="browser")) as cdp:
+        for n in "BCDE":
+            await cdp.send(method="Target.createTarget", params={"url": f"file://{pages[n]}"})
+    await asyncio.sleep(1)
+    before = await strip_order()
+
+    plan = await asyncio.to_thread(snapshot.plan_save, "ordered-01")
+    version = await asyncio.to_thread(snapshot.save_instance, plan, stop=True)
+    saved = [tab["url"].rsplit("/", 1)[-1] for w in snapshot.read_state(version)["windows"] for tab in w["tabs"]]
+    assert saved == before
+
+    await asyncio.to_thread(snapshot.restore_version, version)
+    try:
+        await asyncio.sleep(1)
+        assert await strip_order() == before
+        # --target-index numbers the same way: tab N is the Nth tab on screen
+        from chrome_agent.attach import resolve_page_target
+        async with CDPClient(ws_url=get_ws_url(port=9336, target_type="browser")) as cdp:
+            urls = {t["targetId"]: t["url"] for t in (await cdp.send(method="Target.getTargets"))["targetInfos"]}
+            for n, name in enumerate(before, start=1):
+                assert urls[await resolve_page_target(cdp, str(n), None)].endswith(name)
+    finally:
+        await asyncio.to_thread(registry.stop, instance_name="ordered-01")

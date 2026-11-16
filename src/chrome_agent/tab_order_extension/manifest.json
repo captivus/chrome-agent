@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "chrome-agent tab order",
+  "description": "Loaded by chrome-agent for a moment to read the order of tabs, then removed.",
+  "version": "1",
+  "permissions": ["tabs", "debugger"],
+  "background": {"service_worker": "worker.js"}
+}

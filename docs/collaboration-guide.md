@@ -40,12 +40,16 @@ chrome-agent status
     "name": "myproject-01",
     "port": 9222,
     "alive": true,
+    "tab_order": true,
     "targets": [
       {
         "id": "A1B2C3D4",
+        "full_id": "A1B2C3D4E5F60718293A4B5C6D7E8F90",
         "index": 1,
         "url": "https://www.google.com",
-        "title": "Google"
+        "title": "Google",
+        "window": 1,
+        "position": 1
       }
     ]
   }
@@ -565,7 +569,7 @@ Invalid commands return a `CDPError` with Chrome's error code and message. The c
 
 - **Event isolation scales.** Each attach session has isolated subscriptions. Five agents can each subscribe to different events on the same browser without interfering.
 
-- **Target specifiers for multi-tab browsers.** Use `--target <id-or-index>` or `--url <substring>` on attach and one-shot commands to pick a specific tab. `--target` reads a run of fewer than 8 digits as the index and anything else as a target-id prefix; `--target-id` / `--target-index` remove the inference.
+- **Target specifiers for multi-tab browsers.** Use `--target <id-or-index>` or `--url <substring>` on attach and one-shot commands to pick a specific tab. `--target` reads a run of fewer than 8 digits as the tab number -- its on-screen position, left to right, as `status` lists it -- and anything else as a target-id prefix; `--target-id` / `--target-index` remove the inference. A number shifts when tabs are opened, closed or dragged, so use the id for anything that must hit the same tab.
 
 - **The console is a communication channel.** `console.log` from the agent. Human sees it in DevTools. Other agents see it via `Runtime.consoleAPICalled`.
 

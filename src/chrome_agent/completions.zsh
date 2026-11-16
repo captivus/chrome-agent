@@ -85,9 +85,9 @@ _chrome-agent() {
   # than one is given -- so each excludes the other three.
   local -a target_specs
   target_specs=(
-    '(--target-id --target-index --url)--target[Tab index when fewer than 8 digits, else a target-id prefix]:spec:'
+    '(--target-id --target-index --url)--target[Tab number (on-screen position) when fewer than 8 digits, else a target-id prefix]:spec:'
     '(--target --target-index --url)--target-id[Target-id prefix, as shown by status]:id:'
-    '(--target --target-id --url)--target-index[1-based tab index, as shown by status]:index:'
+    '(--target --target-id --url)--target-index[Tab number: its on-screen position, as shown by status]:index:'
     '(--target --target-id --target-index)--url[The tab whose URL contains this substring]:substring:'
   )
 

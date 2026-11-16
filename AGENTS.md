@@ -195,7 +195,7 @@ chrome-agent <instance|glob> Domain.method '{"param": "value"}'
 ```
 
 - `launch` → `{"name","port","pid","browser_version"}`
-- `status` → `[{"name","port","alive","targets":[{"id","full_id","index","url","title"}]}]` — `index` is what `--target N` selects; `id` (the 8-char short form) and `full_id` both work as `--target`/`--target-id` specs
+- `status` → `[{"name","port","alive","targets":[{"id","full_id","index","url","title","window","position"}]}]` — targets are listed in on-screen tab order and `index` numbers them 1..N in that order, left to right, window by window — it is what `--target N` selects (`window` 1 = first window, `position` 1 = leftmost tab in it; `tab_order` false means the order could not be read and tabs are numbered by target id instead); `id` (the 8-char short form) and `full_id` both work as `--target`/`--target-id` specs
 - `Page.navigate` → `{"frameId","loaderId","isDownload"}`
 - `Runtime.evaluate` (`returnByValue:true`) → `{"result":{"type":"string","value":"..."}}` — read **`result.value`** (the value sits under the `result` key)
 - `Page.captureScreenshot` → `{"data":"<base64 png>"}` — bytes are at `data`, **not** `result.data`; decode with `… | python3 -c "import sys,json,base64; open('/tmp/s.png','wb').write(base64.b64decode(json.load(sys.stdin)['data']))"` — then view `/tmp/s.png` to actually see the render.
@@ -210,13 +210,13 @@ chrome-agent mysite-01 --target-index 2 Runtime.evaluate '{...}'  # index, no in
 chrome-agent mysite-01 --target-id 65602889 Runtime.evaluate '{...}' # id, no inference
 ```
 
-A one-shot against multiple tabs without a specifier is an error that lists them. **Index gotcha:** `--target N` indices are sorted by stable target id, **not** tab creation/visual order — opening a tab can renumber the others. Prefer `--url` or an id prefix for stability.
+A one-shot against multiple tabs without a specifier is an error that lists them. **Tab numbers are on-screen positions:** `--target 3` is the third tab from the left (counting on through later windows), exactly as `status` numbers it. CDP has no tab order, so resolving a number briefly loads a helper extension (~0.1 s); ids and `--url` skip that. **A number is not a stable handle:** it shifts whenever a tab is opened, closed or dragged — including by the human sharing the browser between your `status` and your next command. Use a number for a quick look; use the `id` (or `--url`) for anything that matters, and always for closing a tab.
 
 **Bare `--target` reads its spec by length:** a run of fewer than 8 digits is a tab index; anything else is a target-id prefix, matched case-insensitively so a lower-cased id works. So the `id` field from `status` is usable directly — including the ~1-in-43 target id whose 8-char short form is all digits (ids are uppercase hex, so `(10/16)**8` of short ids contain no letter; those used to be read as an out-of-range index and rejected, in an error that listed the very tab it could not find).
 
 Length is the discriminator, **not** range: a mistyped `--target 5` against 3 tabs stays a plain out-of-range error rather than silently resolving to whichever tab's id happens to start with `5`. Each failure names the flag that forces the other reading.
 
-**`--target-id`, `--target-index` and `--url` skip the inference entirely.** Worth it for `stop --target`, which closes a tab, and required for an **all-digit** id prefix shorter than 8 characters — a short prefix containing any letter (`--target 956F`) is unambiguous and needs no flag.
+**`--target-id`, `--target-index` and `--url` skip the inference entirely.** Use `stop --target-id` to close a tab (an id cannot point at a different tab later); `--target-id` is also required for an **all-digit** id prefix shorter than 8 characters — a short prefix containing any letter (`--target 956F`) is unambiguous and needs no flag.
 
 ## Selecting instances by pattern
 
