@@ -51,6 +51,18 @@ class InstanceStatus:
     # Whether targets are in on-screen order and numbered by it (see
     # order_targets); False means numbered by target id, the fallback.
     tab_order: bool = False
+    # The agent session the browser belongs to (see owner.py); None means it
+    # is kept -- it runs until stopped.
+    owner: dict | None = None
+    # Whether that owner still runs: True, False (an orphan), or None when
+    # it cannot be told from here.
+    owner_alive: bool | None = None
+    # Whether the owner is the session asking (the caller's own browser).
+    yours: bool = False
+
+    @property
+    def orphaned(self) -> bool:
+        return self.alive and self.owner is not None and self.owner_alive is False
 
 
 def query_targets(*, port: int) -> list[PageTarget]:
@@ -156,8 +168,10 @@ def get_instance_status(
         instances = enumerate_instances(registry_path=registry_path)
 
     from .desktop import browser_placements
+    from .owner import find_owner, owner_alive, same_owner
 
     placements = browser_placements([info.port for info in instances if info.alive])
+    caller = find_owner()
 
     results = []
     for info in instances:
@@ -172,6 +186,9 @@ def get_instance_status(
             alive=info.alive,
             targets=targets,
             placement=placements.get(info.port) if info.alive else None,
+            owner=info.owner,
+            owner_alive=owner_alive(info.owner) if info.owner else None,
+            yours=same_owner(info.owner, caller),
         ))
 
     if order_tabs:
@@ -200,16 +217,50 @@ def placement_label(placement: dict | None) -> str | None:
     return None
 
 
+def display_label(placement: dict | None) -> str | None:
+    """Where a live browser is, for the status header: "desktop :1",
+    "Xvfb :100" or "headless"."""
+    if not placement:
+        return None
+    if placement["kind"] == "desktop":
+        return f"desktop {placement['display']}"
+    return placement_label(placement)
+
+
+def owner_label(status: InstanceStatus) -> str:
+    """Who a live browser belongs to, for the status header."""
+    from .owner import describe
+
+    if status.owner is None:
+        return "kept"
+    who = f"owner {describe(status.owner)}"
+    if status.owner_alive is False:
+        return f"ORPHAN: {who} has exited"
+    if status.yours:
+        return f"{who} (yours)"
+    if status.owner_alive is None:
+        return f"{who} (cannot check from here)"
+    return who
+
+
 def format_status_text(statuses: list[InstanceStatus]) -> str:
-    """Format instance status as human-readable text."""
+    """Format instance status as human-readable text.
+
+    Each header names where the browser is (``[desktop :1]``, ``[Xvfb :100]``,
+    ``[headless]``) and who it belongs to: an agent session that owns it,
+    ``kept`` for one that runs until stopped, or ``ORPHAN`` when its owner
+    has exited.
+    """
     lines = []
     for status in statuses:
         header = f"{status.name}  port {status.port}"
         if not status.alive:
             header += "  DEAD"
-        label = placement_label(status.placement)
+        label = display_label(status.placement)
         if label:
             header += f"  [{label}]"
+        if status.alive:
+            header += f"  {owner_label(status)}"
         lines.append(header)
 
         if status.alive and len(status.targets) > 1 and not status.tab_order:
@@ -228,6 +279,15 @@ def format_status_text(statuses: list[InstanceStatus]) -> str:
     if lines and lines[-1] == "":
         lines.pop()
 
+    orphans = [s.name for s in statuses if s.orphaned]
+    if orphans:
+        lines.append("")
+        lines.append(
+            f"{len(orphans)} orphaned instance(s) -- launched by an agent session "
+            f"that has exited: {', '.join(orphans)}"
+        )
+        lines.append("Stop them with: chrome-agent stop --orphans")
+
     return "\n".join(lines)
 
 
@@ -240,6 +300,11 @@ def format_status_json(statuses: list[InstanceStatus]) -> str:
             "port": status.port,
             "alive": status.alive,
             "display": status.placement,
+            "owner": None if status.owner is None else {
+                **{k: v for k, v in status.owner.items() if k in ("kind", "pid", "session")},
+                "alive": status.owner_alive,
+                "yours": status.yours,
+            },
             "tab_order": status.tab_order,
             "targets": [
                 {

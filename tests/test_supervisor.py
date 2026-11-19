@@ -107,7 +107,7 @@ async def test_supervisor_reconnects_on_transient_drop_not_retire(monkeypatch):
     """
     supervise_calls = {"n": 0}
 
-    async def fake_supervise(*, port, draw_border, source):
+    async def fake_supervise(*, port, draw_border, source, **_):
         # Simulate the long-lived CDP connection dropping immediately.
         supervise_calls["n"] += 1
 

@@ -10,7 +10,13 @@ connection open for the browser's lifetime. It does two jobs:
    Because chrome-agent has no daemon, this long-lived connection is the only
    thing that can observe a close as it happens.
 
-2. **Window border** (optional) -- while the browser is alive, mark every tab
+2. **Owner** -- an instance launched from an agent session records that
+   session as its owner (see owner.py). Every ``OWNER_CHECK_INTERVAL``
+   seconds the supervisor re-reads the owner from the registry (so ``keep``
+   takes effect at once) and, once two checks in a row find the owner gone,
+   stops the browser. A browser without an owner is never stopped here.
+
+3. **Window border** (optional) -- while the browser is alive, mark every tab
    (current and future) with a colored border + corner badge and a title prefix
    so an agent-driven window is easy to tell apart from the user's own Chrome.
    ``Page.addScriptToEvaluateOnNewDocument`` re-runs the overlay on every new
@@ -152,8 +158,48 @@ async def _release_target(cdp: CDPClient, session_id: str) -> None:
         pass  # target may already be gone or not waiting
 
 
+# Seconds between owner checks; two consecutive "gone" verdicts stop the
+# browser, so it outlives its owner by at most about twice this.
+OWNER_CHECK_INTERVAL = 5.0
+
+
+def owner_has_gone(name: str, registry_path: str | None) -> bool:
+    """Whether the instance has an owner and that owner has certainly exited.
+
+    False whenever there is no owner (the user's own browser, or one released
+    with ``keep``), the registry cannot be read, or the answer is uncertain --
+    a browser is only ever stopped on a definite verdict.
+    """
+    from .owner import owner_alive
+    from .registry import _load_registry, _resolve_path
+
+    entry = _load_registry(_resolve_path(registry_path)).get(name)
+    owner = entry.get("owner") if entry else None
+    return bool(owner) and owner_alive(owner) is False
+
+
+def _record_owner_stop(name: str, registry_path: str | None) -> None:
+    """Leave a line saying why the browser went away, next to the registry."""
+    import datetime
+    import os
+
+    from .registry import _load_registry, _resolve_path
+
+    path = _resolve_path(registry_path)
+    owner = (_load_registry(path).get(name) or {}).get("owner") or {}
+    try:
+        with open(os.path.join(os.path.dirname(path), "owner-stops.log"), "a") as f:
+            f.write(
+                f"{datetime.datetime.now().astimezone().isoformat(timespec='seconds')} "
+                f"stopped {name}: owner {owner.get('kind')} pid {owner.get('pid')} has exited\n"
+            )
+    except OSError:
+        pass
+
+
 async def _supervise_connection(
-    *, port: int, draw_border: bool, source: str | None
+    *, port: int, draw_border: bool, source: str | None,
+    name: str | None = None, registry_path: str | None = None,
 ) -> None:
     """Hold one browser-level CDP connection until it drops.
 
@@ -193,9 +239,29 @@ async def _supervise_connection(
             params={"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True},
         )
 
+    loop = asyncio.get_event_loop()
+    last_check = loop.time()
+    strikes = 0
     try:
         while cdp._connected:
             await asyncio.sleep(1)
+            if name is None or loop.time() - last_check < OWNER_CHECK_INTERVAL:
+                continue
+            last_check = loop.time()
+            gone = await asyncio.to_thread(owner_has_gone, name, registry_path)
+            strikes = strikes + 1 if gone else 0
+            if strikes >= 2:
+                from .registry import stop
+
+                _record_owner_stop(name, registry_path)
+                # registry.stop verifies the port is this browser's before
+                # closing it, falls back to a verified SIGTERM, and retires
+                # the entry; the dropped connection then ends this loop.
+                try:
+                    await asyncio.to_thread(stop, instance_name=name, registry_path=registry_path)
+                except Exception:
+                    pass
+                return
     finally:
         await cdp.close()
 
@@ -254,7 +320,10 @@ async def run_supervisor(
 
     while True:
         try:
-            await _supervise_connection(port=port, draw_border=draw_border, source=source)
+            await _supervise_connection(
+                port=port, draw_border=draw_border, source=source,
+                name=name, registry_path=registry_path,
+            )
         except Exception:
             # A failed (re)connect or a mid-stream CDP error lands here; fall
             # through to the liveness check to decide retire-vs-reconnect.

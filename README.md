@@ -81,13 +81,15 @@ Requires Google Chrome or Chromium installed on the system. Runtime dependencies
 ## Quick Start
 
 ```bash
-# Launch a browser -- auto-allocates a port and names the instance
+# Launch a browser -- auto-allocates a port and names the instance. From your
+# terminal it opens on your desktop; from an AI agent, on a virtual display
+# (see "Agent browsers" below)
 chrome-agent launch
-# {"name": "myproject-01", "port": 9222, "pid": 58469, "browser_version": "Chrome/147"}
+# {"name": "myproject-01", "port": 9222, "pid": 58469, "browser_version": "Chrome/147", "display": {"kind": "desktop", "display": ":1"}, "owner": null}
 
 # Check what's running
 chrome-agent status
-# myproject-01  port 9222
+# myproject-01  port 9222  [desktop :1]  kept
 #   [1] 956FD3C2  https://example.com  "Example Domain"
 
 # Read the page title
@@ -227,14 +229,17 @@ An attach session **exits on its own once it has outlived its purpose** -- when 
 ## Operational Commands
 
 ```
-chrome-agent launch [--headless] [--fingerprint PATH] [--port PORT] [--no-window-border]
+chrome-agent launch [--display virtual|desktop] [--keep] [--headless] [--fingerprint PATH] [--port PORT] [--no-window-border]
 chrome-agent status [<instance|glob>]
 chrome-agent attach <instance|glob> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
 chrome-agent stop <instance|glob> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
+chrome-agent stop --orphans
+chrome-agent keep <instance|glob>
+chrome-agent move <instance> --to desktop|virtual
 chrome-agent help [<instance|glob>] [Domain | Domain.method]
 chrome-agent cleanup
 chrome-agent save <instance|glob>... | --all [--stop] [--as NAME] [--overwrite | --keep-both]
-chrome-agent restore [<name[@stamp]>...] | --all [--here] [--any-port] [--desktop saved|terminal] [--no-reattach] [--replace-profile] [--start-display]
+chrome-agent restore [<name[@stamp]>...] | --all [--here] [--any-port] [--desktop saved|terminal] [--display virtual|desktop] [--no-reattach] [--replace-profile] [--start-display]
 chrome-agent restore <name[@stamp]> --as NEW-NAME [...]
 chrome-agent snapshots [list [<glob>] | show <name[@stamp]> | rm <ref>... [--older-than AGE] [--yes] | export-key | import-key [--replace]]
 chrome-agent completions <zsh | instances | snapshots | methods | events> [<instance>]
@@ -243,12 +248,15 @@ chrome-agent --version
 
 | Command | Description |
 |---------|-------------|
-| `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. |
-| `status` | List running instances with their page targets (IDs, URLs, titles), in the order the tabs sit on screen, window by window, numbered `[1]`, `[2]`, ... left to right -- the numbers `--target N` and `--target-index N` select. If the order cannot be read, `status` says so and numbers tabs by target id instead. Accepts a glob to list a matching subset. A browser you cannot see is tagged in the header -- `[Xvfb :95]` for one on a virtual X display (Xvfb, Xvnc, Xephyr), `[headless]` for one with no window -- and the JSON form carries a `display` field for every live instance (`{"kind": "desktop" \| "virtual" \| "headless", ...}`). |
+| `launch` | Find Chrome, launch with CDP enabled. Auto-allocates a port and names the instance from the current directory. From an AI agent's session the browser goes on a managed virtual display and is tied to that session; from your terminal it opens on your desktop and runs until stopped. `--display virtual\|desktop` and `--keep` override -- see [Agent browsers](#agent-browsers-off-your-screen-and-gone-with-the-agent). |
+| `status` | List running instances with their page targets (IDs, URLs, titles), in the order the tabs sit on screen, window by window, numbered `[1]`, `[2]`, ... left to right -- the numbers `--target N` and `--target-index N` select. If the order cannot be read, `status` says so and numbers tabs by target id instead. Accepts a glob to list a matching subset. Each header says where the browser is -- `[desktop :1]` on your screen, `[Xvfb :100]` on a virtual X display (Xvfb, Xvnc, Xephyr), `[headless]` with no window -- and who it belongs to: `owner claude-code pid 9669` for an agent session's browser (`(yours)` when you are that session), `kept` for one with no owner, `ORPHAN` when its owner has exited. The JSON form carries `display` and `owner` fields for every live instance. |
 | `attach` | Persistent event observation with isolated subscriptions. Use `--target` (fewer than 8 digits is a tab number, anything else a target-id prefix), `--url substring`, or the explicit `--target-id` / `--target-index` for multi-tab browsers. Tab `N` is the Nth tab on screen, as `status` numbers them. |
 | `stop` | Gracefully shut down a browser instance (`Browser.close`) or close a specific tab (`Target.closeTarget`). Accepts a glob, stopping every matching instance. Use `--target` or `--url` to close a single tab without affecting the browser; because this closes a tab, prefer `--target-id`: an id never changes, while a tab's number shifts whenever tabs are opened, closed or dragged. |
 | `help` | Query the browser's protocol schema. Lists domains, commands, events, parameters. |
-| `cleanup` | Remove stale instances (dead browsers) and their session directories. |
+| `stop --orphans` | Stop every browser whose owning agent session has exited. Normally each one's supervisor does this by itself within seconds; this is the sweep for when it could not. |
+| `keep` | Release an instance from its agent session, so it runs until stopped (like `launch --keep`). |
+| `move` | Move a running browser between your desktop and a managed virtual display, keeping its name, port, tabs and logins (a `save --stop` and `restore` in one step). |
+| `cleanup` | Remove stale instances (dead browsers) and their session directories; re-arm the keeper of any managed virtual display that lost its own. |
 | `save` | Snapshot running instances -- profile, tabs, cookies, launch flags, desktop, observers -- so they can be restored later. See [Saving and Restoring Sessions](#saving-and-restoring-sessions). |
 | `restore` | Bring snapshots back as running instances under their original names and ports (or one under a new name, with `--as`). |
 | `snapshots` | List, inspect (`show`) and delete (`rm`) saved snapshots; back up the encryption key. |
@@ -258,6 +266,23 @@ chrome-agent --version
 Instances are tracked in a registry at `/tmp/chrome-agent/registry.json`. A headed browser's instance is **automatically removed from the registry when its window is closed** (its session directory is cleaned up too), so `status` reflects what is actually running. Liveness is determined by **process identity plus port attribution**, not a bare PID-existence check: the recorded PID counts only if it is a live process of the launching user whose start time matches what was recorded at launch (so a recycled or namespace-local PID never masquerades as the browser), and a listening CDP port counts only if a process claiming that port with this instance's profile directory can be found -- so browsers started via wrapper/snap launchers (which fork the real browser into another process) are still reported correctly, while a port since claimed by a *different* browser is not mistaken for this one. A **transient connection drop does not retire a live instance**: a host suspend/resume severs the supervisor's CDP connection while Chrome keeps running, so the supervisor reconnects and keeps supervising; retirement happens only once the CDP port stops listening. `cleanup` removes any entries that remain (headless instances, or browsers that were killed abruptly).
 
 Two consequences worth knowing. **Launching from inside a PID-namespaced sandbox** (a container, bubblewrap, some agent-CLI sandboxes) records the sandbox's local PID in the shared registry; the identity check recognizes such an entry as stale once its browser is gone, instead of treating the aliased host PID as a live browser forever. **`stop` verifies its target before acting**: it never sends `Browser.close` to a port that is serving a different browser (it terminates the instance's own verified process instead, or just cleans up the stale entry), and its SIGTERM fallback only ever fires at a PID verified to be the instance's own browser process.
+
+## Agent browsers: off your screen, and gone with the agent
+
+Two things go wrong when AI agents launch browsers on a workstation. A headed window opening on your desktop takes your focus in the middle of whatever you were doing. And a browser an agent forgot to stop keeps running after the agent is gone -- for days, at up to a full CPU core each. chrome-agent handles both by default for agents, and leaves your own launches alone.
+
+**Who counts as an agent.** A launch is an agent's when it comes from inside an agent session: chrome-agent looks for an agent CLI (`claude`, `codex`) among the launching command's parent processes, and for the environment those CLIs export (`CLAUDECODE`, `CODEX_THREAD_ID`, `AI_AGENT`, ...). Both Claude Code and Codex are recognized with no setup. `chrome-agent launch` typed in your own terminal has neither, so it behaves as it always has. Detection was chosen over a variable each agent launcher must remember to set (the failure being guarded against is exactly a forgotten step) and over a virtual default for everyone (your own `launch` should open where you can see it). For another harness, `CHROME_AGENT_OWNER_PID=<its pid>` marks its launches as an agent's, owned by that process; `CHROME_AGENT_DISPLAY=virtual|desktop` sets the default display for anyone.
+
+**Off your screen: a managed virtual display.** An agent's browser opens on a virtual X display (Xvfb) that chrome-agent starts itself on the first free display from `:100`, shares between every agent browser while it is up, and removes once the last browser on it is gone. It is an ordinary headed Chrome, so sites see nothing unusual (unlike `--headless`); screenshots, input and CDP work the same. A small keeper process per display checks every 2 seconds whether any process still runs on that display -- which catches a browser however it ended: `stop`, a closed window, a crash, a kill -- and stops the Xvfb after two idle checks (never within 30 seconds of a launch claiming it, so a browser still starting is safe). (Xvfb's own `-terminate` is no help: it exits on any connection closing, even a bare probe.) An agent that already runs on a virtual display (`DISPLAY=:95` with an Xvfb behind it) keeps using it. If Xvfb is not installed, an agent launch fails and says how to install it rather than falling back to your screen. Linux only; elsewhere the default stays the desktop.
+
+**Onto your screen when you need it.** `launch --display desktop` opens on your desktop -- e.g. so you can sign in to a site yourself. `chrome-agent move <instance> --to desktop` brings a running browser onto your screen and `--to virtual` takes it off again, keeping its name, port, tabs, logins and cookies: a browser cannot change X display while it runs, so this is `save --stop` and `restore` in one step, through a snapshot that is deleted once the browser is back (it needs the snapshot key, see below).
+
+**Gone with the agent: owners.** An agent's launch records the agent session's process as the instance's **owner** -- pid, start time and PID namespace, so a recycled PID never passes for it. The per-instance supervisor checks the owner every 5 seconds and stops the browser after two checks find it gone, so an agent browser outlives its session by about 10 seconds. A browser launched with `--keep`, released with `chrome-agent keep`, launched from your terminal, or brought back by `restore` has no owner and runs until stopped. Nothing ever stops a browser on an uncertain answer, and there is no age-based sweep: a browser is stopped because the session it belongs to ended, never because it has been running a long time.
+
+- **Sub-agents.** Claude Code runs sub-agents inside the session's own process, so their browsers belong to the session and last until it ends. An agent that runs as its own process (an agent-collab worker, a nested `claude -p`) owns its browsers itself, and they end with it; it can hand one on with `keep`.
+- **PID-namespaced sandboxes.** Codex runs each command in a bubblewrap sandbox with its own PID namespace, where no process outside it is visible. Everything started in there -- browser, supervisor, a virtual display of its own -- dies with the sandbox regardless, so the owner recorded is the sandbox itself; `status` on the host finds it by namespace. A check made from inside a different sandbox cannot see the owner and reports it as unknown, never as gone.
+- **Suspend and resume.** Process identity survives a suspend, and the supervisor already rides out the CDP drop a resume causes, so a sleeping laptop stops nothing.
+- **When the supervisor itself was killed**, no one stops the browser: `status` shows it as `ORPHAN`, and `chrome-agent stop --orphans` stops every such browser.
 
 ## Saving and Restoring Sessions
 
@@ -303,7 +328,7 @@ chrome-agent snapshots rm --older-than 30d
 
 **Restoring safely.** `restore` refuses when the instance is already running (it was restored already, or the original never closed), when the saved port is taken by something else (`--any-port` picks a new one), or when a custom profile directory already exists (`--replace-profile` moves it aside rather than deleting it). It warns when the installed Chrome is older than the one that saved the snapshot, since an older Chrome may refuse a newer profile. Sites that bind a login to a device or IP, or expire it server-side, may still ask you to sign in again.
 
-**Virtual displays.** A browser running on a virtual X display is restored onto that same display, never onto the screen of whoever runs `restore`. A virtual display usually does not survive a reboot, so `restore` refuses while it is down and names the command that starts it; `--start-display` runs that recorded command (e.g. `Xvfb :90 -screen 0 1920x1200x24 -nolisten tcp`) first. A browser on your own desktop is not tied to a display number -- that can change across a reboot -- and follows the display `restore` runs on.
+**Virtual displays.** A browser running on a virtual X display is restored onto that same display, never onto the screen of whoever runs `restore`. A virtual display usually does not survive a reboot, so `restore` refuses while it is down and names the command that starts it; `--start-display` runs that recorded command (e.g. `Xvfb :90 -screen 0 1920x1200x24 -nolisten tcp`) first. A session saved from a display chrome-agent managed is not tied to its number: it comes back on whichever managed display is up, started if need be. A browser on your own desktop is not tied to a display number either -- that can change across a reboot -- and follows the display `restore` runs on. `--display virtual` or `--display desktop` overrides all of this for one restore. A restored session has no owner (see [Agent browsers](#agent-browsers-off-your-screen-and-gone-with-the-agent)): it runs until stopped, whoever restores it.
 
 **Virtual desktops.** A single restore puts the browser on the current terminal's desktop, alongside the project you just reopened. `restore --all` puts each window back on the desktop it was saved from (`--desktop` overrides either default). With dynamic workspaces (GNOME's default) a window can only go as far as the last workspace that exists -- the window manager deletes empty workspaces in the middle -- so `restore --all` works through the snapshots in desktop order: the original layout comes back where the workspaces in between are occupied, and otherwise windows are packed down, keeping the ones that shared a desktop together and in order.
 
@@ -428,6 +453,7 @@ Monitor is specific to Claude Code. Agents on other harnesses can still be event
 - Python >= 3.11
 - Google Chrome or Chromium (system-installed)
 - Linux with xdotool (optional, for virtual desktop pinning)
+- Xvfb on Linux, for agent launches (`sudo apt install xvfb`); without it an agent must launch with `--display desktop` or `--headless`
 
 ## Releasing (maintainer)
 

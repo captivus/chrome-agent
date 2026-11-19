@@ -723,8 +723,14 @@ def plan_save(instance_name: str) -> SavePlan:
     display = desktops.process_display(main_pid) if main_pid and not launch.get("headless") else None
     server = desktops.virtual_display_server(display) if display else None
     if server:
+        from .virtual_display import is_managed
+
         launch["env"]["DISPLAY"] = display
         launch["virtual_display"] = {"display": display, "server": server}
+        if is_managed(display):
+            # One chrome-agent started and will remove: any managed display
+            # will do on restore, so its number is not pinned.
+            launch["virtual_display"]["managed"] = True
 
     return SavePlan(
         name=instance_name,
@@ -1142,7 +1148,8 @@ def check_restorable(
             f"(pass --any-port to restore {instance} on a different port)"
         )
     virtual = state["launch"].get("virtual_display")
-    if virtual and not start_display and not desktops.display_running(virtual["display"]):
+    if (virtual and not virtual.get("managed") and not start_display
+            and not desktops.display_running(virtual["display"])):
         return (
             f"it ran on virtual display {virtual['display']}, which is not running "
             f"(pass --start-display to start it with: {shlex.join(virtual['server'])})"
@@ -1166,11 +1173,20 @@ def restore_version(
     start_display: bool = False,
     instance_name: str | None = None,
     key: bytes | None = None,
+    display: str | None = None,
+    owner: dict | None = None,
 ) -> dict:
     """Bring a saved version back as a running instance. Returns a report.
 
     ``instance_name`` restores it under a new name (``restore --as``); the
     snapshot itself is unchanged, and the next save files it under the new name.
+
+    ``display`` overrides where a headed browser goes: "virtual" (a managed
+    virtual display) or "desktop" (the display this process has); None puts
+    it back where it was saved -- a virtual display chrome-agent managed comes
+    back on whichever managed display is up. ``owner`` makes the restored
+    instance belong to an agent session; a plain restore has none, so a
+    restored session runs until stopped, as it always has.
     """
     from .launcher import _SESSION_ROOT, launch_browser
     from .registry import _port_is_listening
@@ -1178,13 +1194,22 @@ def restore_version(
     key = key or get_key(create=False)
     state = read_state(version, key)
     name = instance_name or state["instance"]
+    launch = state["launch"]
+    headless = launch.get("headless", False)
+    if display is not None or (launch.get("virtual_display") or {}).get("managed"):
+        # Placement chosen afresh: drop the recorded display, and let
+        # launch_browser find (or start) a managed one for "virtual".
+        launch = {**launch, "env": {k: v for k, v in (launch.get("env") or {}).items() if k != "DISPLAY"}}
+        target = display or "virtual"
+        launch.pop("virtual_display", None)
+        state = {**state, "launch": launch}
+    else:
+        target = None
     problem = check_restorable(version, state, any_port, replace_profile, start_display, name)
     if problem:
         raise SnapshotError(f"cannot restore {version.ref}: {problem}")
 
     warnings = []
-    launch = state["launch"]
-    headless = launch.get("headless", False)
     virtual = launch.get("virtual_display")
     if virtual and not desktops.display_running(virtual["display"]):
         if not desktops.start_display(virtual["server"], virtual["display"]):
@@ -1254,7 +1279,10 @@ def restore_version(
         instance_name=name,
         desktop=target_desktop,
         env_overrides=launch.get("env") or None,
+        display=target,
+        owner=owner,
     ))
+    on_virtual = bool(virtual) or (target == "virtual" and not headless)
 
     id_map, placed, cookie_failures = asyncio.run(_restore_tabs(info.port, state, headless, info.pid))
     if cookie_failures:
@@ -1263,7 +1291,7 @@ def restore_version(
     # Windows beyond the first open wherever the window manager puts them.
     # Send each to its saved desktop (mode "saved") or alongside the first
     # window (mode "terminal"), keeping windows that shared a desktop together.
-    if not headless and not virtual and len(placed) > 1 and desktops.available():
+    if not headless and not on_virtual and len(placed) > 1 and desktops.available():
         # The first window is the only one launch placed; it is on "base".
         others = {p["x_window"] for p in placed[1:] if p["x_window"]}
         firsts = [xw for xw in desktops.browser_windows(info.pid) if xw["window"] not in others]
@@ -1291,7 +1319,7 @@ def restore_version(
         "tabs": len(id_map),
         "windows": len(placed),
         "cookies": len(state.get("cookies", [])),
-        "display": virtual["display"] if virtual else None,
+        "display": virtual["display"] if virtual else (info.display if on_virtual else None),
         "subscriptions": subscriptions,
         "warnings": warnings,
     }
@@ -1311,3 +1339,39 @@ def _installed_chrome_version(binary: str | None) -> str | None:
         return match.group(1) if match else None
     except Exception:
         return None
+
+
+# --------------------------------------------------------------------------
+# Move between the desktop and a virtual display
+# --------------------------------------------------------------------------
+
+def move_instance(instance_name: str, to: str) -> dict:
+    """Move a running browser to the user's desktop ("desktop") or to a
+    managed virtual display ("virtual"), keeping everything else.
+
+    A browser cannot change X display while it runs, so this is a save with
+    --stop and a restore onto the other display, as one step: name, port,
+    tabs, logins, cookies, attach observers and owner all carry over. The
+    snapshot it goes through is deleted once the browser is back; if the
+    restore fails it is kept, and the error says how to restore it.
+    """
+    if to not in ("desktop", "virtual"):
+        raise SnapshotError(f"--to takes desktop or virtual, not {to!r}")
+    plan = plan_save(instance_name)
+    if plan.launch.get("headless"):
+        raise SnapshotError(f"{instance_name} is headless: it has no window to move")
+    here = "virtual" if "virtual_display" in plan.launch else "desktop"
+    if here == to:
+        where = plan.launch["virtual_display"]["display"] if here == "virtual" else "the desktop"
+        raise SnapshotError(f"{instance_name} is already on {where}")
+    owner = plan.entry.get("owner")
+    version = save_instance(plan, stop=True)
+    try:
+        report = restore_version(version, display=to, owner=owner, desktop_mode="terminal")
+    except Exception as exc:
+        raise SnapshotError(
+            f"{instance_name} was stopped and saved, but could not be brought back on "
+            f"the {to} ({exc}); its snapshot is kept: chrome-agent restore {version.ref}"
+        ) from exc
+    remove_version(version)
+    return report

@@ -17,8 +17,10 @@ import sys
 # Operational commands -- checked first during routing
 OPERATIONAL_COMMANDS = {
     "launch", "status", "attach", "help", "cleanup", "stop", "guide", "completions",
-    "save", "restore", "snapshots",
+    "save", "restore", "snapshots", "keep", "move",
 }
+
+DISPLAY_CHOICES = ("virtual", "desktop")
 
 
 # Target-selection flags and the resolution each one forces. Bare --target maps
@@ -255,15 +257,20 @@ def _print_static_usage() -> None:
     print("chrome-agent -- CLI for AI agents to control Chrome via CDP\n")
     print("Usage: chrome-agent <command> [args...]\n")
     print("Operational commands:")
-    print("  launch [--port PORT] [--fingerprint PATH] [--headless] [--no-window-border] [-- CHROME_ARGS]  Launch Chrome")
-    print("  status [<instance>]                                    List instances and targets")
+    print("  launch [--display virtual|desktop] [--keep] [--headless] [--port PORT]")
+    print("         [--fingerprint PATH] [--no-window-border] [-- CHROME_ARGS]       Launch Chrome")
+    print("  status [<instance>]                                    List instances: display, owner, tabs")
     print("  attach <instance> [+Event ...] [TARGET]                Attach for events")
     print("  help [<instance>] [Domain | Domain.method]             Protocol discovery")
     print("  stop <instance> [TARGET]                               Stop a browser, or close one tab")
+    print("  stop --orphans                                         Stop browsers whose agent session has exited")
+    print("  keep <instance>                                        Release from its agent session: runs until stopped")
+    print("  move <instance> --to desktop|virtual                   Move a browser between your screen and a virtual display")
     print("  cleanup                                                Remove stale instances")
     print("  save <instance>... | --all [--stop] [--as NAME]        Snapshot sessions (profile, tabs, cookies)")
     print("  restore [<name[@stamp]>...] [--all] [--any-port]       Bring saved sessions back")
     print("  restore <name[@stamp]> --as NEW                        Bring one back under a new name")
+    print("  restore ... --display virtual|desktop                  Bring it back on a virtual display / your screen")
     print("  snapshots [list|show|rm|export-key|import-key]         Manage saved snapshots")
     print("  guide [--path]                                         Print this tool's agent guide")
     print("  completions <zsh|instances|methods|events> [<instance>]  Shell completion and its data")
@@ -285,6 +292,12 @@ def _print_static_usage() -> None:
     print("  <instance> Domain.method '{\"param\": \"value\"}'         Send a single CDP command")
     print("  Domain.method '{\"param\": \"value\"}'                    (auto-selects instance)")
     print()
+    print("Display and lifetime (see `chrome-agent guide`):")
+    print("  Launched from an agent session (Claude Code, Codex), a browser goes on a virtual X")
+    print("  display chrome-agent manages, and is stopped when that session ends. From your own")
+    print("  terminal it goes on your desktop and runs until stopped. --display and --keep override;")
+    print("  CHROME_AGENT_DISPLAY=virtual|desktop sets the default.")
+    print()
     print("Examples:")
     print("  chrome-agent launch --headless")
     print("  chrome-agent status")
@@ -294,14 +307,50 @@ def _print_static_usage() -> None:
     print("  chrome-agent stop 'mysite-*'")
 
 
+def _default_display() -> str:
+    """Where a headed browser goes when ``--display`` is not given.
+
+    ``CHROME_AGENT_DISPLAY`` wins when set. Otherwise a launch from an agent
+    session goes on a managed virtual display, so it never lands on the
+    user's screen and takes their focus; one from the user's own terminal
+    goes on their desktop, as it always has. An agent that already runs on a
+    virtual display (``DISPLAY=:95`` with an Xvfb behind it) keeps using it.
+    """
+    from .desktop import virtual_display_server
+    from .owner import is_agent_session
+
+    chosen = os.environ.get("CHROME_AGENT_DISPLAY", "").strip().lower()
+    if chosen:
+        if chosen not in DISPLAY_CHOICES:
+            print(f"Error: CHROME_AGENT_DISPLAY must be virtual or desktop, not {chosen!r}", file=sys.stderr)
+            sys.exit(1)
+        return chosen
+    if not sys.platform.startswith("linux") or not is_agent_session():
+        return "desktop"
+    current = os.environ.get("DISPLAY")
+    if current and virtual_display_server(current):
+        return "desktop"  # i.e. the inherited DISPLAY, already a virtual one
+    return "virtual"
+
+
+def _parse_display(args: list[str], i: int) -> str:
+    if i + 1 >= len(args) or args[i + 1] not in DISPLAY_CHOICES:
+        print("Error: --display takes virtual or desktop", file=sys.stderr)
+        sys.exit(1)
+    return args[i + 1]
+
+
 async def _run_launch(args: list[str]) -> None:
     """Launch a browser with CDP enabled."""
     from .launcher import BrowserNotFoundError, launch_browser
+    from .owner import describe, find_owner
 
     fingerprint_path = None
     headless = False
     port_override = None
     window_border = True
+    display = None
+    keep = False
     extra_args = []
     i = 0
     while i < len(args):
@@ -309,6 +358,12 @@ async def _run_launch(args: list[str]) -> None:
             # Everything after -- is passed through to Chrome
             extra_args = args[i + 1:]
             break
+        elif args[i] == "--display":
+            display = _parse_display(args, i)
+            i += 2
+        elif args[i] == "--keep":
+            keep = True
+            i += 1
         elif args[i] == "--fingerprint" and i + 1 < len(args):
             fingerprint_path = args[i + 1]
             i += 2
@@ -329,6 +384,9 @@ async def _run_launch(args: list[str]) -> None:
             print(f"Error: unknown launch option: {args[i]}", file=sys.stderr)
             sys.exit(1)
 
+    display = display or _default_display()
+    owner = None if keep else find_owner()
+
     try:
         result = await launch_browser(
             port_override=port_override,
@@ -336,22 +394,38 @@ async def _run_launch(args: list[str]) -> None:
             headless=headless,
             extra_args=extra_args,
             window_border=window_border,
+            display=display,
+            owner=owner,
         )
-    except (BrowserNotFoundError, RuntimeError, TimeoutError) as exc:
+    except (BrowserNotFoundError, RuntimeError, TimeoutError) as exc:  # incl. VirtualDisplayError
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    from .desktop import virtual_display_server
+
+    on_virtual = not headless and bool(result.display) and (
+        display == "virtual" or virtual_display_server(result.display) is not None
+    )
+    where = "headless" if headless else f"{'virtual' if on_virtual else 'desktop'} {result.display or ''}".strip()
     if sys.stdout.isatty():
         print(f"Browser launched: {result.name}")
         print(f"  Port:    {result.port}")
         print(f"  PID:     {result.pid}")
         print(f"  Version: {result.browser_version}")
+        print(f"  Display: {where}")
+        print(f"  Owner:   {describe(owner) + ' (stopped when it exits)' if owner else 'none -- runs until stopped'}")
     else:
         print(json.dumps({
             "name": result.name,
             "port": result.port,
             "pid": result.pid,
             "browser_version": result.browser_version,
+            "display": None if headless else {
+                "kind": "virtual" if on_virtual else "desktop", "display": result.display,
+            },
+            "owner": None if owner is None else {
+                k: v for k, v in owner.items() if k in ("kind", "pid", "session")
+            },
         }))
 
 
@@ -482,6 +556,13 @@ def _run_stop(args: list[str], target_spec: str | None, target_by: str | None) -
     """
     from .registry import InstanceNotFoundError, resolve_instance_names, stop
 
+    if "--orphans" in args:
+        if len(args) > 1 or target_spec is not None:
+            print("Error: stop --orphans takes no instance or target", file=sys.stderr)
+            sys.exit(1)
+        _stop_orphans()
+        return
+
     if not args:
         print("Error: stop requires an instance name", file=sys.stderr)
         print("Usage: chrome-agent stop <instance> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]", file=sys.stderr)
@@ -553,15 +634,112 @@ def _run_stop(args: list[str], target_spec: str | None, target_by: str | None) -
         sys.exit(1)
 
 
+def _stop_orphans() -> None:
+    """Stop every instance whose owning agent session has exited.
+
+    The supervisor normally does this on its own within seconds; this is the
+    manual sweep for when it could not (its process was killed). Only a
+    definite "owner gone" counts -- an owner that cannot be checked from here
+    (it ran in another PID namespace) is left alone.
+    """
+    from .instance_status import get_instance_status
+    from .owner import describe
+    from .registry import stop
+
+    orphans = [s for s in get_instance_status() if s.orphaned]
+    if not orphans:
+        print("No orphaned instances (every running instance's owner is still there, or it has none)")
+        return
+    print(f"Stopping {len(orphans)} orphaned instance(s):")
+    failures = 0
+    for status in orphans:
+        print(f"  {status.name} (owner {describe(status.owner)} has exited)")
+        try:
+            print(f"  {stop(instance_name=status.name)}")
+        except Exception as exc:
+            print(f"Error stopping {status.name}: {exc}", file=sys.stderr)
+            failures += 1
+    if failures:
+        sys.exit(1)
+
+
+def _run_keep(args: list[str]) -> None:
+    """Release instances from their agent session, so they run until stopped."""
+    from .owner import describe
+    from .registry import InstanceNotFoundError, resolve_instance_names, set_owner
+
+    if not args:
+        print("Error: keep requires an instance name", file=sys.stderr)
+        print("Usage: chrome-agent keep <instance|glob>", file=sys.stderr)
+        sys.exit(1)
+    try:
+        names = resolve_instance_names(name_or_pattern=args[0])
+    except InstanceNotFoundError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    for name in names:
+        previous = set_owner(instance_name=name, owner=None)
+        if previous:
+            print(f"Kept {name}: no longer tied to {describe(previous)}; it runs until stopped")
+        else:
+            print(f"{name} has no owner already; it runs until stopped")
+
+
+def _run_move(args: list[str]) -> None:
+    """Move a running browser between the user's desktop and a virtual display."""
+    from .registry import InstanceNotFoundError, resolve_instance_name
+    from .snapcrypto import SnapshotKeyError
+    from .snapshot import SnapshotError, move_instance
+    from .virtual_display import VirtualDisplayError
+
+    to = None
+    names = []
+    i = 0
+    while i < len(args):
+        if args[i] == "--to" and i + 1 < len(args):
+            to = args[i + 1]
+            i += 2
+        elif args[i].startswith("-"):
+            print(f"Error: unknown move option: {args[i]}", file=sys.stderr)
+            sys.exit(1)
+        else:
+            names.append(args[i])
+            i += 1
+    if len(names) != 1 or to not in DISPLAY_CHOICES:
+        print("Usage: chrome-agent move <instance> --to desktop|virtual", file=sys.stderr)
+        sys.exit(1)
+    try:
+        name = resolve_instance_name(name_or_pattern=names[0])
+        report = move_instance(name, to)
+    except (InstanceNotFoundError, SnapshotError, SnapshotKeyError, VirtualDisplayError,
+            RuntimeError, TimeoutError, ConnectionError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    where = f"virtual display {report['display']}" if to == "virtual" else "the desktop"
+    if sys.stdout.isatty():
+        print(f"Moved {report['name']} to {where} (port {report['port']}, {report['tabs']} tabs)")
+        for warning in report["warnings"]:
+            print(f"  warning: {warning}")
+    else:
+        # The snapshot it went through is already deleted; do not name it.
+        print(json.dumps({"moved": report["name"], "to": to,
+                          **{k: v for k, v in report.items() if k != "snapshot"}}))
+
+
 def _run_cleanup() -> None:
     """Clean up stale instances and session directories."""
     from .launcher import cleanup_sessions
+    from .virtual_display import rearm_keepers
 
     removed = cleanup_sessions()
     if removed:
         print(f"Cleaned up {len(removed)} stale instance(s): {', '.join(removed)}")
     else:
         print("No stale instances found")
+    rearmed = rearm_keepers()
+    if rearmed:
+        print(f"Re-armed the keeper of virtual display(s) {', '.join(rearmed)} "
+              f"(each is removed once no browser uses it)")
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +909,7 @@ def _run_restore(args: list[str]) -> None:
     restore_all = here = any_port = replace_profile = start_display = False
     reattach = True
     desktop_mode = None
+    display = None
     new_name = None
     refs = []
     i = 0
@@ -748,6 +927,9 @@ def _run_restore(args: list[str]) -> None:
             replace_profile = True
         elif arg == "--start-display":
             start_display = True
+        elif arg == "--display":
+            display = _parse_display(args, i)
+            i += 1
         elif arg == "--desktop" and i + 1 < len(args) and args[i + 1] in ("saved", "terminal"):
             desktop_mode = args[i + 1]
             i += 1
@@ -818,7 +1000,7 @@ def _run_restore(args: list[str]) -> None:
             report = restore_version(
                 version, any_port=any_port, desktop_mode=desktop_mode, reattach=reattach,
                 replace_profile=replace_profile, start_display=start_display,
-                instance_name=new_name,
+                instance_name=new_name, display=display,
             )
         except (SnapshotError, SnapshotKeyError, RuntimeError, TimeoutError, ConnectionError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
@@ -1130,6 +1312,10 @@ def main() -> None:
             _run_restore(args=rest)
         elif command == "snapshots":
             _run_snapshots(args=rest)
+        elif command == "keep":
+            _run_keep(args=rest)
+        elif command == "move":
+            _run_move(args=rest)
         return
 
     # Disambiguate "instance name" vs "bare Domain.method":

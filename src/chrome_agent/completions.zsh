@@ -23,6 +23,8 @@ _chrome_agent_commands() {
     'status:List instances and their tabs'
     'attach:Hold a connection and stream CDP events'
     'stop:Stop a browser, or close one of its tabs'
+    'keep:Release a browser from its agent session, so it runs until stopped'
+    'move:Move a browser between your screen and a virtual display'
     'help:Query the running browser for its protocol schema'
     'cleanup:Drop dead instances and stale session directories'
     'save:Snapshot sessions (profile, tabs, cookies) to restore later'
@@ -104,6 +106,8 @@ _chrome-agent() {
       _arguments \
         '--port[Use this CDP port instead of an auto-allocated one]:port:' \
         '--headless[Run with no window]' \
+        '--display[Put the window on a managed virtual display or your desktop]:display:(virtual desktop)' \
+        '--keep[Do not tie the browser to the agent session; it runs until stopped]' \
         '--fingerprint[Spoof UA, viewport, language and timezone from a profile]:profile:_files -g "*.json"' \
         '--no-window-border[Suppress the agent window marker]' \
         '*:chrome flag (after --):' && ret=0
@@ -112,7 +116,17 @@ _chrome-agent() {
       _arguments '1:instance:_chrome_agent_instances' && ret=0
       ;;
     stop)
-      _arguments $target_specs '1:instance:_chrome_agent_instances' && ret=0
+      _arguments $target_specs \
+        '(1)--orphans[Stop every browser whose agent session has exited]' \
+        '1:instance:_chrome_agent_instances' && ret=0
+      ;;
+    keep)
+      _arguments '1:instance:_chrome_agent_instances' && ret=0
+      ;;
+    move)
+      _arguments \
+        '--to[Where to move it]:display:(desktop virtual)' \
+        '1:instance:_chrome_agent_instances' && ret=0
       ;;
     attach)
       _chrome_agent_instance=$words[2]
@@ -156,6 +170,7 @@ _chrome-agent() {
         '--no-reattach[Do not restart file-backed attach observers]' \
         '--replace-profile[Move an existing custom profile dir aside]' \
         '--start-display[Start the virtual X display (Xvfb) a snapshot ran on, if it is not running]' \
+        '--display[Restore onto a managed virtual display or your desktop]:display:(virtual desktop)' \
         '--desktop[Place windows on their saved desktops or this terminal'"'"'s]:mode:(saved terminal)' \
         '(--all)--as[Restore one snapshot under this new instance name]:name:' \
         '*:snapshot:_chrome_agent_snapshots' && ret=0

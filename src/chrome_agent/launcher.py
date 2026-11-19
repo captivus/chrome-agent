@@ -83,6 +83,8 @@ async def launch_browser(
     instance_name: str | None = None,
     desktop: int | None = None,
     env_overrides: dict[str, str] | None = None,
+    display: str | None = None,
+    owner: dict | None = None,
 ) -> InstanceInfo:
     """Launch Chrome with CDP enabled and register as a named instance.
 
@@ -101,6 +103,13 @@ async def launch_browser(
     place the window on (instead of the launching terminal's), and
     ``env_overrides`` restores environment such as a fingerprint's TZ.
 
+    ``display`` places a headed browser: "virtual" puts it on a virtual X
+    display chrome-agent manages (see virtual_display.py), "desktop" or None
+    on the DISPLAY this process inherited. (Resolving the default -- virtual
+    for an agent, desktop for the user's terminal -- is the CLI's job.)
+    ``owner`` is the record of the agent session the browser belongs to (see
+    owner.py); the supervisor stops the browser once that session has ended.
+
     Returns InstanceInfo with name, port, pid, browser_version, user_data_dir.
 
     Raises BrowserNotFoundError if Chrome is not installed.
@@ -112,6 +121,13 @@ async def launch_browser(
     binary = find_chrome_binary()
     if binary is None:
         raise BrowserNotFoundError(searched_paths=_platform_candidates())
+
+    # A virtual display is found or started before anything else, so a
+    # missing Xvfb fails the launch before a profile is created.
+    virtual_display = None
+    if display == "virtual" and not headless:
+        from .virtual_display import acquire_display
+        virtual_display = acquire_display()
 
     # Prune truly-dead instances first (fallback for browsers whose supervisor
     # was killed, and for headless instances which have no supervisor), and
@@ -193,6 +209,14 @@ async def launch_browser(
         "window_border": draw_border,
     }
 
+    if virtual_display is not None:
+        env["DISPLAY"] = virtual_display
+        # On a Wayland desktop Chrome would otherwise open on the compositor
+        # -- the user's screen -- whatever DISPLAY says. Not recorded in the
+        # launch record: a move back to the desktop must not inherit it.
+        env.pop("WAYLAND_DISPLAY", None)
+        args.append("--ozone-platform=x11")
+
     # Phase 4: Launch subprocess
     process = subprocess.Popen(
         args,
@@ -246,7 +270,9 @@ async def launch_browser(
         pid_start=pid_start,
         name_override=instance_name,
         launch=launch_record,
+        owner=owner,
     )
+    instance_info.display = env.get("DISPLAY") if not headless else None
 
     # Phase 8: Spawn the per-instance supervisor (headed launches only). It is a
     # detached process -- it must survive the caller exiting (fire-and-forget
@@ -260,13 +286,15 @@ async def launch_browser(
     #     where DOM/title-diffing detectors live. See the detection audit.
     # Headless launches get no supervisor (no window to close or mark); their
     # registry entries are reclaimed by the launch-time prune above / cleanup.
-    if not headless:
+    # An owned one does: the supervisor is also what stops a browser once its
+    # owner has gone.
+    if not headless or owner is not None:
         from .supervisor import spawn_supervisor
         spawn_supervisor(
             port=port,
             name=instance_info.name,
             registry_path=_resolve_path(registry_path),
-            draw_border=draw_border,
+            draw_border=draw_border and not headless,
         )
 
     return instance_info

@@ -28,6 +28,8 @@ chrome-agent launch
 
 A Chrome window opens with a name derived from your current directory (e.g., `myproject-01`). The name auto-increments if one already exists. Navigate to any page.
 
+Launch it from your own terminal when you want to share the window. A browser an AI agent launches goes on a virtual display instead -- off your screen, so it never takes your focus -- and is stopped when the agent's session ends. To see one, ask the agent to run `chrome-agent move <instance> --to desktop` (and `--to virtual` when you are done), or to launch it with `--display desktop`, adding `--keep` if it should outlive the agent's session. See [Agent browsers](https://github.com/captivus/chrome-agent/blob/main/README.md#agent-browsers-off-your-screen-and-gone-with-the-agent) in the README.
+
 **From a separate terminal, check the browser:**
 
 ```bash

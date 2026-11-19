@@ -270,10 +270,14 @@ def browser_placements(ports: list[int]) -> dict[int, dict]:
             continue
         server = servers.get(_display_key(display))
         if server:
+            from .virtual_display import is_managed
+
             placements[port] = {
                 "kind": "virtual", "display": display,
                 "server": os.path.basename(server[0]),
             }
+            if is_managed(_display_key(display)):
+                placements[port]["managed"] = True
         else:
             placements[port] = {"kind": "desktop", "display": display}
     return placements

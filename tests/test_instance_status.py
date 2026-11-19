@@ -221,9 +221,10 @@ def test_target_id_truncation():
     assert targets[0].target_id == "abcdef1234567890"
 
 
-def test_off_screen_instances_are_tagged():
-    """A browser on a virtual display or headless is tagged; one on the user's
-    desktop is not -- the tag exists to flag windows the user cannot see."""
+def test_every_instance_is_tagged_with_its_display():
+    """Every live browser says where it is -- the user's desktop, a virtual
+    display, or headless -- so a reader can tell at a glance which windows
+    they can see."""
     statuses = [
         InstanceStatus(name="desk-01", port=9222, alive=True,
                        placement={"kind": "desktop", "display": ":1"}),
@@ -233,7 +234,7 @@ def test_off_screen_instances_are_tagged():
         InstanceStatus(name="gone-01", port=9225, alive=False),
     ]
     text = format_status_text(statuses)
-    assert "desk-01  port 9222\n" in text + "\n"
+    assert "desk-01  port 9222  [desktop :1]" in text
     assert "xvfb-01  port 9223  [Xvfb :95]" in text
     assert "head-01  port 9224  [headless]" in text
     assert "gone-01  port 9225  DEAD" in text

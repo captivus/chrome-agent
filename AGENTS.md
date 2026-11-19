@@ -2,7 +2,7 @@
 
 Drive a real Chrome through the Chrome DevTools Protocol (CDP), from the terminal, for AI agents.
 
-Install: `uv tool install chrome-agent` (or `pip install chrome-agent`). Requires Google Chrome or Chromium. Runtime dependencies: `websockets`, plus `cryptography` and `keyring` for encrypted session snapshots; no Playwright, no browser downloads.
+Install: `uv tool install chrome-agent` (or `pip install chrome-agent`). Requires Google Chrome or Chromium, and on Linux Xvfb for agent launches (they go on a virtual display). Runtime dependencies: `websockets`, plus `cryptography` and `keyring` for encrypted session snapshots; no Playwright, no browser downloads.
 
 ## What it is
 
@@ -183,10 +183,13 @@ Full technique, pitfalls, and the reproducible proof: **[docs/event-driven-witho
 Output is JSON on stdout. A one-shot prints the CDP method's **raw result object**, pretty-printed (shapes differ by method — check, don't assume). `launch`/`status` print structured JSON when stdout isn't a TTY. Errors go to **stderr** and exit non-zero, and are self-describing (an unknown instance lists the available ones; a CDP protocol error prints `CDP error <code>: <message>`).
 
 ```bash
-chrome-agent launch [--port PORT] [--headless] [--fingerprint profile.json] [--no-window-border]
+chrome-agent launch [--display virtual|desktop] [--keep] [--port PORT] [--headless] [--fingerprint profile.json] [--no-window-border]
 chrome-agent status [<instance|glob>]
 chrome-agent attach <instance|glob> [+Event ...] [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
 chrome-agent stop <instance|glob> [--target SPEC | --target-id ID | --target-index N | --url SUBSTRING]
+chrome-agent stop --orphans
+chrome-agent keep <instance|glob>
+chrome-agent move <instance> --to desktop|virtual
 chrome-agent help [<instance|glob>] [Domain | Domain.method]
 chrome-agent cleanup
 chrome-agent completions <zsh | instances | methods | events> [<instance>]
@@ -194,8 +197,8 @@ chrome-agent --version
 chrome-agent <instance|glob> Domain.method '{"param": "value"}'
 ```
 
-- `launch` → `{"name","port","pid","browser_version"}`
-- `status` → `[{"name","port","alive","targets":[{"id","full_id","index","url","title","window","position"}]}]` — targets are listed in on-screen tab order and `index` numbers them 1..N in that order, left to right, window by window — it is what `--target N` selects (`window` 1 = first window, `position` 1 = leftmost tab in it; `tab_order` false means the order could not be read and tabs are numbered by target id instead); `id` (the 8-char short form) and `full_id` both work as `--target`/`--target-id` specs
+- `launch` → `{"name","port","pid","browser_version","display","owner"}` -- `display` is `{"kind":"virtual"|"desktop","display":":100"}` (null when headless), `owner` the agent session the browser belongs to (`{"kind","pid","session"}`), null when kept
+- `status` → `[{"name","port","alive","display","owner","targets":[{"id","full_id","index","url","title","window","position"}]}]` — targets are listed in on-screen tab order and `index` numbers them 1..N in that order, left to right, window by window — it is what `--target N` selects (`window` 1 = first window, `position` 1 = leftmost tab in it; `tab_order` false means the order could not be read and tabs are numbered by target id instead); `id` (the 8-char short form) and `full_id` both work as `--target`/`--target-id` specs. `display` is `{"kind":"desktop"|"virtual"|"headless","display":":1"}`; `owner` is null for a kept browser, else `{"kind","pid","session","alive","yours"}` -- `yours` is true for the browsers your own session launched, `alive` false marks an orphan
 - `Page.navigate` → `{"frameId","loaderId","isDownload"}`
 - `Runtime.evaluate` (`returnByValue:true`) → `{"result":{"type":"string","value":"..."}}` — read **`result.value`** (the value sits under the `result` key)
 - `Page.captureScreenshot` → `{"data":"<base64 png>"}` — bytes are at `data`, **not** `result.data`; decode with `… | python3 -c "import sys,json,base64; open('/tmp/s.png','wb').write(base64.b64decode(json.load(sys.stdin)['data']))"` — then view `/tmp/s.png` to actually see the render.
@@ -238,21 +241,40 @@ Two more edges: a **literal** name is never globbed, so `stop mysite-01` cannot 
 ## Managing instances
 
 ```bash
-chrome-agent launch                       # auto port + name (from cwd); isolated profile under /tmp/chrome-agent
+chrome-agent launch                       # auto port + name (from cwd); isolated profile under /tmp/chrome-agent; from an agent: on a virtual display, owned by your session
+chrome-agent launch --display desktop     # on the user's screen -- only when they need to see it (e.g. to sign in themselves)
+chrome-agent launch --keep                # not tied to your session: runs until stopped
 chrome-agent launch --headless            # no window (no border, no desktop pinning); UA says "HeadlessChrome" -- see Gotchas
 chrome-agent launch --fingerprint p.json  # spoof UA/viewport/lang/TZ via launch flags (also suppresses the marker)
 chrome-agent launch -- --some-chrome-flag # everything after -- passes through to Chrome
-chrome-agent status                       # all instances + their tabs; [Xvfb :95] / [headless] mark off-screen ones
+chrome-agent status                       # all instances: display ([desktop :1] / [Xvfb :100] / [headless]), owner, tabs
 chrome-agent stop mysite-01 [--target-index 2 | --target-id 65602889 | --url foo]  # whole browser, or one tab
 chrome-agent stop 'mysite-*'              # every instance matching the glob (quote it)
+chrome-agent stop --orphans               # every browser whose owning agent session has exited
+chrome-agent keep mysite-01               # release it from your session: it runs until stopped
+chrome-agent move mysite-01 --to desktop  # onto the user's screen (and --to virtual to take it off again)
 chrome-agent cleanup                      # drop dead instances + stale session dirs
 ```
 
-**Instances outlive your task — stopping them is part of the workflow, not optional cleanup.** A launched instance is a full Chrome process that keeps running (and accumulating memory) until stopped. When you're done with the instances you launched: `chrome-agent stop <instance>` (or `chrome-agent stop '<glob>'` to take a whole related set down at once), then **verify with `chrome-agent status`** that the instances you started are gone — the stop's return is not the verification; the status read is. If dead instances or stale session dirs linger, `chrome-agent cleanup`. Keep an instance alive only deliberately (e.g. its login session is wanted for later work) — never by omission.
+### Where your browser goes, and how long it lives
 
-Headed launches are marked (colored border + `🤖 <instance>` title prefix) so a human can tell an agent-driven window from their own; `--no-window-border` disables it. Closing a headed window **auto-retires** its instance from the registry in real time (a transient CDP drop does not); `status` is real-time truth (port-based liveness). On Linux/X11 the window is pinned to the launching terminal's desktop (needs `xdotool`).
+**You get a virtual display by default — don't put a browser on the user's screen.** A browser you launch from an agent session (Claude Code and Codex are recognized automatically) opens on a virtual X display that chrome-agent starts, shares between agent browsers, and removes when the last browser on it stops. It is a real, headed Chrome — not headless, so sites see an ordinary browser — and it never takes the user's focus. Nothing to set up: no Xvfb to start, no `DISPLAY` to set, nothing to kill afterwards. Screenshots, input and every CDP command work the same. (The same `chrome-agent launch` typed in the user's own terminal opens on their desktop, as it always has. If Xvfb is not installed, launch fails and says how to install it; don't fall back to `--display desktop` on your own.)
 
-**Saving and restoring sessions.** An instance's profile is deleted when its browser closes, and `/tmp` is usually emptied at boot. `chrome-agent save <instance>` snapshots it -- profile (logins, cookies, storage), every in-memory cookie, windows and tabs, name, port, launch flags, desktop and `attach` observers -- encrypted under a key in the OS keyring; `--stop` closes the browser cleanly first (the consistent choice before a reboot); `save --all [--stop]` does every running instance. `chrome-agent restore <name>` (or `restore --all`, or bare `restore` for everything launched from the current directory) brings it back under the **same name and port**, so commands addressed to it keep working. `restore <snapshot> --as NEW-NAME` brings one back under a new instance name instead (`save --as` only names the snapshot; the session name inside it is unchanged). `chrome-agent snapshots` lists them; `snapshots show <name>` lists the saved tabs and the attach commands to resume; `snapshots rm` deletes. **A snapshot is a bundle of the user's live credentials: save one only when asked to**, not as routine cleanup. `restore` refuses when the instance is already running, its port is taken by something else (`--any-port`), or it ran on a virtual X display (Xvfb) that is not up (`--start-display` starts it from the recorded command -- it is restored onto that display, never the user's screen); a restored `attach` observer that was piped (e.g. into your Monitor) is not restarted -- re-run the printed command.
+**Put a browser on the user's screen only when they need to see it** — to sign in to a site themselves, solve a challenge, or watch something. Either launch it there, or move the running one and back again; a move keeps the name, port, tabs, logins and cookies (it is a save `--stop` + restore in one step, and needs the snapshot key in the OS keyring):
+
+```bash
+chrome-agent launch --display desktop             # a new browser on the user's screen
+chrome-agent move mysite-01 --to desktop          # the running one onto the user's screen ...
+chrome-agent move mysite-01 --to virtual          # ... and off it again when they are done
+```
+
+**Your browser belongs to your session.** It records your agent session as its **owner**, and is stopped automatically within seconds once that session ends — so a forgotten browser no longer runs for days. (A sub-agent inside your session shares your session's process, so its browsers last until the session ends, not until the sub-agent returns.) `status` shows each browser's owner: `(yours)` marks the ones your session launched, `kept` one with no owner (the user's own, or one deliberately kept), and `ORPHAN` one whose owner exited without it being stopped; `chrome-agent stop --orphans` stops those.
+
+**Still stop what you launched when you are done — the session can last days.** `chrome-agent stop <instance>` (or `chrome-agent stop '<glob>'` to take a whole related set down at once), then **verify with `chrome-agent status`** that the instances you started are gone — the stop's return is not the verification; the status read is. If dead instances or stale session dirs linger, `chrome-agent cleanup`. Keep an instance alive past your session only deliberately — e.g. a login the user wants for later work — with `launch --keep` or `chrome-agent keep <instance>`, and say so; never by omission. A restored session (`restore`) has no owner and runs until stopped, as before. Never stop, keep or move an instance you did not launch unless asked.
+
+Headed launches are marked (colored border + `🤖 <instance>` title prefix) so a human can tell an agent-driven window from their own; `--no-window-border` disables it. Closing a headed window **auto-retires** its instance from the registry in real time (a transient CDP drop does not); `status` is real-time truth (port-based liveness). On Linux/X11 a window on the user's screen is pinned to the launching terminal's desktop (needs `xdotool`).
+
+**Saving and restoring sessions.** An instance's profile is deleted when its browser closes, and `/tmp` is usually emptied at boot. `chrome-agent save <instance>` snapshots it -- profile (logins, cookies, storage), every in-memory cookie, windows and tabs, name, port, launch flags, desktop and `attach` observers -- encrypted under a key in the OS keyring; `--stop` closes the browser cleanly first (the consistent choice before a reboot); `save --all [--stop]` does every running instance. `chrome-agent restore <name>` (or `restore --all`, or bare `restore` for everything launched from the current directory) brings it back under the **same name and port**, so commands addressed to it keep working. `restore <snapshot> --as NEW-NAME` brings one back under a new instance name instead (`save --as` only names the snapshot; the session name inside it is unchanged). `chrome-agent snapshots` lists them; `snapshots show <name>` lists the saved tabs and the attach commands to resume; `snapshots rm` deletes. **A snapshot is a bundle of the user's live credentials: save one only when asked to**, not as routine cleanup. `restore` refuses when the instance is already running, its port is taken by something else (`--any-port`), or it ran on a virtual X display (Xvfb) that is not up (`--start-display` starts it from the recorded command -- it is restored onto that display, never the user's screen; a session saved from a display chrome-agent managed just comes back on a managed one); `restore --display virtual|desktop` puts it on a virtual display or the user's screen instead of where it was saved; a restored `attach` observer that was piped (e.g. into your Monitor) is not restarted -- re-run the printed command.
 
 **Tab completion.** `chrome-agent completions zsh` prints a zsh completion for the subcommands, their flags, and the **live instance names** — it calls `chrome-agent completions instances` as you type, so the names offered are the ones actually registered. Install it either by sourcing (`source <(chrome-agent completions zsh)` in `.zshrc`, after `compinit`) or as a file named `_chrome-agent` in a directory that is on `$fpath` **before** `compinit` runs — a file in a directory that is not on `$fpath` is silently never read. zsh only, for now. `completions instances`, `methods` and `events` print `name:description` lines and are useful on their own as cheap machine-readable lists. Methods and events are read from the **running browser's** own `/json/protocol`, so they describe the protocol *this* Chrome implements -- including surface newer than any list bundled with chrome-agent -- and are cached on disk under the browser version, since zsh runs completion on every keystroke when autosuggestions use the completion strategy.
 
@@ -264,7 +286,7 @@ Headed launches are marked (colored border + `🤖 <instance>` title prefix) so 
 - **One-shot latency** ~70 ms (process startup). For tight loops or event capture, prefer `attach` / a Python driver.
 - **Event isolation.** Each `attach` session sees only its own subscriptions.
 - **Multiple live instances** disable name auto-selection for **bare one-shot methods** — they error, asking you to specify one. `help` is the exception: it auto-picks any live instance (the protocol schema is identical across them), so it never needs naming.
-- **Launching from inside a PID-namespaced sandbox** (a container, bubblewrap, some agent-CLI sandboxes) records the sandbox-local PID in the shared registry. Liveness copes — the identity check disowns the aliased host PID and falls back to attributing the CDP port — but the instance is only reachable from outside while the sandbox shares the host network, and it dies with the sandbox. Prefer launching on the host; always pick a fresh port (never reuse another instance's — two browsers given the same `--remote-debugging-port` leave the loser running CDP-less).
+- **Launching from inside a PID-namespaced sandbox** (a container, bubblewrap, Codex's command sandbox) records the sandbox-local PID in the shared registry. Liveness copes — the identity check disowns the aliased host PID and falls back to attributing the CDP port — but the instance is only reachable from outside while the sandbox shares the host network, and it dies with the sandbox (its virtual display too; the sandbox gets one of its own). Its owner is the sandbox itself, which `status` on the host can still check. Prefer launching on the host; always pick a fresh port (never reuse another instance's — two browsers given the same `--remote-debugging-port` leave the loser running CDP-less).
 - **A site that fails headless but works headed may just be sniffing the User-Agent.** Headless Chrome puts `HeadlessChrome/` in both the `User-Agent` header and `navigator.userAgent`, and some sites return 403 on that string alone. Don't switch to headed -- take the instance's own UA, change that one word, and relaunch headless with it:
   ```bash
   UA=$(chrome-agent <instance> Browser.getVersion | sed -n '/"userAgent"/{s/.*"userAgent": "\([^"]*\)".*/\1/;s/HeadlessChrome/Chrome/;p;}')

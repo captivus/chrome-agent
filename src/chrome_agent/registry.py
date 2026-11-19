@@ -44,6 +44,11 @@ class InstanceInfo:
     user_data_dir: str = ""
     alive: bool = True
     pid_start: str | None = None
+    # The agent session the browser belongs to (see owner.py), or None for
+    # one that runs until stopped.
+    owner: dict | None = None
+    # The X display a just-launched headed browser was put on (launch only).
+    display: str | None = None
 
 
 class InstanceNotFoundError(Exception):
@@ -347,6 +352,7 @@ def register(
     pid_start: str | None = None,
     name_override: str | None = None,
     launch: dict | None = None,
+    owner: dict | None = None,
 ) -> InstanceInfo:
     """Register a new browser instance in the registry.
 
@@ -354,7 +360,7 @@ def register(
     ``name_override`` gives it (a restored session keeps its original name).
     Auto-allocates a port unless port_override is specified. ``launch``
     records how the browser was started, so a saved session can be relaunched
-    the same way.
+    the same way. ``owner`` records the agent session it belongs to.
     """
     path = _resolve_path(registry_path)
     registry = _load_registry(path)
@@ -381,6 +387,8 @@ def register(
     }
     if launch is not None:
         registry[instance_name]["launch"] = launch
+    if owner is not None:
+        registry[instance_name]["owner"] = owner
     _save_registry(registry, path)
 
     logger.info("Registered instance %s on port %d (pid %d)", instance_name, port, pid)
@@ -392,6 +400,7 @@ def register(
         browser_version=browser_version,
         user_data_dir=user_data_dir,
         pid_start=pid_start,
+        owner=owner,
     )
 
 
@@ -429,6 +438,7 @@ def lookup(
         user_data_dir=entry.get("user_data_dir", ""),
         alive=alive,
         pid_start=entry.get("pid_start"),
+        owner=entry.get("owner"),
     )
 
 
@@ -455,6 +465,7 @@ def enumerate_instances(
             user_data_dir=entry.get("user_data_dir", ""),
             alive=alive,
             pid_start=entry.get("pid_start"),
+            owner=entry.get("owner"),
         ))
     return results
 
@@ -473,6 +484,28 @@ def instance_is_alive(info: InstanceInfo) -> bool:
         pid_start=info.pid_start,
         user_data_dir=info.user_data_dir,
     )
+
+
+def set_owner(
+    instance_name: str,
+    owner: dict | None,
+    registry_path: str | None = None,
+) -> dict | None:
+    """Set (or, with None, clear) an instance's owner. Returns the previous one.
+
+    Clearing it is ``chrome-agent keep``: the browser then runs until it is
+    stopped. The supervisor re-reads the owner from the registry on every
+    check, so the change takes effect at once.
+    """
+    path = _resolve_path(registry_path)
+    registry = _load_registry(path)
+    if instance_name not in registry:
+        raise InstanceNotFoundError(name=instance_name, available=list(registry.keys()))
+    previous = registry[instance_name].pop("owner", None)
+    if owner is not None:
+        registry[instance_name]["owner"] = owner
+    _save_registry(registry, path)
+    return previous
 
 
 def registration_status(
