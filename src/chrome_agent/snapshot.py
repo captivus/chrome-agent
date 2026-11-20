@@ -1320,6 +1320,7 @@ def restore_version(
         "windows": len(placed),
         "cookies": len(state.get("cookies", [])),
         "display": virtual["display"] if virtual else (info.display if on_virtual else None),
+        "owner": None if owner is None else {k: v for k, v in owner.items() if k in ("kind", "pid", "session")},
         "subscriptions": subscriptions,
         "warnings": warnings,
     }

@@ -270,7 +270,7 @@ def _print_static_usage() -> None:
     print("  save <instance>... | --all [--stop] [--as NAME]        Snapshot sessions (profile, tabs, cookies)")
     print("  restore [<name[@stamp]>...] [--all] [--any-port]       Bring saved sessions back")
     print("  restore <name[@stamp]> --as NEW                        Bring one back under a new name")
-    print("  restore ... --display virtual|desktop                  Bring it back on a virtual display / your screen")
+    print("  restore ... [--display virtual|desktop] [--keep]       From an agent: virtual display, owned (as launch)")
     print("  snapshots [list|show|rm|export-key|import-key]         Manage saved snapshots")
     print("  guide [--path]                                         Print this tool's agent guide")
     print("  completions <zsh|instances|methods|events> [<instance>]  Shell completion and its data")
@@ -331,6 +331,26 @@ def _default_display() -> str:
     if current and virtual_display_server(current):
         return "desktop"  # i.e. the inherited DISPLAY, already a virtual one
     return "virtual"
+
+
+def _restore_display() -> str | None:
+    """Where a restored headed browser goes when ``--display`` is not given;
+    None means where it was saved.
+
+    The same rule as ``launch``: a restore made by an agent goes on a managed
+    virtual display whatever display the snapshot was saved on -- restore is
+    how agents get logged-in sessions back, so it must not put one on the
+    user's screen either. A person restoring from their own terminal gets
+    the session back where it was saved, as documented.
+    ``CHROME_AGENT_DISPLAY`` overrides both.
+    """
+    from .owner import is_agent_session
+
+    if os.environ.get("CHROME_AGENT_DISPLAY", "").strip() or (
+        sys.platform.startswith("linux") and is_agent_session()
+    ):
+        return _default_display()
+    return None
 
 
 def _parse_display(args: list[str], i: int) -> str:
@@ -906,7 +926,7 @@ def _run_restore(args: list[str]) -> None:
         restore_version,
     )
 
-    restore_all = here = any_port = replace_profile = start_display = False
+    restore_all = here = any_port = replace_profile = start_display = keep = False
     reattach = True
     desktop_mode = None
     display = None
@@ -930,6 +950,8 @@ def _run_restore(args: list[str]) -> None:
         elif arg == "--display":
             display = _parse_display(args, i)
             i += 1
+        elif arg == "--keep":
+            keep = True
         elif arg == "--desktop" and i + 1 < len(args) and args[i + 1] in ("saved", "terminal"):
             desktop_mode = args[i + 1]
             i += 1
@@ -994,13 +1016,22 @@ def _run_restore(args: list[str]) -> None:
     # have been (see desktop.py); windows with no recorded desktop go last.
     versions.sort(key=lambda v: (v.info.get("desktop") is None, v.info.get("desktop") or 0, v.name))
 
+    # Placement and ownership follow the caller, exactly as for launch: an
+    # agent's restore goes on a virtual display and belongs to its session
+    # (--display desktop / --keep say otherwise); a person's comes back
+    # where it was saved and runs until stopped.
+    from .owner import describe, find_owner
+
+    display = display or _restore_display()
+    owner = None if keep else find_owner()
+
     failures = 0
     for version in versions:
         try:
             report = restore_version(
                 version, any_port=any_port, desktop_mode=desktop_mode, reattach=reattach,
                 replace_profile=replace_profile, start_display=start_display,
-                instance_name=new_name, display=display,
+                instance_name=new_name, display=display, owner=owner,
             )
         except (SnapshotError, SnapshotKeyError, RuntimeError, TimeoutError, ConnectionError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
@@ -1010,6 +1041,8 @@ def _run_restore(args: list[str]) -> None:
             on = f", on virtual display {report['display']}" if report.get("display") else ""
             print(f"Restored {report['snapshot']} as {report['name']} on port {report['port']} "
                   f"({report['tabs']} tabs, {report['windows']} window(s), {report['cookies']} cookies{on})")
+            if report.get("owner"):
+                print(f"  owner: {describe(report['owner'])} (stopped when it exits; --keep to keep it)")
             for warning in report["warnings"]:
                 print(f"  warning: {warning}")
             for sub in report["subscriptions"]:

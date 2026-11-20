@@ -252,3 +252,204 @@ def test_move_between_virtual_display_and_desktop(tmp_path, monkeypatch, display
             snapshot.move_instance("vd-move-01", "virtual")
     finally:
         stop(instance_name="vd-move-01")
+
+
+# -- restore: the same placement and ownership rule as launch ----------------
+
+@pytest.fixture
+def snapshots(tmp_path, monkeypatch, display_dir, stand_in_desktop):
+    """A private registry, snapshot store and key; DISPLAY is the stand-in."""
+    import base64
+
+    import chrome_agent.registry as registry
+
+    monkeypatch.setattr(registry, "REGISTRY_PATH", str(tmp_path / "registry.json"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("CHROME_AGENT_SNAPSHOT_KEY", base64.b64encode(os.urandom(32)).decode())
+    monkeypatch.delenv("CHROME_AGENT_DISPLAY", raising=False)
+    names = []
+    yield names
+    for name in names:
+        try:
+            stop(instance_name=name)
+        except Exception:
+            pass
+
+
+def _as_caller(monkeypatch, owner):
+    """Make the CLI see an agent session owned by ``owner`` (a record), or,
+    with None, a person at their own terminal."""
+    monkeypatch.setattr("chrome_agent.owner.is_agent_session", lambda: owner is not None)
+    monkeypatch.setattr("chrome_agent.owner.find_owner", lambda: owner)
+
+
+def _saved(tmp_path, names, name, **launch):
+    """Launch ``name``, save it with --stop, and return nothing: the snapshot
+    is filed under its name in the private store."""
+    from chrome_agent import snapshot
+
+    workdir = tmp_path / name
+    workdir.mkdir(exist_ok=True)
+    asyncio.run(launch_browser(instance_name=name, working_dir=str(workdir), **launch))
+    names.append(name)
+    snapshot.save_instance(snapshot.plan_save(name), stop=True)
+
+
+def _restore(*args):
+    from chrome_agent import cli
+
+    cli._run_restore(args=list(args))
+
+
+def _pid_of(port: int) -> int:
+    import chrome_agent.registry as registry
+
+    for entry in registry._load_registry(registry.REGISTRY_PATH).values():
+        if entry["port"] == port:
+            return entry["pid"]
+    raise AssertionError(f"nothing registered on port {port}")
+
+
+def test_agent_restore_of_a_desktop_snapshot_goes_virtual_and_ends_with_the_agent(
+    tmp_path, monkeypatch, snapshots, stand_in_desktop,
+):
+    """A snapshot saved on the desktop, restored by an agent, comes back on
+    the managed virtual display -- not the desktop -- owned by the agent's
+    session, and is stopped when that session ends."""
+    from chrome_agent import owner as owner_mod
+
+    _saved(tmp_path, snapshots, "rs-desk-01", display="desktop")
+    agent = subprocess.Popen(["sleep", "600"])
+    try:
+        _as_caller(monkeypatch, owner_mod._record(agent.pid, "claude-code"))
+        _restore("rs-desk-01")
+
+        info = lookup(instance_name="rs-desk-01")
+        placement = browser_placements([info.port])[info.port]
+        assert placement["kind"] == "virtual" and placement.get("managed")
+        pid = _pid_of(info.port)
+        assert _wait_for_window(placement["display"], pid) >= 1
+        assert _visible_windows(stand_in_desktop, pid) == 0
+        assert info.owner["pid"] == agent.pid
+    finally:
+        agent.terminate()
+        agent.wait()
+    from chrome_agent.registry import _port_is_listening
+    from chrome_agent.supervisor import OWNER_CHECK_INTERVAL
+
+    deadline = time.monotonic() + OWNER_CHECK_INTERVAL * 4
+    while _port_is_listening(info.port) and time.monotonic() < deadline:
+        time.sleep(0.25)
+    assert not _port_is_listening(info.port), "an agent's restored browser ends with the agent"
+
+
+def test_agent_restore_display_desktop_keep(tmp_path, monkeypatch, snapshots, stand_in_desktop):
+    """--display desktop puts an agent's restore on the screen; --keep leaves
+    it without an owner."""
+    from chrome_agent import owner as owner_mod
+
+    _saved(tmp_path, snapshots, "rs-keep-01", display="desktop")
+    _as_caller(monkeypatch, owner_mod._record(os.getpid(), "claude-code"))
+    _restore("rs-keep-01", "--display", "desktop", "--keep")
+
+    info = lookup(instance_name="rs-keep-01")
+    assert browser_placements([info.port])[info.port]["kind"] == "desktop"
+    assert _wait_for_window(stand_in_desktop, _pid_of(info.port)) >= 1
+    assert info.owner is None
+
+
+def test_person_restores_where_saved_and_agent_restores_virtual(
+    tmp_path, monkeypatch, snapshots, stand_in_desktop,
+):
+    """A person gets a desktop snapshot back on the desktop and a snapshot of
+    a particular Xvfb back on that Xvfb, with no owner. An agent restoring the
+    same Xvfb snapshot gets the managed display; the recorded number plays no
+    part."""
+    from chrome_agent import owner as owner_mod
+
+    _saved(tmp_path, snapshots, "rs-person-01", display="desktop")
+
+    # A virtual display chrome-agent does not manage, as someone started by hand.
+    number = next(n for n in range(150, 170) if vd._number_free(n))
+    hand = subprocess.Popen(["Xvfb", f":{number}", "-screen", "0", "1280x800x24", "-nolisten", "tcp"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 10
+        while not display_running(f":{number}") and time.monotonic() < deadline:
+            time.sleep(0.05)
+        monkeypatch.setenv("DISPLAY", f":{number}")
+        _saved(tmp_path, snapshots, "rs-hand-01", display="desktop")  # i.e. the inherited :number
+        monkeypatch.setenv("DISPLAY", stand_in_desktop)
+
+        _as_caller(monkeypatch, None)
+        _restore("rs-person-01")
+        _restore("rs-hand-01", "--any-port")  # both were saved on the first free port
+        person = lookup(instance_name="rs-person-01")
+        hand_info = lookup(instance_name="rs-hand-01")
+        placements = browser_placements([person.port, hand_info.port])
+        assert placements[person.port] == {"kind": "desktop", "display": stand_in_desktop}
+        assert placements[hand_info.port]["display"] == f":{number}"
+        assert person.owner is None and hand_info.owner is None
+
+        stop(instance_name="rs-hand-01")
+        _as_caller(monkeypatch, owner_mod._record(os.getpid(), "claude-code"))
+        _restore("rs-hand-01", "--any-port")
+        again = lookup(instance_name="rs-hand-01")
+        placement = browser_placements([again.port])[again.port]
+        assert placement.get("managed") and placement["display"] != f":{number}"
+        assert again.owner["pid"] == os.getpid()
+    finally:
+        for name in ("rs-hand-01",):
+            try:
+                stop(instance_name=name)
+            except Exception:
+                pass
+        hand.terminate()
+        hand.wait(timeout=10)
+
+
+def test_agent_restore_all_and_here(tmp_path, monkeypatch, snapshots, stand_in_desktop):
+    """restore --all and bare restore (--here) follow the same rule; a
+    headless snapshot stays headless but is owned all the same."""
+    from chrome_agent import cli
+    from chrome_agent import owner as owner_mod
+
+    for name, launch in (("rs-all-01", {"display": "desktop"}), ("rs-all-02", {"headless": True})):
+        workdir = tmp_path / "batch"
+        workdir.mkdir(exist_ok=True)
+        asyncio.run(launch_browser(instance_name=name, working_dir=str(workdir), **launch))
+        snapshots.append(name)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    cli._run_save(args=["--all", "--stop"])
+
+    record = owner_mod._record(os.getpid(), "claude-code")
+    _as_caller(monkeypatch, record)
+    _restore("--all")
+    first, second = lookup(instance_name="rs-all-01"), lookup(instance_name="rs-all-02")
+    placements = browser_placements([first.port, second.port])
+    assert placements[first.port].get("managed")
+    assert placements[second.port] == {"kind": "headless"}
+    assert first.owner == record and second.owner == record
+    assert _visible_windows(stand_in_desktop, _pid_of(first.port)) == 0
+
+    stop(instance_name="rs-all-01")
+    stop(instance_name="rs-all-02")
+    monkeypatch.chdir(tmp_path / "batch")
+    _restore()  # bare: everything launched from here
+    first = lookup(instance_name="rs-all-01")
+    assert browser_placements([first.port])[first.port].get("managed")
+    assert first.owner == record
+
+
+def test_restore_display_default_follows_the_caller(monkeypatch):
+    from chrome_agent import cli
+
+    monkeypatch.delenv("CHROME_AGENT_DISPLAY", raising=False)
+    monkeypatch.setenv("DISPLAY", ":1")
+    monkeypatch.setattr("chrome_agent.desktop.virtual_display_server", lambda d: None)
+    monkeypatch.setattr("chrome_agent.owner.is_agent_session", lambda: True)
+    assert cli._restore_display() == "virtual"
+    monkeypatch.setattr("chrome_agent.owner.is_agent_session", lambda: False)
+    assert cli._restore_display() is None  # where it was saved
+    monkeypatch.setenv("CHROME_AGENT_DISPLAY", "virtual")
+    assert cli._restore_display() == "virtual"
