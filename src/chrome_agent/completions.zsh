@@ -113,7 +113,8 @@ _chrome-agent() {
         '*:chrome flag (after --):' && ret=0
       ;;
     status)
-      _arguments '1:instance:_chrome_agent_instances' && ret=0
+      _arguments '(1)--unregistered[List chrome-agent browsers missing from the registry]' \
+        '1:instance:_chrome_agent_instances' && ret=0
       ;;
     stop)
       _arguments $target_specs \
@@ -151,7 +152,7 @@ _chrome-agent() {
       _describe -t what 'what to print' what && ret=0
       ;;
     cleanup)
-      ret=0
+      _arguments '--unregistered[Stop chrome-agent browsers missing from the registry]' && ret=0
       ;;
     save)
       _arguments \

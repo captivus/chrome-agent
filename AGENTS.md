@@ -191,7 +191,8 @@ chrome-agent stop --orphans
 chrome-agent keep <instance|glob>
 chrome-agent move <instance> --to desktop|virtual
 chrome-agent help [<instance|glob>] [Domain | Domain.method]
-chrome-agent cleanup
+chrome-agent cleanup [--unregistered]
+chrome-agent status --unregistered
 chrome-agent completions <zsh | instances | methods | events> [<instance>]
 chrome-agent --version
 chrome-agent <instance|glob> Domain.method '{"param": "value"}'
@@ -254,6 +255,8 @@ chrome-agent stop --orphans               # every browser whose owning agent ses
 chrome-agent keep mysite-01               # release it from your session: it runs until stopped
 chrome-agent move mysite-01 --to desktop  # onto the user's screen (and --to virtual to take it off again)
 chrome-agent cleanup                      # drop dead instances + stale session dirs
+chrome-agent status --unregistered        # browsers on chrome-agent profiles that the registry lost
+chrome-agent cleanup --unregistered       # stop those (verified by pid, start time and profile)
 ```
 
 ### Where your browser goes, and how long it lives
@@ -273,7 +276,7 @@ chrome-agent move mysite-01 --to virtual          # ... and off it again when th
 
 **Your browser belongs to your session — launched or restored.** It records your agent session as its **owner**, and is stopped automatically within seconds once that session ends — so a forgotten browser no longer runs for days. (A sub-agent inside your session shares your session's process, so its browsers last until the session ends, not until the sub-agent returns.) `status` shows each browser's owner: `(yours)` marks the ones your session launched, `kept` one with no owner (the user's own, or one deliberately kept), and `ORPHAN` one whose owner exited without it being stopped; `chrome-agent stop --orphans` stops those.
 
-**Still stop what you launched when you are done — the session can last days.** `chrome-agent stop <instance>` (or `chrome-agent stop '<glob>'` to take a whole related set down at once), then **verify with `chrome-agent status`** that the instances you started are gone — the stop's return is not the verification; the status read is. If dead instances or stale session dirs linger, `chrome-agent cleanup`. Keep an instance alive past your session only deliberately — e.g. a login the user wants for later work, or a session the user asked you to bring back for them — with `launch --keep`, `restore --keep` or `chrome-agent keep <instance>`, and say so; never by omission. A restored browser that is stopped with your session loses only what changed since the snapshot (the snapshot itself is untouched); `save` it first if that matters and the user wants it saved. Never stop, keep or move an instance you did not launch or restore unless asked.
+**Still stop what you launched when you are done — the session can last days.** `chrome-agent stop <instance>` (or `chrome-agent stop '<glob>'` to take a whole related set down at once), then **verify with `chrome-agent status`** that the instances you started are gone — the stop's return is not the verification; the status read is. If dead instances or stale session dirs linger, `chrome-agent cleanup`. Keep an instance alive past your session only deliberately — e.g. a login the user wants for later work, or a session the user asked you to bring back for them — with `launch --keep`, `restore --keep` or `chrome-agent keep <instance>`, and say so; never by omission. A restored browser that is stopped with your session loses only what changed since the snapshot (the snapshot itself is untouched); `save` it first if that matters and the user wants it saved. Never stop, keep or move an instance you did not launch or restore unless asked. `cleanup --unregistered` stops browsers that are not yours (every chrome-agent browser missing from the registry, whoever launched it, including a test run's that keeps its own registry file): run it only when the user asks; `status` notes when there are any.
 
 Headed launches are marked (colored border + `🤖 <instance>` title prefix) so a human can tell an agent-driven window from their own; `--no-window-border` disables it. Closing a headed window **auto-retires** its instance from the registry in real time (a transient CDP drop does not); `status` is real-time truth (port-based liveness). On Linux/X11 a window on the user's screen is pinned to the launching terminal's desktop (needs `xdotool`).
 

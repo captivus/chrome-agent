@@ -260,6 +260,7 @@ def _print_static_usage() -> None:
     print("  launch [--display virtual|desktop] [--keep] [--headless] [--port PORT]")
     print("         [--fingerprint PATH] [--no-window-border] [-- CHROME_ARGS]       Launch Chrome")
     print("  status [<instance>]                                    List instances: display, owner, tabs")
+    print("  status --unregistered                                  List chrome-agent browsers missing from the registry")
     print("  attach <instance> [+Event ...] [TARGET]                Attach for events")
     print("  help [<instance>] [Domain | Domain.method]             Protocol discovery")
     print("  stop <instance> [TARGET]                               Stop a browser, or close one tab")
@@ -267,6 +268,7 @@ def _print_static_usage() -> None:
     print("  keep <instance>                                        Release from its agent session: runs until stopped")
     print("  move <instance> --to desktop|virtual                   Move a browser between your screen and a virtual display")
     print("  cleanup                                                Remove stale instances")
+    print("  cleanup --unregistered                                 Stop chrome-agent browsers missing from the registry")
     print("  save <instance>... | --all [--stop] [--as NAME]        Snapshot sessions (profile, tabs, cookies)")
     print("  restore [<name[@stamp]>...] [--all] [--any-port]       Bring saved sessions back")
     print("  restore <name[@stamp]> --as NEW                        Bring one back under a new name")
@@ -457,6 +459,20 @@ def _run_status(args: list[str]) -> None:
         get_instance_status,
     )
     from .registry import InstanceNotFoundError
+    from .unregistered import describe, find_unregistered
+
+    if "--unregistered" in args:
+        found = find_unregistered()
+        if not sys.stdout.isatty():
+            print(json.dumps([b.to_dict() for b in found], indent=2))
+        elif not found:
+            print("No unregistered chrome-agent browsers")
+        else:
+            print(f"{len(found)} chrome-agent browser(s) not in the registry:")
+            for browser in found:
+                print(f"  {describe(browser)}")
+            print("Stop them with: chrome-agent cleanup --unregistered")
+        return
 
     instance_name = args[0] if args else None
 
@@ -466,14 +482,28 @@ def _run_status(args: list[str]) -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    # Browsers chrome-agent launched that fell out of the registry: invisible
+    # below, unreachable by name, and never stopped with an owner. Reported as
+    # a note (on stderr, so the JSON on stdout keeps its shape).
+    unregistered = find_unregistered() if instance_name is None else []
+    note = (
+        f"Note: {len(unregistered)} chrome-agent browser(s) are running but not in the registry "
+        f"(see chrome-agent status --unregistered; stop with chrome-agent cleanup --unregistered)"
+        if unregistered else None
+    )
+
     if not statuses and instance_name is None:
         print("No instances registered. Launch one with: chrome-agent launch")
+        if note:
+            print(note, file=sys.stderr)
         return
 
     if sys.stdout.isatty():
         print(format_status_text(statuses))
     else:
         print(format_status_json(statuses))
+    if note:
+        print(note, file=sys.stderr)
 
 
 async def _run_attach(args: list[str], target_spec: str | None, target_by: str | None) -> None:
@@ -683,6 +713,34 @@ def _stop_orphans() -> None:
         sys.exit(1)
 
 
+def _stop_unregistered() -> None:
+    """Stop every browser on a chrome-agent profile that the registry lacks.
+
+    Each is verified again (pid, start time, profile) right before it is
+    signalled; its stale supervisors are stopped first, then the browser,
+    then its profile directory is removed.
+    """
+    from .unregistered import describe, find_unregistered, stop_unregistered
+
+    found = find_unregistered()
+    if not found:
+        print("No unregistered chrome-agent browsers")
+        return
+    print(f"Stopping {len(found)} chrome-agent browser(s) not in the registry:")
+    failures = 0
+    for browser in found:
+        print(f"  {describe(browser)}")
+        try:
+            message = stop_unregistered(browser)
+        except Exception as exc:
+            message = f"Error: {exc}"
+        print(f"    {message}")
+        if not message.startswith("Stopped"):
+            failures += 1
+    if failures:
+        sys.exit(1)
+
+
 def _run_keep(args: list[str]) -> None:
     """Release instances from their agent session, so they run until stopped."""
     from .owner import describe
@@ -746,10 +804,22 @@ def _run_move(args: list[str]) -> None:
                           **{k: v for k, v in report.items() if k != "snapshot"}}))
 
 
-def _run_cleanup() -> None:
-    """Clean up stale instances and session directories."""
+def _run_cleanup(args: list[str] | None = None) -> None:
+    """Clean up stale instances and session directories.
+
+    ``--unregistered`` instead stops the browsers running on chrome-agent
+    profiles that are missing from the registry (see unregistered.py).
+    """
     from .launcher import cleanup_sessions
     from .virtual_display import rearm_keepers
+
+    args = args or []
+    if args == ["--unregistered"]:
+        _stop_unregistered()
+        return
+    if args:
+        print("Usage: chrome-agent cleanup [--unregistered]", file=sys.stderr)
+        sys.exit(1)
 
     removed = cleanup_sessions()
     if removed:
@@ -1334,7 +1404,7 @@ def main() -> None:
         elif command == "stop":
             _run_stop(args=rest, target_spec=target_spec, target_by=target_by)
         elif command == "cleanup":
-            _run_cleanup()
+            _run_cleanup(args=rest)
         elif command == "guide":
             _print_guide(args=rest)
         elif command == "completions":
