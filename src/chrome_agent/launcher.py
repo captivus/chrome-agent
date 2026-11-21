@@ -360,6 +360,7 @@ async def launch_browser(
             registry_path=_resolve_path(registry_path),
             draw_border=draw_border and not headless,
             user_data_dir=session_dir,
+            owner=owner,
         )
 
     return instance_info

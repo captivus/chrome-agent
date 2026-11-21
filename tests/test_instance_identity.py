@@ -190,3 +190,112 @@ def test_concurrent_registry_saves_do_not_collide(tmp_path):
     [t.join() for t in threads]
     assert errors == []
     assert list(tmp_path.iterdir()) == [tmp_path / "registry.json"]
+
+
+# ---------------------------------------------------------------------------
+# A browser whose registry entry was lost is still stopped with its owner
+# ---------------------------------------------------------------------------
+
+MINE = "/tmp/chrome-agent/session-mine"
+OWNER = {"kind": "process", "pid": 4242}
+
+
+def _owner_dead(monkeypatch, dead=True):
+    monkeypatch.setattr("chrome_agent.owner.owner_alive", lambda owner: not dead)
+
+
+def test_check_owner_follows_its_entry_and_remembers(monkeypatch, tmp_path):
+    from chrome_agent.supervisor import check_owner
+
+    _owner_dead(monkeypatch)
+    reg = tmp_path / "registry.json"
+    _write_registry(reg, "x-01", MINE, owner=OWNER)
+    memory = {"owner": None}
+    assert check_owner("x-01", str(reg), MINE, memory) == (True, True)
+    assert memory["owner"] == OWNER
+    # The entry is lost: the remembered owner still decides.
+    reg.write_text("{}")
+    assert check_owner("x-01", str(reg), MINE, memory) == (True, False)
+    # The name now belongs to another browser: still our remembered owner.
+    _write_registry(reg, "x-01", "/tmp/chrome-agent/session-newer")
+    assert check_owner("x-01", str(reg), MINE, memory) == (True, False)
+
+
+def test_check_owner_respects_keep(monkeypatch, tmp_path):
+    """`keep` clears the owner; losing the entry afterwards must not bring it back."""
+    from chrome_agent.supervisor import check_owner
+
+    _owner_dead(monkeypatch)
+    reg = tmp_path / "registry.json"
+    _write_registry(reg, "x-01", MINE, owner=None)
+    memory = {"owner": OWNER}  # seeded at launch
+    assert check_owner("x-01", str(reg), MINE, memory) == (False, True)
+    reg.write_text("{}")
+    assert check_owner("x-01", str(reg), MINE, memory) == (False, False)
+
+
+def test_check_owner_legacy_supervisor_never_falls_back(monkeypatch, tmp_path):
+    from chrome_agent.supervisor import check_owner
+
+    _owner_dead(monkeypatch)
+    reg = tmp_path / "registry.json"
+    reg.write_text("{}")
+    assert check_owner("x-01", str(reg), None, {"owner": OWNER}) == (False, False)
+
+
+class _FakeCDP:
+    def __init__(self, ws_url):
+        self._connected = False
+        self.sent = []
+
+    async def connect(self):
+        self._connected = True
+
+    async def send(self, method, params=None, session_id=None):
+        self.sent.append(method)
+        if method == "Browser.close":
+            self._connected = False
+        return {}
+
+    def on(self, event, callback):
+        pass
+
+    async def close(self):
+        self._connected = False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry_ours", [False, True])
+async def test_owner_gone_stops_the_browser_with_or_without_entry(monkeypatch, entry_ours):
+    made = []
+
+    def fake_cdp(ws_url):
+        made.append(_FakeCDP(ws_url))
+        return made[-1]
+
+    stopped = []
+    monkeypatch.setattr(supervisor_mod, "CDPClient", fake_cdp)
+    monkeypatch.setattr(supervisor_mod, "get_ws_url", lambda **_: "ws://x")
+    monkeypatch.setattr(registry_mod, "port_listener_profile", lambda port: MINE)
+    monkeypatch.setattr(supervisor_mod, "OWNER_CHECK_INTERVAL", 0.0)
+    monkeypatch.setattr(supervisor_mod, "check_owner", lambda *a: (True, entry_ours))
+    monkeypatch.setattr(supervisor_mod, "_record_owner_stop", lambda *a: None)
+    monkeypatch.setattr(registry_mod, "stop", lambda **kw: stopped.append(kw["instance_name"]))
+
+    await asyncio.wait_for(_supervise_connection(
+        port=9222, draw_border=False, source=None, name="x-01", user_data_dir=MINE,
+    ), timeout=10)
+    if entry_ours:
+        assert stopped == ["x-01"] and "Browser.close" not in made[0].sent
+    else:
+        assert stopped == [] and made[0].sent == ["Browser.close"]
+
+
+def test_spawn_passes_profile_and_owner(monkeypatch):
+    calls = []
+    monkeypatch.setattr(supervisor_mod.subprocess, "Popen", lambda argv, **kw: calls.append(argv))
+    supervisor_mod.spawn_supervisor(
+        port=9222, name="x-01", registry_path="/r.json", draw_border=True,
+        user_data_dir=MINE, owner=OWNER,
+    )
+    assert calls[0][-2:] == [MINE, json.dumps(OWNER, separators=(",", ":"))]
