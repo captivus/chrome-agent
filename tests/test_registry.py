@@ -581,3 +581,45 @@ def test_resolve_single_rejects_several_matches_listing_them(tmp_path):
 
     assert exc_info.value.matches == ["mysite-01", "mysite-02"]
     assert "mysite-01, mysite-02" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Concurrent writers (2026-11-21: live browsers fell out of the registry)
+# ---------------------------------------------------------------------------
+
+
+def _register_many(registry_path: str, worker: int, count: int) -> None:
+    from chrome_agent.registry import register
+
+    for i in range(count):
+        register(
+            working_dir="/work/samefolder", pid=100000 + worker * 100 + i,
+            browser_version="test", user_data_dir=f"/tmp/x/session-{worker}-{i}",
+            port_override=20000 + worker * 100 + i, registry_path=registry_path,
+        )
+
+
+def test_concurrent_registers_lose_nothing_and_reuse_no_name(tmp_path):
+    """Read-modify-write without a lock dropped entries and handed one name
+    to several browsers ("prompthub-01" three times over)."""
+    import json
+    import multiprocessing
+
+    path = str(tmp_path / "registry.json")
+    ctx = multiprocessing.get_context("fork")
+    procs = [ctx.Process(target=_register_many, args=(path, w, 10)) for w in range(6)]
+    [p.start() for p in procs]
+    [p.join() for p in procs]
+    assert all(p.exitcode == 0 for p in procs)
+    data = json.loads((tmp_path / "registry.json").read_text())
+    assert len(data) == 60
+    assert len({e["user_data_dir"] for e in data.values()}) == 60
+
+
+def test_registry_lock_is_reentrant(tmp_path):
+    from chrome_agent.registry import _registry_lock, set_owner
+
+    path = str(tmp_path / "registry.json")
+    _register_many(path, 0, 1)
+    with _registry_lock(path):
+        set_owner("samefolder-01", {"kind": "process", "pid": 1}, registry_path=path)

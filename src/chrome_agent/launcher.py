@@ -166,18 +166,6 @@ async def launch_browser(
         from .virtual_display import acquire_display
         virtual_display = acquire_display()
 
-    # Prune truly-dead instances first (fallback for browsers whose supervisor
-    # was killed, and for headless instances which have no supervisor), and
-    # sweep any orphaned session directories (e.g. a browser that held its
-    # profile files past the supervisor's removal window). With the pid-OR-port
-    # liveness check and the SingletonLock pid check, this only removes
-    # genuinely-gone browsers, and it frees their names/ports for reuse.
-    # A restore's pre-extracted profile is not registered yet and carries no
-    # SingletonLock, so the orphan sweep must be told to leave it alone.
-    cleanup_sessions(
-        registry_path=registry_path,
-        keep={profile_dir} if profile_dir is not None else None,
-    )
 
     # Phases 2-5 hold the launch lock: from choosing a port until our Chrome
     # serves it. Concurrent launches (parallel test workers, several agents)
@@ -187,6 +175,21 @@ async def launch_browser(
     # -- two labellers on one tab, the runaway title loop of 2026-11-21.
     lock_fd = await _acquire_launch_lock()
     try:
+        # Prune truly-dead instances first (fallback for browsers whose supervisor
+        # was killed, and for headless instances which have no supervisor), and
+        # sweep any orphaned session directories (e.g. a browser that held its
+        # profile files past the supervisor's removal window). With the pid-OR-port
+        # liveness check and the SingletonLock pid check, this only removes
+        # genuinely-gone browsers, and it frees their names/ports for reuse.
+        # A restore's pre-extracted profile is not registered yet and carries no
+        # SingletonLock, so the orphan sweep must be told to leave it alone.
+        # It runs under the launch lock: a concurrent launch's fresh profile has
+        # no SingletonLock until its Chrome starts, and the sweep deleted it.
+        cleanup_sessions(
+            registry_path=registry_path,
+            keep={profile_dir} if profile_dir is not None else None,
+        )
+
         # Phase 2: Allocate port
         if port_override is not None:
             port = port_override
