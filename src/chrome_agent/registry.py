@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import socket
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -185,10 +186,23 @@ def _load_registry(registry_path: str) -> dict:
 def _save_registry(registry: dict, registry_path: str) -> None:
     """Save the registry atomically via temp-file-and-rename."""
     os.makedirs(os.path.dirname(registry_path), exist_ok=True)
-    tmp_path = registry_path + ".tmp"
-    with open(tmp_path, "w") as f:
-        json.dump(registry, f, indent=2)
-    os.rename(tmp_path, registry_path)
+    # A temp file of its own: concurrent launches each save, and a shared
+    # name let one rename the other's file away (FileNotFoundError).
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=os.path.basename(registry_path) + ".", suffix=".tmp",
+        dir=os.path.dirname(registry_path),
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(registry, f, indent=2)
+        os.chmod(tmp_path, 0o664)
+        os.rename(tmp_path, registry_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _port_is_listening(port: int) -> bool:
@@ -248,6 +262,71 @@ def _cdp_port_claimants(port: int) -> set[str]:
         else:
             claimants.add("")
     return claimants
+
+
+def _listening_inodes(port: int) -> set[str]:
+    """Socket inodes of the IPv4 loopback/any LISTEN sockets on ``port``.
+
+    chrome-agent reaches a browser at ``localhost``, which resolves to
+    127.0.0.1, so only the IPv4 listener matters: a browser that lost the
+    bind for 127.0.0.1 falls back to [::1] and is unreachable here.
+    """
+    inodes: set[str] = set()
+    want = f"{port:04X}"
+    try:
+        with open("/proc/net/tcp") as f:
+            next(f, None)
+            for line in f:
+                fields = line.split()
+                if len(fields) < 10 or fields[3] != "0A":  # 0A = LISTEN
+                    continue
+                addr, _, lport = fields[1].partition(":")
+                if lport == want and addr in ("0100007F", "00000000"):
+                    inodes.add(fields[9])
+    except OSError:
+        pass
+    return inodes
+
+
+def port_listener_profile(port: int) -> str | None:
+    """The ``--user-data-dir`` of the browser serving CDP on ``port``.
+
+    Finds the process that holds the listening socket (not merely one that
+    names the port on its command line: two browsers given the same port
+    both claim it, and only one serves it). Returns None when this cannot
+    be told (non-Linux, no listener, or the holder is not readable) -- callers
+    treat None as "unknown", never as "someone else's".
+    """
+    inodes = _listening_inodes(port)
+    if not inodes:
+        return None
+    targets = {f"socket:[{i}]" for i in inodes}
+    needle = f"--remote-debugging-port={port}"
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                tokens = f.read().replace(b"\0", b" ").decode(errors="replace").split()
+            if needle not in tokens or any(t.startswith("--type=") for t in tokens):
+                continue
+            fds = os.listdir(f"/proc/{entry}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink(f"/proc/{entry}/fd/{fd}") in targets:
+                    for token in tokens:
+                        if token.startswith("--user-data-dir="):
+                            return token.split("=", 1)[1]
+                    return ""
+            except OSError:
+                continue
+    return None
 
 
 def _instance_is_alive(

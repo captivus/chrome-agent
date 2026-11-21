@@ -23,6 +23,43 @@ logger = logging.getLogger(__name__)
 
 _SESSION_ROOT = "/tmp/chrome-agent"
 
+# Seconds a launch waits for another launch to get its browser up before going
+# ahead without the lock (a launch holds it for at most its 30 s start timeout).
+_LAUNCH_LOCK_WAIT = 45.0
+
+
+async def _acquire_launch_lock() -> int | None:
+    """Take the launch lock (a lock file in the session root); None if it
+    cannot be had (no fcntl, unwritable root, or the wait ran out)."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    try:
+        os.makedirs(_SESSION_ROOT, exist_ok=True)
+        fd = os.open(os.path.join(_SESSION_ROOT, "launch.lock"), os.O_RDWR | os.O_CREAT, 0o664)
+    except OSError:
+        return None
+    deadline = asyncio.get_event_loop().time() + _LAUNCH_LOCK_WAIT
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError:
+            if asyncio.get_event_loop().time() >= deadline:
+                logger.warning("Launch lock still held after %.0fs; launching without it", _LAUNCH_LOCK_WAIT)
+                os.close(fd)
+                return None
+            await asyncio.sleep(0.1)
+        except OSError:
+            os.close(fd)
+            return None
+
+
+def _release_launch_lock(fd: int | None) -> None:
+    if fd is not None:
+        os.close(fd)  # closing the descriptor releases the flock
+
 
 class BrowserNotFoundError(Exception):
     """Chrome/Chromium binary not found on the system."""
@@ -142,113 +179,137 @@ async def launch_browser(
         keep={profile_dir} if profile_dir is not None else None,
     )
 
-    # Phase 2: Allocate port
-    if port_override is not None:
-        port = port_override
-    else:
-        reg_path = _resolve_path(registry_path)
-        registry_data = _load_registry(reg_path)
-        # Keep clear of the ports the last `save --all` batch will be restored
-        # onto, so a fresh launch after a reboot does not take one first.
-        from .snapshot import reserved_ports
-        port = allocate_port(registry=registry_data, reserved=reserved_ports())
+    # Phases 2-5 hold the launch lock: from choosing a port until our Chrome
+    # serves it. Concurrent launches (parallel test workers, several agents)
+    # otherwise all chose the same free port; the losers' Chrome fell back to
+    # [::1], out of reach, while their launch saw the winner's port answer,
+    # registered it as theirs and started a second supervisor on the winner
+    # -- two labellers on one tab, the runaway title loop of 2026-11-21.
+    lock_fd = await _acquire_launch_lock()
+    try:
+        # Phase 2: Allocate port
+        if port_override is not None:
+            port = port_override
+        else:
+            reg_path = _resolve_path(registry_path)
+            registry_data = _load_registry(reg_path)
+            # Keep clear of the ports the last `save --all` batch will be restored
+            # onto, so a fresh launch after a reboot does not take one first.
+            from .snapshot import reserved_ports
+            port = allocate_port(registry=registry_data, reserved=reserved_ports())
 
-    # Phase 3: Prepare launch arguments
-    os.makedirs(_SESSION_ROOT, exist_ok=True)
-    if profile_dir is not None:
-        session_dir = profile_dir
-    else:
-        session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
+        # Phase 3: Prepare launch arguments
+        os.makedirs(_SESSION_ROOT, exist_ok=True)
+        if profile_dir is not None:
+            session_dir = profile_dir
+        else:
+            session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
 
-        # Write Chrome preferences to disable password save prompts
-        default_dir = os.path.join(session_dir, "Default")
-        os.makedirs(default_dir, exist_ok=True)
-        prefs = {
-            "credentials_enable_service": False,
-            "profile": {
-                "password_manager_enabled": False,
-            },
+            # Write Chrome preferences to disable password save prompts
+            default_dir = os.path.join(session_dir, "Default")
+            os.makedirs(default_dir, exist_ok=True)
+            prefs = {
+                "credentials_enable_service": False,
+                "profile": {
+                    "password_manager_enabled": False,
+                },
+            }
+            with open(os.path.join(default_dir, "Preferences"), "w") as f:
+                json.dump(prefs, f)
+
+        args = [
+            binary,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={session_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--password-store=basic",
+        ]
+        if headless:
+            args.append("--headless=new")
+        if extra_args:
+            args.extend(extra_args)
+
+        # Apply fingerprint via Chrome command-line flags (persistent)
+        env = os.environ.copy()
+        env.update(env_overrides or {})
+        fp_profile = None
+        if fingerprint is not None:
+            from .fingerprint import load_fingerprint
+            fp_profile = load_fingerprint(path=fingerprint)
+            args.append(f"--user-agent={fp_profile.user_agent}")
+            args.append(f"--window-size={fp_profile.viewport['width']},{fp_profile.viewport['height']}")
+            args.append(f"--lang={fp_profile.locale}")
+            env["TZ"] = fp_profile.timezone
+
+        # What a saved session needs to relaunch this browser the same way: the
+        # Chrome flags beyond the fixed base (fingerprint flags resolved, so a
+        # moved or edited fingerprint file cannot change a restore), the env it
+        # set, and whether the border was drawn.
+        draw_border = window_border and fp_profile is None
+        launch_record = {
+            "headless": headless,
+            "chrome_args": [a for a in args[6:] if a != "--headless=new"],
+            "env": {"TZ": env["TZ"]} if fp_profile is not None else dict(env_overrides or {}),
+            "window_border": draw_border,
         }
-        with open(os.path.join(default_dir, "Preferences"), "w") as f:
-            json.dump(prefs, f)
 
-    args = [
-        binary,
-        f"--remote-debugging-port={port}",
-        f"--user-data-dir={session_dir}",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--password-store=basic",
-    ]
-    if headless:
-        args.append("--headless=new")
-    if extra_args:
-        args.extend(extra_args)
+        if virtual_display is not None:
+            env["DISPLAY"] = virtual_display
+            # On a Wayland desktop Chrome would otherwise open on the compositor
+            # -- the user's screen -- whatever DISPLAY says. Not recorded in the
+            # launch record: a move back to the desktop must not inherit it.
+            env.pop("WAYLAND_DISPLAY", None)
+            args.append("--ozone-platform=x11")
 
-    # Apply fingerprint via Chrome command-line flags (persistent)
-    env = os.environ.copy()
-    env.update(env_overrides or {})
-    fp_profile = None
-    if fingerprint is not None:
-        from .fingerprint import load_fingerprint
-        fp_profile = load_fingerprint(path=fingerprint)
-        args.append(f"--user-agent={fp_profile.user_agent}")
-        args.append(f"--window-size={fp_profile.viewport['width']},{fp_profile.viewport['height']}")
-        args.append(f"--lang={fp_profile.locale}")
-        env["TZ"] = fp_profile.timezone
+        # Phase 4: Launch subprocess
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        # Capture the process's start-time identity token immediately, while the
+        # PID is guaranteed to still be this process (wrapper installs can exit
+        # fast). (pid, pid_start) lets liveness checks detect PID recycling.
+        pid_start = process_start_time(pid=process.pid)
+        logger.info("Launched Chrome PID %d on port %d", process.pid, port)
 
-    # What a saved session needs to relaunch this browser the same way: the
-    # Chrome flags beyond the fixed base (fingerprint flags resolved, so a
-    # moved or edited fingerprint file cannot change a restore), the env it
-    # set, and whether the border was drawn.
-    draw_border = window_border and fp_profile is None
-    launch_record = {
-        "headless": headless,
-        "chrome_args": [a for a in args[6:] if a != "--headless=new"],
-        "env": {"TZ": env["TZ"]} if fp_profile is not None else dict(env_overrides or {}),
-        "window_border": draw_border,
-    }
+        # Phase 5: Wait for CDP port to be ready
+        deadline = asyncio.get_event_loop().time() + 30.0
+        status = None
+        while asyncio.get_event_loop().time() < deadline:
+            # Check if process died
+            if process.poll() is not None:
+                stderr_output = process.stderr.read().decode(errors="replace") if process.stderr else ""
+                raise RuntimeError(
+                    f"Chrome exited immediately with code {process.returncode}. "
+                    f"stderr: {stderr_output[:500]}"
+                )
+            status = check_cdp_port(port=port)
+            if status.listening:
+                break
+            await asyncio.sleep(0.2)
+        else:
+            # Timeout -- kill the process and fail
+            process.kill()
+            raise TimeoutError("Browser did not start within 30 seconds")
 
-    if virtual_display is not None:
-        env["DISPLAY"] = virtual_display
-        # On a Wayland desktop Chrome would otherwise open on the compositor
-        # -- the user's screen -- whatever DISPLAY says. Not recorded in the
-        # launch record: a move back to the desktop must not inherit it.
-        env.pop("WAYLAND_DISPLAY", None)
-        args.append("--ozone-platform=x11")
-
-    # Phase 4: Launch subprocess
-    process = subprocess.Popen(
-        args,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        env=env,
-    )
-    # Capture the process's start-time identity token immediately, while the
-    # PID is guaranteed to still be this process (wrapper installs can exit
-    # fast). (pid, pid_start) lets liveness checks detect PID recycling.
-    pid_start = process_start_time(pid=process.pid)
-    logger.info("Launched Chrome PID %d on port %d", process.pid, port)
-
-    # Phase 5: Wait for CDP port to be ready
-    deadline = asyncio.get_event_loop().time() + 30.0
-    status = None
-    while asyncio.get_event_loop().time() < deadline:
-        # Check if process died
-        if process.poll() is not None:
-            stderr_output = process.stderr.read().decode(errors="replace") if process.stderr else ""
+        # The port answering is not proof it is OUR Chrome answering (a port
+        # given with --port, or a launch by an older chrome-agent without the
+        # lock). Refuse to register another browser's port as ours.
+        from .registry import port_listener_profile
+        holder = port_listener_profile(port)
+        if holder is not None and holder != session_dir:
+            process.kill()
+            if profile_dir is None:
+                shutil.rmtree(session_dir, ignore_errors=True)
             raise RuntimeError(
-                f"Chrome exited immediately with code {process.returncode}. "
-                f"stderr: {stderr_output[:500]}"
+                f"Port {port} is served by a different browser ({holder or 'unknown profile'}); "
+                f"this launch's Chrome could not take it. Launch again without --port, or pick a free port."
             )
-        status = check_cdp_port(port=port)
-        if status.listening:
-            break
-        await asyncio.sleep(0.2)
-    else:
-        # Timeout -- kill the process and fail
-        process.kill()
-        raise TimeoutError("Browser did not start within 30 seconds")
+    finally:
+        _release_launch_lock(lock_fd)
 
     # Phase 6: Pin to desktop (Linux/X11, best-effort)
     # (Not for a browser sent to another display -- a restored one on a
@@ -295,6 +356,7 @@ async def launch_browser(
             name=instance_info.name,
             registry_path=_resolve_path(registry_path),
             draw_border=draw_border and not headless,
+            user_data_dir=session_dir,
         )
 
     return instance_info

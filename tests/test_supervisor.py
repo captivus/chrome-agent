@@ -63,8 +63,9 @@ def test_build_overlay_script_is_self_contained_iife():
     assert script.rstrip().endswith("})();")
     # closed shadow DOM keeps the border markup out of the page's reach
     assert "attachShadow" in script and "closed" in script
-    # idempotent title prefixing (re-applies, never double-prefixes)
-    assert "indexOf(PREFIX)" in script
+    # idempotent title prefixing: never labels an already-labelled title
+    # (ours or another instance's); behaviour is covered in test_instance_identity
+    assert "indexOf(MARK)" in script
 
 
 def test_build_overlay_script_escapes_quotes_in_name():
@@ -115,7 +116,7 @@ async def test_supervisor_reconnects_on_transient_drop_not_retire(monkeypatch):
     # Second drop: browser gone (-> retire and exit).
     gone_sequence = iter([False, True])
 
-    async def fake_browser_gone(port):
+    async def fake_browser_gone(port, user_data_dir=None):
         return next(gone_sequence)
 
     deregistered = {}
