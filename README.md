@@ -9,7 +9,7 @@ A CLI tool that gives AI coding agents the ability to observe and interact with 
 
 Multiple agents and humans can share the same browser simultaneously, each with isolated event subscriptions. One agent drives while another observes network traffic. A human browses while an agent watches for errors. Four agents run a coordinated test suite against a single browser. Each participant sees only the events they subscribed to -- no interference.
 
-**I teach a live course on this:** [Building AI Agents for the Web](https://agentsfortheweb.com/?c=now-a-course-readme). Next free live lesson, Tuesday, November 24: [Find the hidden API behind any web app](https://agentsfortheweb.com/live/?c=now-a-course-readme).
+**I teach a live course on this:** [Building AI Agents for the Web](https://agentsfortheweb.com/?c=now-a-course-readme). Next free live lesson, Tuesday, December 15: [Find the hidden API behind any web app](https://agentsfortheweb.com/live/?c=now-a-course-readme).
 
 <h3 align="center">Used by engineers at</h3>
 
